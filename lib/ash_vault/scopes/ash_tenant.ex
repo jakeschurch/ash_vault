@@ -2,8 +2,15 @@ defmodule AshVault.Scopes.AshTenant do
   @moduledoc """
   Scopes encryption keys to the Ash tenant of the operation.
 
-  The tenant is read from the `:tenant` key of `context.ash_context` and normalised to a
-  stable binary by `to_scope_key/1`:
+  `context.ash_context` is the raw Ash context — an `Ash.Resource.Change.Context`, an
+  `Ash.Resource.Calculation.Context`, or a plain map. The tenant is looked up in order:
+
+    1. the top-level `:tenant` field, which is where both Ash context structs carry it
+    2. `source_context[:tenant]`, for contexts whose tenant only reached the source context
+
+  The first non-nil wins. No specific struct module is ever required.
+
+  The tenant is then normalised to a stable binary by `to_scope_key/1`:
 
     * a binary is used as-is
     * an atom or integer is stringified
@@ -73,6 +80,13 @@ defmodule AshVault.Scopes.AshTenant do
           )
   end
 
-  defp tenant(%Context{ash_context: %{tenant: tenant}}), do: tenant
+  defp tenant(%Context{ash_context: ash_context})
+       when is_map(ash_context) do
+    case Map.get(ash_context, :tenant) do
+      nil -> get_in(ash_context, [Access.key(:source_context, %{}), :tenant])
+      tenant -> tenant
+    end
+  end
+
   defp tenant(%Context{}), do: nil
 end

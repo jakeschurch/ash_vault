@@ -161,8 +161,14 @@ defmodule AshVault.Vault.Runtime do
 
   defp current_key!(provider, scope, ctx) do
     case provider.current_key(scope) do
-      {:ok, key_info} -> key_info
-      {:error, reason} -> raise map_provider_error(reason, scope, ctx)
+      {:ok, key_info} ->
+        key_info
+
+      {:error, reason} ->
+        case map_provider_error(reason, scope, ctx) do
+          %ProviderUnavailable{} = error -> raise %{error | provider: provider}
+          error -> raise error
+        end
     end
   end
 

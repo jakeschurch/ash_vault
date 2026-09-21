@@ -8,9 +8,9 @@ defmodule AshVault.Cipher do
   `fetch/1`, so the cipher a value was encrypted with is always the cipher used to
   decrypt it — even if the vault has since been configured with a different default.
 
-  Additional ciphers can be registered:
+  Additional ciphers can be registered (binary-keyed, like the built-ins):
 
-      config :ash_vault, :ciphers, %{my_cipher_v1: MyApp.Ciphers.Custom}
+      config :ash_vault, :ciphers, %{"my_cipher_v1" => MyApp.Ciphers.Custom}
   """
 
   alias AshVault.Errors.UnsupportedCipher
@@ -31,24 +31,25 @@ defmodule AshVault.Cipher do
   @callback decrypt(payload(), key :: binary(), aad :: binary()) ::
               {:ok, binary()} | {:error, term()}
 
-  @builtin %{aes_256_gcm_v1: AshVault.Ciphers.AES.GCM}
+  @builtin %{"aes_256_gcm_v1" => AshVault.Ciphers.AES.GCM}
 
   @doc """
   Look up a cipher module by id.
 
-  Accepts either an atom id or the binary id stored in an envelope. Binary ids are
-  matched against the known ids by string comparison — untrusted input is never turned
-  into an atom.
+  The registry is keyed by the binary id, which is exactly what the envelope stores, so
+  the encode and decode directions cannot drift. An atom id is converted with
+  `Atom.to_string/1`; untrusted input is never turned into an atom.
 
   ## Examples
 
-      iex> AshVault.Cipher.fetch(:aes_256_gcm_v1)
-      {:ok, AshVault.Ciphers.AES.GCM}
+      AshVault.Cipher.fetch(:aes_256_gcm_v1)
+      #=> {:ok, AshVault.Ciphers.AES.GCM}
 
-      iex> AshVault.Cipher.fetch("aes_256_gcm_v1")
-      {:ok, AshVault.Ciphers.AES.GCM}
+      AshVault.Cipher.fetch("aes_256_gcm_v1")
+      #=> {:ok, AshVault.Ciphers.AES.GCM}
 
-      iex> {:error, %AshVault.Errors.UnsupportedCipher{}} = AshVault.Cipher.fetch("nope")
+      AshVault.Cipher.fetch("nope")
+      #=> {:error, %AshVault.Errors.UnsupportedCipher{cipher_id: "nope"}}
 
   """
   @spec fetch(atom() | binary()) :: {:ok, module()} | {:error, UnsupportedCipher.t()}
@@ -57,9 +58,9 @@ defmodule AshVault.Cipher do
   end
 
   def fetch(id) when is_binary(id) do
-    case Enum.find(registry(), fn {key, _module} -> key == id end) do
-      {_key, module} -> {:ok, module}
-      nil -> {:error, UnsupportedCipher.exception(cipher_id: id)}
+    case Map.fetch(registry(), id) do
+      {:ok, module} -> {:ok, module}
+      :error -> {:error, UnsupportedCipher.exception(cipher_id: id)}
     end
   end
 

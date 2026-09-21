@@ -91,8 +91,9 @@ defmodule AshVault.Vault do
       @impl AshVault.Vault
       @spec __ash_vault__(:key_provider | :cipher | :envelope | :scope | :rotation_policy) ::
               module()
-      def __ash_vault__(key) when key in [:key_provider, :cipher, :envelope, :scope, :rotation_policy],
-        do: Map.fetch!(@ash_vault_opts, key)
+      def __ash_vault__(key)
+          when key in [:key_provider, :cipher, :envelope, :scope, :rotation_policy],
+          do: Map.fetch!(@ash_vault_opts, key)
     end
   end
 end

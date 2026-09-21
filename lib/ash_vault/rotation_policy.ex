@@ -37,15 +37,19 @@ defmodule AshVault.RotationPolicy do
 
   ## Examples
 
-      iex> policy = %AshVault.RotationPolicy{strategy: :manual}
-      iex> AshVault.RotationPolicy.due?(policy, %{version: 1, key: "", created_at: ~U[2020-01-01 00:00:00Z]})
-      false
+      policy = %AshVault.RotationPolicy{strategy: :manual}
+      AshVault.RotationPolicy.due?(policy, key_info)
+      #=> false
 
   """
   @spec due?(t(), AshVault.KeyProvider.key_info(), DateTime.t()) :: boolean()
   def due?(policy, key_info, now \\ DateTime.utc_now())
 
-  def due?(%__MODULE__{strategy: :age, max_age: %Duration{} = max_age}, %{created_at: created_at}, now)
+  def due?(
+        %__MODULE__{strategy: :age, max_age: %Duration{} = max_age},
+        %{created_at: created_at},
+        now
+      )
       when not is_nil(created_at) do
     cutoff = DateTime.shift(now, Duration.negate(max_age))
     DateTime.compare(created_at, cutoff) == :lt

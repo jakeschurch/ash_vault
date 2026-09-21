@@ -14,11 +14,14 @@ defmodule AshVault.KeyProviders.Memory do
   AshVault deliberately does **not** start this provider for you: applications opt in.
   Add it to your own supervisor, usually only outside production:
 
+      # config/dev.exs and config/test.exs
+      config :my_app, start_memory_key_provider?: true
+
+      # lib/my_app/application.ex — a runtime flag, not `Mix.env/0`, because `Mix` is
+      # not available in a release.
       children =
-        [
-          MyApp.Repo
-        ] ++
-          if Mix.env() in [:dev, :test] do
+        [MyApp.Repo] ++
+          if Application.get_env(:my_app, :start_memory_key_provider?, false) do
             [AshVault.KeyProviders.Memory]
           else
             []

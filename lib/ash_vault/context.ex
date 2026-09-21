@@ -7,13 +7,15 @@ defmodule AshVault.Context do
 
   It never contains key material, plaintext or ciphertext.
 
-  The Ash integration layer puts at least
-  `%{tenant: term(), actor: term(), context: map()}` into `:ash_context`, but the crypto
-  core assumes nothing beyond "a map, or `nil`".
+  `:ash_context` holds the **raw Ash context** handed to a change or calculation —
+  `Ash.Resource.Change.Context` or `Ash.Resource.Calculation.Context` — both of which
+  carry `:tenant` as a top-level field alongside a `:source_context` map. The crypto core
+  assumes no more than "a map, a struct, or `nil`" and never requires a particular struct
+  module, so a plain map works too.
   """
 
   @enforce_keys [:resource, :field]
   defstruct [:resource, :field, :ash_context]
 
-  @type t :: %__MODULE__{resource: module(), field: atom(), ash_context: map() | nil}
+  @type t :: %__MODULE__{resource: module(), field: atom(), ash_context: map() | struct() | nil}
 end
