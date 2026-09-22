@@ -17,24 +17,26 @@ defmodule AshVaultRustler.PrecompiledSwitchTest do
 
   alias AshVaultRustler.Native
 
-  test "the default build is still from source" do
-    refute Native.precompiled?(),
+  test "the default build uses the precompiled NIF" do
+    assert Native.precompiled?(),
            """
-           AshVaultRustler.Native is compiled against rustler_precompiled.
+           AshVaultRustler.Native is compiling from source by default.
 
-           If that is deliberate, work through "Releasing a precompiled NIF" in
-           ash_vault_rustler/README.md — in particular, a committed
-           checksum-Elixir.AshVaultRustler.Native.exs and a published release at the
-           base_url — and then update this test.
+           Since v0.1.0 the default is the precompiled artifact, so that a consumer
+           without a Rust toolchain can use this package. If you turned it off
+           deliberately, update this test; if not, @precompiled_by_default in
+           lib/ash_vault_rustler/native.ex has been changed.
 
-           If it is not deliberate, ASH_VAULT_RUSTLER_PRECOMPILED is set in this shell.
+           A source build is still available per-machine with
+           ASH_VAULT_RUSTLER_BUILD=1, which is what CI uses.
            """
   end
 
-  test "the checksum file is absent, which is the other half of why the switch is off" do
-    # `RustlerPrecompiled` will not use a downloaded artifact without it, so its absence
-    # and the switch being off have to move together.
-    refute File.exists?(
+  test "the checksum file is committed, which is the other half of the switch" do
+    # `RustlerPrecompiled` refuses a downloaded artifact without it, so the file being
+    # present and the switch being on have to move together. Deleting it breaks every
+    # consumer without a Rust toolchain, and nothing else in the suite would notice.
+    assert File.exists?(
              Path.join(__DIR__, "../checksum-Elixir.AshVaultRustler.Native.exs")
              |> Path.expand()
            )

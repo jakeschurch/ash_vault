@@ -53,7 +53,7 @@ defmodule AshVaultRustler.Native do
   # release exists and `checksum-Elixir.AshVaultRustler.Native.exs` is committed — is what
   # makes precompiled artifacts the default; the environment variable then becomes the
   # opt-out rather than the opt-in.
-  @precompiled_by_default false
+  @precompiled_by_default true
 
   @precompiled? @precompiled_by_default or
                   System.get_env("ASH_VAULT_RUSTLER_PRECOMPILED") in ["1", "true"]
@@ -89,6 +89,12 @@ defmodule AshVaultRustler.Native do
           "ash_vault_rustler-v#{@version}",
       version: @version,
       targets: @targets,
+      # Must match what CI actually builds. RustlerPrecompiled's default list
+      # includes 2.15, and it downloads every declared version — so leaving this
+      # out makes `mix nif.checksum` 404 on artifacts that were never built.
+      # One artifact per target at 2.16 covers OTP 24+, since a NIF built for
+      # 2.16 loads on any OTP speaking 2.16 or later.
+      nif_versions: ["2.16"],
       force_build: @force_build?
   else
     use Rustler, otp_app: :ash_vault_rustler, crate: "ashvault_nif"
