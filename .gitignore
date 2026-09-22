@@ -8,3 +8,8 @@ erl_crash.dump
 ash_vault-*.tar
 /tmp/
 .elixir_ls/
+
+# The example app is committed; its build artefacts are not. The entries above
+# are root-anchored, so they do not cover the subdirectory.
+/example/_build/
+/example/deps/
