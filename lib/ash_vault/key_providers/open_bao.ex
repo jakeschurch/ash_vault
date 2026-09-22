@@ -104,11 +104,14 @@ defmodule AshVault.KeyProviders.OpenBao do
 
     * `rotate/1` on a scope that has no key yet mints version 1 and returns `{:ok, 1}`,
       matching `AshVault.KeyProviders.Memory`.
-    * `destroy/1` on a scope that never had a key still writes the tombstone and
-      returns `:ok`.
-    * `destroy/1` returns `:ok` only when the transit key is **confirmed absent** by a
-      fresh read and the tombstone write succeeded. It never infers "there was nothing
-      to delete" from an error message.
+    * `destroy/1` writes the tombstone **before** deleting either transit key. A crash or
+      outage during deletion therefore fails closed: later writes cannot mint a fresh v1
+      for ciphertext whose original key is already gone.
+    * `destroy/1` on a scope that never had a key still writes the tombstone and returns
+      `:ok`.
+    * `destroy/1` returns `:ok` only when both transit keys are **confirmed absent** by
+      fresh reads. A repeated call retries cleanup when a previous destroy wrote the
+      tombstone but was interrupted before every key was gone.
     * Scopes must be binaries. A non-binary scope raises `ArgumentError` rather than
       being encoded with `:erlang.term_to_binary/1`, whose output is not stable across
       OTP releases — an encoding change would relocate both the transit key name and
@@ -256,30 +259,37 @@ defmodule AshVault.KeyProviders.OpenBao do
   def lookup_key_name(scope), do: key_name(scope) <> "_lookup"
 
   @doc """
-  Irreversibly destroy every key version for a scope and record a tombstone.
+  Tombstone a scope, then irreversibly destroy every key version for it.
 
-  Returns `:ok` only when the transit delete of both the data key and the lookup key,
-  and the tombstone write, all succeeded.
+  The tombstone is committed first: losing the data key before persisting its tombstone
+  would let a later `current_key/1` mint a fresh v1 and silently strand every existing
+  ciphertext. Presence always gates reads and writes, even if a later transit deletion
+  fails. Repeating `destroy/1` resumes that cleanup and returns `:ok` only after both
+  transit keys are confirmed absent.
   """
   @impl AshVault.KeyProvider
   @spec destroy(AshVault.KeyProvider.scope()) :: :ok | {:error, term()}
   def destroy(scope) do
     name = key_name(scope)
 
+    with :ok <- ensure_tombstone(scope),
+         :ok <- delete_transit_key(name),
+         # Erasure must be total. A surviving lookup key would let anyone holding it
+         # keep confirming guesses about a subject whose data was "destroyed".
+         :ok <- delete_transit_key(lookup_key_name(scope)) do
+      :ok
+    end
+  end
+
+  # Presence is the access-control decision, but not proof that cleanup completed: a
+  # prior destroy may have written the tombstone and then lost connectivity while deleting
+  # a transit key. Retrying deletion here makes `destroy/1` both safe to interrupt and
+  # honestly idempotent.
+  defp ensure_tombstone(scope) do
     case check_tombstone(scope) do
-      :absent ->
-        with :ok <- delete_transit_key(name),
-             # Erasure must be total. A surviving lookup key would let anyone holding it
-             # keep confirming guesses about a subject whose data was "destroyed".
-             :ok <- delete_transit_key(lookup_key_name(scope)) do
-          write_tombstone(scope)
-        end
-
-      {:error, :destroyed} ->
-        :ok
-
-      other ->
-        other
+      :absent -> write_tombstone(scope)
+      {:error, :destroyed} -> :ok
+      other -> other
     end
   end
 

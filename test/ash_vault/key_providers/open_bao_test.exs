@@ -186,6 +186,30 @@ defmodule AshVault.KeyProviders.OpenBaoTest do
       assert {:error, :destroyed} = OpenBao.current_key(scope)
     end
 
+    test "retries cleanup behind an existing tombstone", %{scope: scope} do
+      scope = scope.()
+      name = OpenBao.key_name(scope)
+      lookup_name = OpenBao.lookup_key_name(scope)
+
+      assert {:ok, _} = OpenBao.current_key(scope)
+      assert {:ok, _} = OpenBao.lookup_key(scope)
+
+      # Simulate an interrupted destroy after its fail-closed tombstone write but before
+      # either transit deletion. A retry must clean up; returning :ok immediately would
+      # leave exportable key material behind forever.
+      tombstone =
+        raw(:post, "/v1/#{@kv_mount}/data/tombstones/#{name}", %{
+          data: %{destroyed_at: DateTime.to_iso8601(DateTime.utc_now())}
+        })
+
+      assert tombstone.status in 200..299
+
+      assert :ok = OpenBao.destroy(scope)
+      assert %{status: 404} = raw(:get, "/v1/#{@transit_mount}/keys/#{name}")
+      assert %{status: 404} = raw(:get, "/v1/#{@transit_mount}/keys/#{lookup_name}")
+      assert {:error, :destroyed} = OpenBao.current_key(scope)
+    end
+
     test "destroy writes a tombstone that survives the transit key being re-creatable",
          %{scope: scope} do
       scope = scope.()
@@ -266,8 +290,9 @@ defmodule AshVault.KeyProviders.OpenBaoTest do
 
       assert {:ok, %{version: 1}} = OpenBao.current_key(scope)
 
-      # Point the provider at a transit mount that does not exist: the delete cannot
-      # possibly have happened, so destroy must refuse rather than tombstone-and-lie.
+      # Point the provider at a transit mount that does not exist: deletion cannot happen.
+      # The tombstone still lands first, so the intact key cannot later be joined by a
+      # fresh v1 after a partial erase.
       put_config(
         token: @token,
         transit_mount: "transit_absent_#{System.unique_integer([:positive])}"
@@ -277,9 +302,10 @@ defmodule AshVault.KeyProviders.OpenBaoTest do
 
       put_config(token: @token)
 
-      # No tombstone was written, and the key is untouched.
+      # The key is untouched, but the scope is fail-closed and a later destroy can retry
+      # cleanup after the transit mount is restored.
       assert %{status: 200} = raw(:get, "/v1/#{@transit_mount}/keys/#{name}")
-      assert {:ok, %{version: 1}} = OpenBao.current_key(scope)
+      assert {:error, :destroyed} = OpenBao.current_key(scope)
     end
 
     test "destroying a scope that never had a key still tombstones", %{scope: scope} do

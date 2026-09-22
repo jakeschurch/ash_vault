@@ -43,9 +43,10 @@ After DELETE, the key name is simply absent. A naive `current_key/1` would creat
 and mint a fresh v1 — **resurrecting an erased scope**. So:
 
 1. Mount a KV-v2 engine once at `ashvault/` (`POST /v1/sys/mounts/ashvault {"type":"kv","options":{"version":"2"}}`).
-2. `destroy/1`: set `deletion_allowed`, DELETE the transit key, then write the tombstone
-   `POST /v1/ashvault/data/tombstones/<scope>` with `{"data":{"destroyed_at":"<iso8601>"}}`.
-   Write the tombstone **after** the delete succeeds, and only return `:ok` if both succeed.
+2. `destroy/1`: write the tombstone `POST /v1/ashvault/data/tombstones/<scope>` with
+   `{"data":{"destroyed_at":"<iso8601>"}}` **before** deleting either transit key; then
+   set `deletion_allowed` and DELETE both the data and lookup keys. Return `:ok` only
+   after both are confirmed absent. Repeated destroys retry cleanup behind a tombstone.
 3. `current_key/1` and `get_key/2`: check the tombstone **first**
    (`GET /v1/ashvault/data/tombstones/<scope>`, `200` = destroyed, `404` = not destroyed).
    If present, return `{:error, :destroyed}` without touching transit.
