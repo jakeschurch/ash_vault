@@ -31,8 +31,10 @@ permissions:
 
 jobs:
   build:
-    name: ${{ matrix.target }} (OTP ${{ matrix.nif }})
+    name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
 
     strategy:
       fail-fast: false
@@ -40,27 +42,13 @@ jobs:
         # `nif` is the NIF API version, not the OTP release. rustler_precompiled names
         # artifacts by it, and an artifact built for 2.16 loads on every OTP that speaks
         # 2.16 or later, so one build per target covers OTP 24+.
-        nif: ["2.16"]
-        target:
-          - aarch64-apple-darwin
-          - x86_64-apple-darwin
-          - aarch64-unknown-linux-gnu
-          - x86_64-unknown-linux-gnu
-          - aarch64-unknown-linux-musl
-          - x86_64-unknown-linux-musl
         include:
-          - target: aarch64-apple-darwin
-            os: macos-14
-          - target: x86_64-apple-darwin
-            os: macos-13
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-22.04
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-22.04
-          - target: aarch64-unknown-linux-musl
-            os: ubuntu-22.04
-          - target: x86_64-unknown-linux-musl
-            os: ubuntu-22.04
+          - { target: x86_64-unknown-linux-gnu,    os: ubuntu-22.04,    nif: "2.16" }
+          - { target: aarch64-unknown-linux-gnu,   os: ubuntu-24.04-arm, nif: "2.16" }
+          - { target: x86_64-unknown-linux-musl,   os: ubuntu-22.04,    nif: "2.16", musl: true }
+          - { target: aarch64-unknown-linux-musl,  os: ubuntu-24.04-arm, nif: "2.16", musl: true }
+          - { target: x86_64-apple-darwin,         os: macos-14,        nif: "2.16" }
+          - { target: aarch64-apple-darwin,        os: macos-14,        nif: "2.16" }
 
     steps:
       - uses: actions/checkout@v4
@@ -69,37 +57,66 @@ jobs:
         id: version
         shell: bash
         run: |
-          if [ -n "${{ inputs.version }}" ]; then
-            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          # ash_vault_rustler-v1.2.3 -> 1.2.3; workflow_dispatch passes it directly.
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            version="${{ github.event.inputs.version }}"
           else
-            echo "version=${GITHUB_REF_NAME#ash_vault_rustler-v}" >> "$GITHUB_OUTPUT"
+            version="${GITHUB_REF_NAME#ash_vault_rustler-v}"
           fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "building v${version} for ${{ matrix.target }}"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      # Does the cross-compilation, names the artifact the way `RustlerPrecompiled`
-      # expects to find it at `base_url`, and emits the `.tar.gz`. Hand-rolling the
-      # naming is the single easiest way to ship artifacts nothing can download.
+      - name: Install musl tooling
+        if: matrix.musl
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
       - name: Build the NIF
-        id: build
-        uses: philss/rustler-precompiled-action@v1.1.5
-        with:
-          project-name: ashvault_nif
-          project-version: ${{ steps.version.outputs.version }}
-          project-dir: ash_vault_rustler/native/ashvault_nif
-          target: ${{ matrix.target }}
-          nif-version: ${{ matrix.nif }}
-          use-cross: ${{ contains(matrix.target, 'linux') }}
+        shell: bash
+        working-directory: ash_vault_rustler/native/ashvault_nif
+        env:
+          # rustler reads this to pick the NIF API version it compiles against.
+          RUSTLER_NIF_VERSION: ${{ matrix.nif }}
+          CARGO_TERM_COLOR: always
+          CARGO_INCREMENTAL: "0"
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package it the way rustler_precompiled expects
+        id: package
+        shell: bash
+        working-directory: ash_vault_rustler/native/ashvault_nif
+        run: |
+          set -euo pipefail
+          # The name is not ours to choose. RustlerPrecompiled builds it in
+          # lib_name/4 + lib_name_with_ext/2 as
+          #   lib<basename>-v<version>-nif-<nif>-<target>.so.tar.gz
+          # and downloads exactly that; a mismatch is a silent 404 for consumers.
+          name="libashvault_nif-v${{ steps.version.outputs.version }}-nif-${{ matrix.nif }}-${{ matrix.target }}.so"
+
+          built="target/${{ matrix.target }}/release/libashvault_nif.so"
+          # macOS produces a .dylib; the extension rustler_precompiled asks for is still .so.
+          [ -f "$built" ] || built="target/${{ matrix.target }}/release/libashvault_nif.dylib"
+          test -f "$built"
+
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          cp "$built" "$GITHUB_WORKSPACE/artifacts/${name}"
+          tar -czf "$GITHUB_WORKSPACE/artifacts/${name}.tar.gz" -C "$GITHUB_WORKSPACE/artifacts" "${name}"
+          rm "$GITHUB_WORKSPACE/artifacts/${name}"
+
+          echo "artifact=${name}.tar.gz" >> "$GITHUB_OUTPUT"
+          ls -la "$GITHUB_WORKSPACE/artifacts"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.build.outputs.file-name }}
-          path: ${{ steps.build.outputs.file-path }}
+          name: ${{ steps.package.outputs.artifact }}
+          path: artifacts/${{ steps.package.outputs.artifact }}
+          if-no-files-found: error
 
       - name: Attach to the release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
-          files: ${{ steps.build.outputs.file-path }}
+          files: artifacts/${{ steps.package.outputs.artifact }}
