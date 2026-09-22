@@ -512,7 +512,7 @@ the scope key via HKDF with a distinct info string so it is never the encryption
 Deterministic encryption is explicitly **not** the mechanism. The v1 verifier rejects these
 options with a clear "not implemented in v1" message rather than silently accepting them.
 
-`AshVault.KeyCache` is also post-v1; see docs/threat-model.md for the constraint that makes
+`AshVault.KeyCache` is also post-v1; see documentation/topics/threat-model.md for the constraint that makes
 it dangerous (it must be evicted synchronously before `destroy_keys!/2` returns).
 
 ---

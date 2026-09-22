@@ -84,7 +84,7 @@ This is a **deliberate divergence** from `ash_cloak`, which recommends a generic
 it accepts (erasure is observable to someone who can already read the ciphertext), why
 AES-GCM means it is not a padding oracle, and the boundary responsibility it puts on any
 public API built on AshVault are all written up in
-`docs/adr/0002-distinguishable-crypto-errors.md`. Read it before exposing these errors to
+`documentation/adr/0002-distinguishable-crypto-errors.md`. Read it before exposing these errors to
 an end user.
 
 ### 9. Unstable identifiers silently relocating key material
@@ -480,7 +480,7 @@ first, under the old module name, or keep the old name as the encrypted field's 
 * [Crypto-erasure](crypto-erasure.md) — the guarantee, in detail, with the checklist
 * [Operations](operations.md) — the error taxonomy and how to respond to each
 * `AshVault.Telemetry` — the audit events, and the rules on their metadata
-* `docs/adr/0001-no-cloak-vault.md` — why AshVault does not build on `Cloak.Vault`, and
+* `documentation/adr/0001-no-cloak-vault.md` — why AshVault does not build on `Cloak.Vault`, and
   why a fixed AAD makes ciphertext freely relocatable
-* `docs/adr/0002-distinguishable-crypto-errors.md` — why §8 above diverges from
+* `documentation/adr/0002-distinguishable-crypto-errors.md` — why §8 above diverges from
   `ash_cloak`'s generic-error advice, and what that costs

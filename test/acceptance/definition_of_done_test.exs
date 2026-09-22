@@ -3,21 +3,17 @@ defmodule AshVault.Acceptance.DefinitionOfDoneTest do
   The definition-of-done checklist: one test per numbered item, each named in a comment,
   so this file answers "is AshVault done?" without re-reading the whole suite.
 
-  ## Provenance of the list — read this before trusting the numbering
+  ## Provenance of the list
 
-  `docs/TEST_HARNESS_SPEC.md` says "one test per numbered item in §32 of the plan". **That
-  plan is not in this repository** — there is no §32 anywhere under `docs/`, and no
-  17-item numbered list in any spec file. The list below was therefore *reconstructed*
-  from the three anchors `TEST_HARNESS_SPEC.md` does pin down —
+  The seventeen items are the Definition of Done from the original project plan,
+  reproduced verbatim in `documentation/internal/TEST_HARNESS_SPEC.md`.
 
-    * item 4  = "DB contains no plaintext"
-    * items 7 and 8 = cross-tenant and cross-field ciphertext substitution
-    * item 17 = `mix ash_vault.backfill`
-
-  — plus the in-scope numbered attacks in `docs/threat-model.md` and the test list in
-  `docs/EXTENSION_SPEC.md` §11. The three anchors sit at their stated numbers. The
-  remaining fourteen are a faithful reconstruction, not an authoritative transcription;
-  if the original §32 surfaces, re-check the numbering against it.
+  They were reconstructed here before that list was written down, from the three
+  anchors the spec pinned (item 4 = no plaintext in the DB, items 7 and 8 =
+  cross-tenant and cross-field substitution, item 17 = backfill) plus the threat
+  model's in-scope attacks. The reconstruction was later checked against the real
+  list and the numbering agrees, so the tests below are authoritative rather than a
+  best guess.
 
   ### The checklist
 
