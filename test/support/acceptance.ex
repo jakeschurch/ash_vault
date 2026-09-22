@@ -116,10 +116,26 @@ defmodule AshVault.Test.Backup do
   the host PATH, so the restore runs directly. Both halves shell out to real tools — no
   savepoints, no in-transaction trickery.
 
-  It only ever names the database from `config/test.exs`, `ash_vault_test`.
+  It only ever names the database from `config/test.exs` — `ash_vault_test`, or whatever
+  `ASHVAULT_TEST_DB` overrides it to. Never `foundry_dev`.
   """
 
-  @database "ash_vault_test"
+  # Read from the repo config rather than hardcoded, so `ASHVAULT_TEST_DB` moves the dump
+  # and the restore along with the rest of the harness.
+  defp database do
+    name = Application.get_env(:ash_vault, AshVault.Test.Repo)[:database]
+
+    # This harness TRUNCATEs — and, in `AshVault.Test.Backup`, DROPs — whatever this
+    # returns. The prefix check is the only thing standing between a mistyped
+    # `ASHVAULT_TEST_DB` and somebody's development database. It must never be relaxed.
+    unless is_binary(name) and String.starts_with?(name, "ash_vault_test") do
+      raise "refusing to operate on #{inspect(name)}: the AshVault test harness only ever " <>
+              "touches a database whose name starts with \"ash_vault_test\""
+    end
+
+    name
+  end
+
   @container "foundrybox-postgres-1"
 
   @doc "Whether `docker exec` into the PostgreSQL container works at all."
@@ -154,7 +170,7 @@ defmodule AshVault.Test.Backup do
           "-U",
           username(),
           "-d",
-          @database,
+          database(),
           "--no-owner",
           "--no-privileges"
         ],
@@ -183,12 +199,12 @@ defmodule AshVault.Test.Backup do
 
     stop_repo!()
 
-    drop = "DROP DATABASE IF EXISTS \"" <> @database <> "\" WITH (FORCE)"
-    create = "CREATE DATABASE \"" <> @database <> "\""
+    drop = "DROP DATABASE IF EXISTS \"" <> database() <> "\" WITH (FORCE)"
+    create = "CREATE DATABASE \"" <> database() <> "\""
 
     psql!("postgres", ["-c", drop])
     psql!("postgres", ["-c", create])
-    psql!(@database, ["-f", path])
+    psql!(database(), ["-f", path])
 
     start_repo!()
   end

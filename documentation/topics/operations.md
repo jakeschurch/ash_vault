@@ -718,8 +718,10 @@ and finishing the operation, and the whole cache lifetime if caching is on — t
 land in `erl_crash.dump` as an ordinary file on disk, outside every protection this library
 provides. The same is true of an OS core dump.
 
-This is not hypothetical. Developing AshVault produced an 11 MB `erl_crash.dump` in the
-project root from a crashed test run, containing references to the key provider modules.
+This is not hypothetical. Developing AshVault produced two crash dumps, 11 MB and 12 MB, from
+crashed test runs — one in the project root and one under `example/` — and one of them
+contained references to the key provider modules. Twice, in a project whose entire subject is
+key hygiene.
 
 In production:
 
@@ -733,6 +735,32 @@ ulimit -c 0
 
 Under systemd, also set `LimitCORE=0` on the unit, and check that no container runtime or
 supervisor has re-enabled either.
+
+### AshVault warns about this at boot
+
+Because the unsafe state is the *default* — with `ERL_CRASH_DUMP_SECONDS` unset, OTP writes
+the dump — AshVault logs a single `:warning` at application start naming the hazard and the
+fix.
+
+It is deliberately narrow, because a library that lectures about host configuration earns
+nothing but muted logs:
+
+* **Only when the variable is unset.** Setting it to anything, `0` or `30` alike, is a
+  decision, and a decision is respected in silence. The warning is about the absence of one.
+* **Only in `:prod`.** A development machine legitimately wants crash dumps, and a warning on
+  every test run trains everyone to ignore it. The check is compiled out entirely in other
+  environments — it is not a runtime branch.
+* **Once, at boot**, never per operation.
+
+To silence it without changing the environment:
+
+```elixir
+config :ash_vault, warn_on_crash_dumps?: false
+```
+
+Note what the warning does **not** cover: it cannot read `ulimit -c`, so an OS core dump is
+still your responsibility, and a silenced warning is not a statement that this node is safe.
+`ERL_CRASH_DUMP_SECONDS=0` disables one of the two hazards on this page.
 
 If you must keep crash dumps for debugging, treat them with exactly the care you give the key
 store: restricted directory, short retention, never shipped to a log aggregator or an APM, and

@@ -32,6 +32,10 @@ defmodule AshVault.Transformers.SetupEncryption do
        The multitenancy attribute is deliberately NOT listed: Ash adds it itself, both to
        the generated unique index and to the eager/pre-check query, whenever
        `all_tenants?` is false. See the comment on `add_lookup_identity/3`.
+
+       On a data layer that cannot enforce an identity natively — ETS, Mnesia — this is a
+       DSL error unless the field also carries `pre_check_with:`. See
+       `verify_uniqueness_enforceable!/2`.
     7. a `:by_<name>` read action taking the plaintext as a `sensitive?: true` argument,
        backed by `AshVault.Preparations.FilterByLookup`
 
@@ -266,11 +270,75 @@ defmodule AshVault.Transformers.SetupEncryption do
   defp add_lookup_identity({:ok, dsl}, %{unique?: false}, _lookup), do: {:ok, dsl}
 
   defp add_lookup_identity({:ok, dsl}, field, lookup) do
+    verify_uniqueness_enforceable!(dsl, field)
+
     Builder.add_identity(dsl, :"#{lookup}_unique", [lookup],
+      pre_check_with: field.pre_check_with,
       description:
         "Unique #{field.name} (per tenant), enforced on the lookup token rather than " <>
           "on the randomized ciphertext."
     )
+  end
+
+  # A data layer that cannot enforce an identity itself — ETS, Mnesia — adds
+  # `Ash.DataLayer.Verifiers.RequirePreCheckWith` to its verifier list, and that verifier
+  # rejects any identity with no `pre_check_with`
+  # (deps/ash/lib/ash/data_layer/verifiers/require_pre_check_with.ex:26-40).
+  #
+  # Left alone, `unique?: true` on such a resource fails with that verifier's message,
+  # which names Ash internals and an identity the user never wrote — it reads as an
+  # AshVault bug with no actionable fix.
+  #
+  # AshVault does not set `pre_check_with` for them, deliberately. It *works*: the
+  # pre-check hook runs after `AshVault.Changes.Encrypt`, so the token is on the changeset
+  # by the time the check queries for it, and a duplicate really is rejected. But it is a
+  # full read action on every single write
+  # (`deps/ash/lib/ash/changeset/changeset.ex:3261-3330`), and silently adding a query per
+  # write to make a DSL option compile is not a trade to make on the user's behalf. So it
+  # is an explicit opt-in, and the error says so.
+  defp verify_uniqueness_enforceable!(dsl, field) do
+    if is_nil(field.pre_check_with) and not native_identity_enforcement?(dsl) do
+      raise Spark.Error.DslError,
+        module: Transformer.get_persisted(dsl, :module),
+        path: [:ash_vault, :encrypt],
+        message: """
+        `unique?: true` on #{inspect(field.name)} needs `pre_check_with:`, because \
+        #{inspect(Ash.DataLayer.data_layer(dsl))} cannot enforce a unique identity itself.
+
+        PostgreSQL enforces `#{AshVault.lookup_field_name(field.name)}` uniqueness with a
+        real unique index, so nothing extra is needed there. ETS and Mnesia have no such
+        mechanism: Ash can only enforce it by running a read before every write, and it
+        refuses to pretend otherwise.
+
+        Opt into that read explicitly:
+
+            encrypt #{inspect(field.name)}, searchable?: true, unique?: true,
+              pre_check_with: MyApp.Domain
+
+        It is a query per write, and it is not race-free — two concurrent creates can both
+        see no conflict. On a data layer with no unique constraint there is nothing better
+        available, which is the actual limitation and the reason AshVault will not turn it
+        on for you.
+
+        If you do not need enforcement, drop `unique?: true`. `searchable?: true` alone
+        still gives you `#{AshVault.lookup_field_name(field.name)}`, the generated
+        `:#{AshVault.lookup_action_name(field.name)}` read action and
+        `AshVault.Query.filter_by/4`.
+        """
+    end
+
+    :ok
+  end
+
+  defp native_identity_enforcement?(dsl) do
+    case Ash.DataLayer.data_layer(dsl) do
+      nil ->
+        true
+
+      data_layer ->
+        not (Code.ensure_loaded?(data_layer) and function_exported?(data_layer, :verifiers, 0) and
+               Ash.DataLayer.Verifiers.RequirePreCheckWith in data_layer.verifiers())
+    end
   end
 
   defp add_lookup_action({:error, error}, _field, _attribute), do: {:error, error}

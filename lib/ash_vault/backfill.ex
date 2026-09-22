@@ -39,9 +39,14 @@ defmodule AshVault.Backfill do
 
   One `Ash.bulk_update/4` per batch, `strategy: [:stream]`, `transaction: :all` (so the
   batch, and only the batch, is a transaction), `return_records?: false`, `authorize?:
-  false` and `skip_unknown_inputs: :*`. The per-row ciphertext is applied through the
-  `:transform_changeset` hook — a single bulk `input` map cannot carry a different
-  ciphertext per row — and it is the *only* attribute touched.
+  false` and `skip_unknown_inputs: :*`. The per-row attributes are applied through the
+  `:transform_changeset` hook — a single bulk `input` map cannot carry different
+  ciphertext per row.
+
+  Those attributes come from `AshVault.write_attributes/4`, the same function an ordinary
+  create or update goes through, so a `searchable?: true` field gets its `<field>_lookup`
+  token written in the same batch as its ciphertext, from a value normalized exactly
+  once. Nothing else on the row is touched.
 
   Because `strategy: [:stream]` cannot run an update action declared
   `require_atomic? true`, `plan/3` rejects such an action up front with a message naming
@@ -70,7 +75,8 @@ defmodule AshVault.Backfill do
           resource: module(),
           field: atom(),
           encrypted_field: atom(),
-          lookup_field: atom() | nil,
+          lookup_field: atom() | false,
+          searchable?: boolean(),
           lookup?: boolean(),
           source: atom() | nil,
           primary_key: atom(),
@@ -104,12 +110,17 @@ defmodule AshVault.Backfill do
          {:ok, primary_key} <- fetch_primary_key(resource),
          {:ok, action} <- fetch_action(resource, opts),
          {:ok, vault, scope} <- resolve_vault(resource, field, opts[:tenant]) do
+      searchable? = AshVault.Info.searchable?(resource, field)
+
       {:ok,
        %{
          resource: resource,
          field: field,
          encrypted_field: AshVault.encrypted_field_name(field),
-         lookup_field: lookup? && AshVault.lookup_field_name(field),
+         # Resolved whenever the field is searchable, not only in `--lookup` mode: an
+         # ordinary backfill writes this column too, and `verify/1` checks it.
+         lookup_field: searchable? && AshVault.lookup_field_name(field),
+         searchable?: searchable?,
          lookup?: lookup?,
          source: source,
          primary_key: primary_key,
@@ -306,7 +317,13 @@ defmodule AshVault.Backfill do
             {:cont, {:ok, tokens, skipped + 1}}
 
           token ->
-            {:cont, {:ok, Map.put(tokens, Map.fetch!(record, plan.primary_key), token), skipped}}
+            {:cont,
+             {:ok,
+              Map.put(
+                tokens,
+                Map.fetch!(record, plan.primary_key),
+                %{plan.lookup_field => token}
+              ), skipped}}
         end
       else
         {:error, error} -> {:halt, {:error, error}}
@@ -321,19 +338,28 @@ defmodule AshVault.Backfill do
     {:ok, Map.new(records, &{Map.fetch!(&1, plan.primary_key), :dry_run}), 0}
   end
 
+  # `AshVault.write_attributes/4`, never `encrypt_value/4` directly. It is what an
+  # ordinary create or update calls, and it is the only thing that knows a `searchable?`
+  # field has TWO columns to set: the ciphertext AND the `<field>_lookup` token, both
+  # derived from the value normalized exactly once. Encrypting here by hand wrote half a
+  # row — a NULL token, so the field was unfindable and its uniqueness constraint
+  # unenforced — and, with a `normalize:` configured, ciphertext holding the raw value
+  # while every ordinary write stored the normalized one.
   defp encrypt_batch(plan, records) do
-    Enum.reduce_while(records, {:ok, %{}, 0}, fn record, {:ok, blobs, skipped} ->
+    Enum.reduce_while(records, {:ok, %{}, 0}, fn record, {:ok, attributes, skipped} ->
       value = Map.fetch!(record, plan.source)
 
       if is_nil(value) and not plan.encrypt_nil? do
-        {:cont, {:ok, blobs, skipped + 1}}
+        {:cont, {:ok, attributes, skipped + 1}}
       else
-        case AshVault.encrypt_value(plan.resource, plan.field, value, context(plan, record)) do
-          {:ok, nil} ->
-            {:cont, {:ok, blobs, skipped + 1}}
-
-          {:ok, blob} ->
-            {:cont, {:ok, Map.put(blobs, Map.fetch!(record, plan.primary_key), blob), skipped}}
+        case AshVault.write_attributes(plan.resource, plan.field, value, context(plan, record)) do
+          {:ok, row} ->
+            if is_nil(Map.get(row, plan.encrypted_field)) do
+              {:cont, {:ok, attributes, skipped + 1}}
+            else
+              {:cont,
+               {:ok, Map.put(attributes, Map.fetch!(record, plan.primary_key), row), skipped}}
+            end
 
           {:error, error} ->
             {:halt, {:error, error}}
@@ -342,12 +368,12 @@ defmodule AshVault.Backfill do
     end)
   end
 
-  defp write_batch(_plan, _records, blobs) when map_size(blobs) == 0, do: :ok
+  defp write_batch(_plan, _records, attributes) when map_size(attributes) == 0, do: :ok
 
-  defp write_batch(%{dry_run?: true}, _records, _blobs), do: :ok
+  defp write_batch(%{dry_run?: true}, _records, _attributes), do: :ok
 
-  defp write_batch(plan, records, blobs) do
-    records = Enum.filter(records, &Map.has_key?(blobs, Map.fetch!(&1, plan.primary_key)))
+  defp write_batch(plan, records, attributes) do
+    records = Enum.filter(records, &Map.has_key?(attributes, Map.fetch!(&1, plan.primary_key)))
 
     result =
       Ash.bulk_update(
@@ -364,14 +390,17 @@ defmodule AshVault.Backfill do
           notify?: false,
           authorize?: false,
           skip_unknown_inputs: :*,
+          # EVERY attribute the write path produced, not just the ciphertext. For a
+          # `searchable?` field that is the lookup token as well; writing one without the
+          # other is what left rows that decrypt correctly and cannot be found.
           transform_changeset: fn changeset ->
             pk = Map.fetch!(changeset.data, plan.primary_key)
 
-            Ash.Changeset.force_change_attribute(
-              changeset,
-              write_field(plan),
-              Map.fetch!(blobs, pk)
-            )
+            attributes
+            |> Map.fetch!(pk)
+            |> Enum.reduce(changeset, fn {name, value}, changeset ->
+              Ash.Changeset.force_change_attribute(changeset, name, value)
+            end)
           end
         ] ++ read_opts(plan)
       )
@@ -427,10 +456,11 @@ defmodule AshVault.Backfill do
     end
   end
 
-  # The ONLY column a run touches: the ciphertext for an ordinary backfill, the lookup
-  # token for `--lookup`.
-  defp write_field(%{lookup?: true} = plan), do: plan.lookup_field
-  defp write_field(plan), do: plan.encrypted_field
+  # The columns a run touches: the lookup token alone for `--lookup`, otherwise the
+  # ciphertext plus — when the field is `searchable?` — its token.
+  defp target_fields(%{lookup?: true} = plan), do: [plan.lookup_field]
+  defp target_fields(%{searchable?: true} = plan), do: [plan.encrypted_field, plan.lookup_field]
+  defp target_fields(plan), do: [plan.encrypted_field]
 
   # -- verify -----------------------------------------------------------------
 
@@ -449,7 +479,7 @@ defmodule AshVault.Backfill do
       plan.resource
       |> Ash.Query.new()
       |> Ash.Query.sort([{plan.primary_key, :asc}])
-      |> Ash.Query.select([plan.primary_key, plan.source, plan.encrypted_field])
+      |> Ash.Query.select(verify_select(plan))
 
     with {:ok, total} <- safe_count(plan) do
       stride = stride(total, plan.sample)
@@ -482,6 +512,11 @@ defmodule AshVault.Backfill do
       end
     end
   end
+
+  defp verify_select(%{searchable?: true} = plan),
+    do: [plan.primary_key, plan.source, plan.encrypted_field, plan.lookup_field]
+
+  defp verify_select(plan), do: [plan.primary_key, plan.source, plan.encrypted_field]
 
   defp safe_count(plan) do
     plan.resource
@@ -518,21 +553,72 @@ defmodule AshVault.Backfill do
           Ash.Resource.Info.calculation(plan.resource, plan.field)
 
         case AshVault.decrypt_value(plan.vault, blob, read_context(plan), type, constraints) do
-          {:ok, ^expected} ->
-            :ok
-
-          # The decrypted value is deliberately NOT carried in the mismatch: `:value_mismatch`
-          # already says what went wrong, and `mismatches` is returned to the caller inside
-          # `stats`, where one `Logger.error(inspect(stats))` would dump the plaintext of
-          # every mismatched row. Nothing consumed it.
-          {:ok, _actual} ->
-            {:mismatch, %{primary_key: pk, reason: :value_mismatch}}
+          {:ok, actual} ->
+            check_value(plan, record, pk, expected, actual)
 
           {:error, error} ->
             {:mismatch, %{primary_key: pk, reason: :decrypt_failed, error: error}}
         end
     end
   end
+
+  # The decrypted value is deliberately NOT carried in any mismatch: the reason already
+  # says what went wrong, and `mismatches` is returned to the caller inside `stats`, where
+  # one `Logger.error(inspect(stats))` would dump the plaintext of every mismatched row.
+  # Nothing consumed it.
+  defp check_value(%{searchable?: false}, _record, pk, expected, actual),
+    do: match_or_mismatch(expected == actual, pk, :value_mismatch)
+
+  # A searchable field stores the NORMALIZED value — `AshVault.write_attributes/4`
+  # normalizes once and encrypts that — so the plaintext column is normalized before the
+  # comparison. Comparing the raw column instead would report a mismatch on every row
+  # whose spelling differs from its normalized form, which under `normalize:
+  # :downcase_trim` is most of them.
+  defp check_value(plan, record, pk, expected, actual) do
+    case AshVault.Lookup.normalize_for(plan.resource, plan.field, expected) do
+      # Not comparable — a custom normalizer over a non-binary type, the same case
+      # `check_normalization/4` declines to judge. Compare the raw values and skip the
+      # token rather than guess at either.
+      {:error, _reason} ->
+        match_or_mismatch(expected == actual, pk, :value_mismatch)
+
+      {:ok, ^actual} ->
+        check_token(plan, record, pk, actual)
+
+      {:ok, _normalized} ->
+        {:mismatch, %{primary_key: pk, reason: :value_mismatch}}
+    end
+  end
+
+  # The token column had no verification path at all: a row could decrypt perfectly and
+  # still be unfindable — and, with `unique?: true`, have its constraint silently
+  # unenforced — because `<field>_lookup` was NULL. It is a one-way HMAC, so it cannot be
+  # inverted; it can be *recomputed* from the value that was just decrypted, which is
+  # exactly what a lookup does at query time.
+  defp check_token(plan, record, pk, value) do
+    stored = Map.get(record, plan.lookup_field)
+    context = context(plan, record)
+
+    case AshVault.Lookup.token_for_normalized(plan.resource, plan.field, value, context) do
+      {:ok, nil} ->
+        :ok
+
+      {:ok, ^stored} ->
+        :ok
+
+      {:ok, _token} when is_nil(stored) ->
+        {:mismatch, %{primary_key: pk, reason: :lookup_missing}}
+
+      {:ok, _token} ->
+        {:mismatch, %{primary_key: pk, reason: :lookup_mismatch}}
+
+      {:error, error} ->
+        {:mismatch, %{primary_key: pk, reason: :lookup_failed, error: error}}
+    end
+  end
+
+  defp match_or_mismatch(true, _pk, _reason), do: :ok
+  defp match_or_mismatch(false, pk, reason), do: {:mismatch, %{primary_key: pk, reason: reason}}
 
   defp verification_failed(plan, mismatches) do
     ArgumentError.exception(
@@ -706,10 +792,12 @@ defmodule AshVault.Backfill do
         {:error,
          ArgumentError.exception(
            message:
-             "`--lookup` and `--verify` cannot be combined. A lookup token is a one-way " <>
-               "HMAC, so there is nothing to decrypt and compare; re-running `--lookup` " <>
-               "is itself the check, because it is idempotent and only touches rows whose " <>
-               "#{AshVault.lookup_field_name(field)} is still NULL."
+             "`--lookup` and `--verify` cannot be combined: `--lookup` writes and " <>
+               "`--verify` writes nothing, so asking for both names no single run.\n\n" <>
+               "`--verify` on its own checks #{AshVault.lookup_field_name(field)} for you. " <>
+               "It decrypts the sampled row, recomputes the token from the decrypted " <>
+               "value and compares it to the stored one, reporting `:lookup_missing` or " <>
+               "`:lookup_mismatch`. Drop `--lookup` and keep `--verify`."
          )}
 
       not encrypted.searchable? ->
@@ -831,7 +919,7 @@ defmodule AshVault.Backfill do
       resource: plan.resource,
       field: plan.field,
       source: plan.source || plan.encrypted_field,
-      target: write_field(plan),
+      target: target_fields(plan),
       lookup?: plan.lookup?,
       tenant: plan.tenant,
       scope: plan.scope,

@@ -6,10 +6,25 @@ defmodule AshVault.Test.Db do
   extension layer's tables are small and fixed, and this keeps the harness to one file
   with no migration directory to drift.
 
-  It only ever touches the database named in `config/test.exs` — `ash_vault_test`.
+  It only ever touches the database named in `config/test.exs` — `ash_vault_test`, or
+  whatever `ASHVAULT_TEST_DB` overrides it to. Never `foundry_dev`.
   """
 
-  @database "ash_vault_test"
+  # Read from the repo config rather than hardcoded, so `ASHVAULT_TEST_DB` moves the
+  # whole harness — creation included — to another database in one place.
+  defp database do
+    name = Application.get_env(:ash_vault, AshVault.Test.Repo)[:database]
+
+    # This harness TRUNCATEs — and, in `AshVault.Test.Backup`, DROPs — whatever this
+    # returns. The prefix check is the only thing standing between a mistyped
+    # `ASHVAULT_TEST_DB` and somebody's development database. It must never be relaxed.
+    unless is_binary(name) and String.starts_with?(name, "ash_vault_test") do
+      raise "refusing to operate on #{inspect(name)}: the AshVault test harness only ever " <>
+              "touches a database whose name starts with \"ash_vault_test\""
+    end
+
+    name
+  end
 
   @statements [
     """
@@ -58,6 +73,13 @@ defmodule AshVault.Test.Db do
       email_lookup bytea
     )
     """,
+    # A plaintext column beside the token, so an upsert's UPDATE half has something
+    # visibly non-key to change. Without it "the upsert updated the row" and "the upsert
+    # did nothing" look identical, which is exactly the failure mode
+    # `upsert_fields: [:email]` produces.
+    """
+    ALTER TABLE search_users ADD COLUMN IF NOT EXISTS name text
+    """,
     # `unique?: true` on a searchable field. The tenant column is part of the index
     # because Ash puts it there itself for an attribute-multitenant resource whenever the
     # identity is not `all_tenants?`
@@ -69,6 +91,22 @@ defmodule AshVault.Test.Db do
     """
     CREATE UNIQUE INDEX IF NOT EXISTS search_users_email_lookup_unique_index
       ON search_users (org_id, email_lookup)
+    """,
+    # A searchable field WITHOUT `unique?`, so duplicates are possible — the shape every
+    # table has before someone adds the constraint, and the only shape where the
+    # GROUP BY dedupe recipe has anything to find.
+    """
+    CREATE TABLE IF NOT EXISTS dedupe_users (
+      id uuid PRIMARY KEY,
+      org_id uuid NOT NULL,
+      name text,
+      encrypted_email bytea,
+      email_lookup bytea
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS dedupe_users_email_lookup_index
+      ON dedupe_users (org_id, email_lookup)
     """,
     """
     CREATE TABLE IF NOT EXISTS acceptance_users (
@@ -104,7 +142,7 @@ defmodule AshVault.Test.Db do
 
     {:ok, conn} = Postgrex.start_link(config)
 
-    case Postgrex.query(conn, ~s(CREATE DATABASE "#{@database}"), []) do
+    case Postgrex.query(conn, ~s(CREATE DATABASE "#{database()}"), []) do
       {:ok, _} -> :ok
       # 42P04 = duplicate_database
       {:error, %Postgrex.Error{postgres: %{code: :duplicate_database}}} -> :ok
@@ -120,8 +158,10 @@ defmodule AshVault.Test.Db do
   """
   @spec reset!() :: :ok
   def reset! do
+    _ = database()
+
     AshVault.Test.Repo.query!(
-      "TRUNCATE users, contacts, legacy_users, organizations, acceptance_users, search_users"
+      "TRUNCATE users, contacts, legacy_users, organizations, acceptance_users, search_users, dedupe_users"
     )
 
     :ok

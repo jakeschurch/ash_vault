@@ -1,0 +1,2 @@
+- [AshVault audit focus](project_ashvault_audit_focus.md) — reviews hunt silent failures only; loud failures are out of scope, rank by dwell time.
+- [AshVault dev environment](env_ashvault_dev.md) — nix dev shell invocation, service endpoints, postgres suite isolation.

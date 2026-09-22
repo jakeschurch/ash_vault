@@ -16,6 +16,7 @@ defmodule AshVault.SearchableFieldsTest do
   alias AshVault.Test.EtsAccount
   alias AshVault.Test.EtsContact
   alias AshVault.Test.EtsSecretDoc
+  alias AshVault.Test.EtsNonBinaryScopeDoc
 
   setup do
     start_supervised!({Memory, name: Memory})
@@ -462,6 +463,58 @@ defmodule AshVault.SearchableFieldsTest do
       refute AshVault.KeyProvider.supports_lookup?(AshVault.Test.Support.CachedNoLookupProvider)
 
       assert AshVault.KeyProvider.supports_lookup?(AshVault.Test.Support.CachedMemoryProvider)
+    end
+  end
+
+  # `field_key/3` resolved the scope by calling `scope.resolve!/1` itself, which skipped
+  # the single place that enforces "a scope is a binary". The invariant still failed —
+  # loudly — but as an `ArgumentError` raised by whichever provider's `validate_scope!/1`
+  # saw the term first, naming the provider rather than the scope module that produced
+  # it, and leaking out of a non-bang `Ash.read/2` in a shape no caller matches on.
+  describe "a scope that is not a binary (ashvault-8i0)" do
+    test "field_key/3 returns InvalidScope, not the provider's ArgumentError" do
+      assert {:error, %AshVault.Errors.InvalidScope{} = error} =
+               AshVault.Lookup.field_key(EtsNonBinaryScopeDoc, :email, %AshVault.Context{
+                 resource: EtsNonBinaryScopeDoc,
+                 field: :email,
+                 ash_context: %{}
+               })
+
+      # The scope module, not the key provider: this is the whole point of routing
+      # through the runtime. The old `ArgumentError` named the provider, and being an
+      # `ArgumentError` it was not in `field_key/3`'s rescue list at all, so it escaped
+      # a non-bang `Ash.read/2` raw.
+      assert error.scope_module == AshVault.Test.Support.NonBinaryScope
+      assert error.resource == EtsNonBinaryScopeDoc
+      assert error.field == :email
+      assert Exception.message(error) =~ "which is not a binary"
+
+      # The term is described, never printed.
+      assert error.scope == "a 2-tuple"
+    end
+
+    test "filter_by/4 raises InvalidScope rather than the provider's ArgumentError" do
+      error =
+        assert_raise AshVault.Errors.InvalidScope, fn ->
+          AshVault.Query.filter_by(EtsNonBinaryScopeDoc, :email, "someone@example.com")
+        end
+
+      assert error.scope_module == AshVault.Test.Support.NonBinaryScope
+    end
+
+    # The encrypt path already raised `InvalidScope` before this fix — it went through
+    # `Runtime.encrypt!/3`. Asserted here so the two halves of one write are visibly the
+    # same error, which is the property that was broken: the ciphertext column failed
+    # with `InvalidScope` while the lookup column failed with `ArgumentError`.
+    test "the encrypt half of the same write raises the identical error" do
+      error =
+        assert_raise Ash.Error.Invalid, fn ->
+          EtsNonBinaryScopeDoc
+          |> Ash.Changeset.for_create(:create, %{email: "someone@example.com"})
+          |> Ash.create!()
+        end
+
+      assert Enum.any?(error.errors, &match?(%AshVault.Errors.InvalidScope{}, &1))
     end
   end
 end

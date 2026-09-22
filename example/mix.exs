@@ -35,6 +35,10 @@ defmodule Example.MixProject do
       # Ash.Policy.Authorizer needs a SAT solver at runtime. The parent declares it
       # `only: [:dev, :test]`, so it does not reach us through the path dep.
       {:simple_sat, "~> 0.1"},
+      # Password hashing for the sign-in step. The parent library declares it
+      # `only: [:dev, :test]` — AshVault must never depend on ash_authentication at
+      # runtime — so, like `simple_sat`, it does not reach us through the path dep.
+      {:ash_authentication, "~> 4.0"},
       {:jason, "~> 1.4"}
     ]
   end

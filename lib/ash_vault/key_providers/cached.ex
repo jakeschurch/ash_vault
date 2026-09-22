@@ -515,15 +515,17 @@ defmodule AshVault.KeyProviders.Cached do
       # The same bytes are also the answer to `get_key(scope, version)`, so seed that
       # slot too rather than making the next decrypt pay a round trip for a key the
       # cache already holds.
+      #
+      # It is seeded under the generation of the `fetch` that MISSED, not a freshly
+      # re-read one. Generations are per scope, so the two are the same number right up
+      # until an eviction lands between the miss and here — which is exactly the case
+      # the fence exists for. Re-reading the generation would defeat it: a re-read
+      # generation is never stale, so the `put` would always land, and a `destroy/2`
+      # that has already evicted this scope and returned `:ok` would leave the key
+      # readable again through the version slot for a full `historical_ttl`.
       case key_info do
         %{version: version, key: key} when is_integer(version) and version > 0 ->
-          {_, version_generation} =
-            case fetch(scope, version, opts) do
-              {:ok, entry, gen} -> {entry, gen}
-              {:miss, gen} -> {nil, gen}
-            end
-
-          put(scope, version, {:key, key}, opts.historical_ttl, version_generation, opts)
+          put(scope, version, {:key, key}, opts.historical_ttl, generation, opts)
 
         _other ->
           :ok

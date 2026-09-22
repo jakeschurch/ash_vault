@@ -1,0 +1,105 @@
+# Build the `ashvault_nif` NIF for every target `AshVaultRustler.Native` lists, and attach
+# the artifacts to a release.
+#
+# This is the half of `rustler_precompiled` that cannot be done on a developer machine: the
+# switch in `AshVaultRustler.Native` stays off until artifacts exist at the `base_url` it
+# points at, because a `base_url` aimed at a release that is not there turns every
+# `mix test` in every consuming project into a NIF load failure.
+#
+# Run it by pushing a tag of the form `ash_vault_rustler-v<version>`, matching the
+# `base_url` that `AshVaultRustler.Native` builds. `workflow_dispatch` is there so the
+# matrix can be proved green before a tag is cut and a bad release has to be deleted.
+#
+# After it succeeds, see "Releasing a precompiled NIF" in `ash_vault_rustler/README.md`
+# for the two remaining steps: generate and commit the checksum file, then flip
+# `@precompiled_by_default`.
+name: NIF release
+
+on:
+  push:
+    tags:
+      - "ash_vault_rustler-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build artifacts for, without the leading v (e.g. 0.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }} (OTP ${{ matrix.nif }})
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # `nif` is the NIF API version, not the OTP release. rustler_precompiled names
+        # artifacts by it, and an artifact built for 2.16 loads on every OTP that speaks
+        # 2.16 or later, so one build per target covers OTP 24+.
+        nif: ["2.16"]
+        target:
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
+          - aarch64-unknown-linux-gnu
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-musl
+          - x86_64-unknown-linux-musl
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-14
+          - target: x86_64-apple-darwin
+            os: macos-13
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-22.04
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract the version
+        id: version
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF_NAME#ash_vault_rustler-v}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Does the cross-compilation, names the artifact the way `RustlerPrecompiled`
+      # expects to find it at `base_url`, and emits the `.tar.gz`. Hand-rolling the
+      # naming is the single easiest way to ship artifacts nothing can download.
+      - name: Build the NIF
+        id: build
+        uses: philss/rustler-precompiled-action@v1.1.4
+        with:
+          project-name: ashvault_nif
+          project-version: ${{ steps.version.outputs.version }}
+          project-dir: ash_vault_rustler/native/ashvault_nif
+          target: ${{ matrix.target }}
+          nif-version: ${{ matrix.nif }}
+          use-cross: ${{ contains(matrix.target, 'linux') }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.build.outputs.file-name }}
+          path: ${{ steps.build.outputs.file-path }}
+
+      - name: Attach to the release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: ${{ steps.build.outputs.file-path }}

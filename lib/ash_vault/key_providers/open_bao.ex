@@ -21,7 +21,13 @@ defmodule AshVault.KeyProviders.OpenBao do
   >
   > Anything holding a `transit/export` capability on these keys can read raw key
   > material. The AshVault application needs exactly that capability; nothing else
-  > should have it.
+  > should have it. The exported key is also a refcounted binary on a process heap for
+  > the life of the call and beyond, which the BEAM will not zero.
+  >
+  > `AshVault.KeyProviders.OpenBaoTransit` is the sibling provider that never exports:
+  > it runs the AEAD inside OpenBao instead, at the cost of one network round trip per
+  > value and no support for searchable fields. See
+  > [Threat model](threat-model.md) for which to choose.
 
   ## Configuration
 
@@ -121,14 +127,9 @@ defmodule AshVault.KeyProviders.OpenBao do
 
   @behaviour AshVault.KeyProvider
 
-  alias AshVault.Errors.ProviderUnavailable
+  alias AshVault.KeyProviders.OpenBao.Transport
 
-  @default_address "http://127.0.0.1:8200"
-  @default_transit_mount "transit"
-  @default_kv_mount "ashvault"
   @default_key_type "aes256-gcm96"
-  @default_receive_timeout 5_000
-  @default_max_retries 2
 
   @key_bytes %{
     "aes128-gcm96" => 16,
@@ -146,9 +147,7 @@ defmodule AshVault.KeyProviders.OpenBao do
       "ashvault_dGVuYW50XzQy"
   """
   @spec key_name(AshVault.KeyProvider.scope()) :: String.t()
-  def key_name(scope) do
-    "ashvault_" <> Base.url_encode64(validate_scope!(scope), padding: false)
-  end
+  def key_name(scope), do: Transport.key_name(__MODULE__, "ashvault_", scope)
 
   @doc """
   Mount the KV-v2 engine that holds tombstones, if it is not already mounted.
@@ -160,7 +159,7 @@ defmodule AshVault.KeyProviders.OpenBao do
   """
   @impl AshVault.KeyProvider
   @spec setup() :: :ok | {:error, Exception.t()}
-  def setup, do: ensure_kv_mount()
+  def setup, do: Transport.ensure_kv_mount(__MODULE__)
 
   @doc """
   The key size in bytes this provider mints, derived from the configured `:key_type`.
@@ -213,14 +212,14 @@ defmodule AshVault.KeyProviders.OpenBao do
     name = key_name(scope)
 
     with :absent <- check_tombstone(scope),
-         {:ok, meta} <- read_meta(name) do
+         {:ok, meta} <- Transport.read_meta(__MODULE__, name) do
       case meta do
         :missing ->
           # No key yet: creating it mints version 1, which is the rotation.
           with {:ok, created} <- create_key(name), do: {:ok, created["latest_version"]}
 
         _ ->
-          with {:ok, rotated} <- post(transit_path("/keys/#{name}/rotate")),
+          with {:ok, rotated} <- Transport.post(__MODULE__, path("/keys/#{name}/rotate")),
                {:ok, data} <- transit_ok(rotated) do
             {:ok, data["latest_version"]}
           end
@@ -254,6 +253,50 @@ defmodule AshVault.KeyProviders.OpenBao do
 
       iex> AshVault.KeyProviders.OpenBao.lookup_key_name("tenant_42")
       "ashvault_dGVuYW50XzQy_lookup"
+
+  ## Why the `_lookup` suffix cannot collide with a data key
+
+  This namespace is safety-critical, not cosmetic. If some scope `s1` existed with
+  `key_name(s1) == lookup_key_name(s2)`, then one tenant's **lookup key would be another
+  tenant's data key** — and the lookup key is deliberately never rotated, so `s1` would
+  silently be pinned to a key `rotate/1` cannot move, while anyone holding `s2`'s lookup
+  key could decrypt `s1`'s data.
+
+  Both names share the `"ashvault_"` prefix, so a collision requires
+  `enc(s1) == enc(s2) <> "_lookup"` where `enc/1` is `Base.url_encode64/2` with
+  `padding: false`. That is impossible, and the reason is worth stating rather than
+  trusting:
+
+  Every character of `"_lookup"` is in the base64url alphabet, so the suffix does not
+  disqualify itself. The proof rests entirely on its **last** character, `?p`, whose
+  base64url index is 41 (`0b101001`), and on the two canonicity rules unpadded base64
+  imposes on a final character. Writing `n` for `byte_size(enc(s2))`, every `enc/1`
+  output has length `≡ 0, 2 or 3 (mod 4)` — never 1 — and `enc(s1)` would have length
+  `n + 7`:
+
+    * `n ≡ 2` → `n + 7 ≡ 1 (mod 4)`, which is not a legal unpadded base64 length at all.
+    * `n ≡ 0` → `n + 7 ≡ 3 (mod 4)`. A 3-character final group encodes 2 bytes, so its
+      third character carries only 4 data bits: its low **2** bits must be zero.
+      `41 &&& 3 == 1`.
+    * `n ≡ 3` → `n + 7 ≡ 2 (mod 4)`. A 2-character final group encodes 1 byte, so its
+      second character carries only 2 data bits: its low **4** bits must be zero.
+      `41 &&& 15 == 9`.
+
+  In both surviving cases `?p` is not a character a canonical encoder can emit in that
+  position, so no scope produces a `key_name/1` ending in `"_lookup"`.
+
+  The remaining residue, `n + 7 ≡ 0 (mod 4)`, needs `n ≡ 1`, and 1 is the one length an
+  unpadded base64 string can never have. That case is worth naming, because it is the
+  only place the property is *not* about `?p` at all: canonical encodings ending in
+  `"_lookup"` genuinely exist at length 8 — `"A_lookup"` is one, the encoding of
+  `<<3, 249, 104, 162, 75, 169>>` — and all 64 of them are excluded solely because they
+  would require an `enc(s2)` of length 1. Both halves of the argument are load-bearing.
+
+  The property is therefore real but **fragile**: it depends on the alphabet, on
+  `padding: false`, and on the exact suffix. Changing any of the three — hex instead of
+  base64url, padding back on, a suffix ending in a character whose low bits are zero
+  (`"_lookupA"`, say) — can reintroduce the collision. `AshVault.KeyProviders.OpenBaoKeyNameTest`
+  asserts it directly so a change to any of them fails loudly.
   """
   @spec lookup_key_name(AshVault.KeyProvider.scope()) :: String.t()
   def lookup_key_name(scope), do: key_name(scope) <> "_lookup"
@@ -273,10 +316,10 @@ defmodule AshVault.KeyProviders.OpenBao do
     name = key_name(scope)
 
     with :ok <- ensure_tombstone(scope),
-         :ok <- delete_transit_key(name),
+         :ok <- Transport.delete_transit_key(__MODULE__, name),
          # Erasure must be total. A surviving lookup key would let anyone holding it
          # keep confirming guesses about a subject whose data was "destroyed".
-         :ok <- delete_transit_key(lookup_key_name(scope)) do
+         :ok <- Transport.delete_transit_key(__MODULE__, lookup_key_name(scope)) do
       :ok
     end
   end
@@ -287,7 +330,7 @@ defmodule AshVault.KeyProviders.OpenBao do
   # honestly idempotent.
   defp ensure_tombstone(scope) do
     case check_tombstone(scope) do
-      :absent -> write_tombstone(scope)
+      :absent -> Transport.write_tombstone(__MODULE__, key_name(scope))
       {:error, :destroyed} -> :ok
       other -> other
     end
@@ -302,229 +345,7 @@ defmodule AshVault.KeyProviders.OpenBao do
   """
   @doc since: "0.1.0"
   @spec classify_transit_key(integer(), term()) :: :present | :absent | {:unavailable, term()}
-  def classify_transit_key(200, body) do
-    if is_map(body) and is_map(Map.get(body, "data")) do
-      :present
-    else
-      {:unavailable, {:ambiguous_transit_response, 200}}
-    end
-  end
-
-  def classify_transit_key(404, body) do
-    cond do
-      route_missing_body?(body) -> {:unavailable, :transit_mount_unavailable}
-      is_map(body) and Map.has_key?(body, "errors") and Map.get(body, "errors") == [] -> :absent
-      true -> {:unavailable, {:ambiguous_transit_response, 404}}
-    end
-  end
-
-  def classify_transit_key(status, _body) when is_integer(status),
-    do: {:unavailable, {:http_status, status}}
-
-  # ── transit ────────────────────────────────────────────────────────────────────
-
-  defp meta_or_create(name) do
-    case read_meta(name) do
-      {:ok, :missing} -> create_key(name)
-      {:ok, meta} -> {:ok, meta}
-      {:error, error} -> {:error, error}
-    end
-  end
-
-  defp read_meta(name) do
-    case get(transit_path("/keys/#{name}")) do
-      {:ok, %{status: status, body: body}} ->
-        case classify_transit_key(status, body) do
-          :present -> {:ok, data(body)}
-          :absent -> {:ok, :missing}
-          {:unavailable, reason} -> {:error, unavailable(reason)}
-        end
-
-      {:error, error} ->
-        {:error, error}
-    end
-  end
-
-  defp create_key(name) do
-    body = %{
-      type: key_type(),
-      exportable: true,
-      allow_plaintext_backup: false
-    }
-
-    with {:ok, response} <- post(transit_path("/keys/#{name}"), body) do
-      transit_ok(response)
-    end
-  end
-
-  # Erasure is decided by STATE, never by parsing an error message.
-  #
-  # The old code matched the bare substring "not found" on the *config* call — which is
-  # issued before any delete — and on a match returned `:ok` without ever issuing the
-  # delete. "not found" also appears in policy denials and proxy-surfaced 400s, so a
-  # denied `deletion_allowed` config call reported a successful destroy while the key
-  # stayed present and exportable, and `destroy/1` went on to write the tombstone.
-  defp delete_transit_key(name) do
-    case read_transit_key(name) do
-      # Nothing to delete. `destroy/1` is still meaningful: the tombstone is what stops
-      # `current_key/1` minting a fresh v1 for this scope later.
-      {:ok, :absent} ->
-        :ok
-
-      {:ok, :present} ->
-        with :ok <- allow_deletion(name),
-             :ok <- issue_delete(name) do
-          confirm_absent(name)
-        end
-
-      {:error, error} ->
-        {:error, error}
-    end
-  end
-
-  defp read_transit_key(name) do
-    case get(transit_path("/keys/#{name}")) do
-      {:ok, %{status: status, body: body}} ->
-        case classify_transit_key(status, body) do
-          {:unavailable, reason} -> {:error, unavailable(reason)}
-          state -> {:ok, state}
-        end
-
-      {:error, error} ->
-        {:error, error}
-    end
-  end
-
-  defp allow_deletion(name) do
-    case post(transit_path("/keys/#{name}/config"), %{deletion_allowed: true}) do
-      {:ok, %{status: 200}} -> :ok
-      {:ok, response} -> unavailable!(response)
-      {:error, error} -> {:error, error}
-    end
-  end
-
-  defp issue_delete(name) do
-    case request(:delete, transit_path("/keys/#{name}")) do
-      {:ok, %{status: status}} when status in 200..299 -> :ok
-      {:ok, response} -> unavailable!(response)
-      {:error, error} -> {:error, error}
-    end
-  end
-
-  # The load-bearing check: the key must be positively gone before `destroy/1` will
-  # write a tombstone and report success. An operator who closes a deletion ticket on
-  # the strength of a `:ok` deserves the key to actually be gone.
-  defp confirm_absent(name) do
-    case read_transit_key(name) do
-      {:ok, :absent} -> :ok
-      {:ok, :present} -> {:error, unavailable({:transit_key_still_present, name})}
-      {:error, error} -> {:error, error}
-    end
-  end
-
-  defp export(name, version) do
-    path = transit_path("/export/encryption-key/#{name}/#{version}")
-
-    case get(path) do
-      {:ok, %{status: 200, body: body}} ->
-        body
-        |> data()
-        |> Map.get("keys", %{})
-        |> Map.get(to_string(version))
-        |> decode_key()
-
-      {:ok, %{status: 404}} ->
-        {:error, :not_found}
-
-      # A version above `latest_version`, or below `min_decryption_version`, is a 400
-      # on this server, not a 404.
-      {:ok, %{status: 400} = response} ->
-        if unknown_version?(response), do: {:error, :not_found}, else: unavailable!(response)
-
-      {:ok, response} ->
-        unavailable!(response)
-
-      {:error, error} ->
-        {:error, error}
-    end
-  end
-
-  defp decode_key(encoded) when is_binary(encoded) do
-    case Base.decode64(encoded) do
-      {:ok, key} -> {:ok, key}
-      :error -> {:error, unavailable(:malformed_key_material)}
-    end
-  end
-
-  defp decode_key(_), do: {:error, :not_found}
-
-  defp transit_ok(%{status: 200, body: body}), do: {:ok, data(body)}
-  defp transit_ok(response), do: unavailable!(response)
-
-  @doc """
-  Extract a key version's creation time from transit key metadata.
-
-  Returns `{:error, %AshVault.Errors.ProviderUnavailable{}}` rather than fabricating a
-  timestamp. A key whose `created_at` is always `DateTime.utc_now()` is never older
-  than a `max_age`, so every age-based `AshVault.RotationPolicy` silently never fires
-  and nothing anywhere logs a reason. `AshVault.KeyProviders.Local` refuses the same
-  fabrication (`decode_meta/2`) for the same reason.
-
-  Public so the refusal can be tested against metadata shapes a live server will not
-  produce on demand.
-  """
-  @doc since: "0.1.0"
-  @spec created_at(map(), term()) :: {:ok, DateTime.t()} | {:error, Exception.t()}
-  def created_at(meta, version) do
-    meta
-    |> key_entry(version)
-    |> to_datetime()
-    |> case do
-      {:ok, datetime} -> {:ok, datetime}
-      :error -> {:error, unavailable({:malformed_key_metadata, version})}
-    end
-  end
-
-  defp key_entry(meta, version) when is_map(meta) do
-    case Map.get(meta, "keys") do
-      keys when is_map(keys) -> Map.get(keys, to_string(version))
-      _ -> nil
-    end
-  end
-
-  defp key_entry(_meta, _version), do: nil
-
-  defp to_datetime(seconds) when is_integer(seconds) do
-    case DateTime.from_unix(seconds) do
-      {:ok, datetime} -> {:ok, datetime}
-      {:error, _reason} -> :error
-    end
-  end
-
-  defp to_datetime(%{"creation_time" => time}) when is_binary(time) do
-    case DateTime.from_iso8601(time) do
-      {:ok, datetime, _offset} -> {:ok, datetime}
-      _ -> :error
-    end
-  end
-
-  defp to_datetime(_), do: :error
-
-  # ── tombstones ─────────────────────────────────────────────────────────────────
-
-  defp check_tombstone(scope) do
-    case get(kv_path("/data/tombstones/#{key_name(scope)}")) do
-      {:ok, %{status: status, body: body}} ->
-        case classify_tombstone(status, body) do
-          :destroyed -> {:error, :destroyed}
-          :absent -> :absent
-          {:unavailable, reason} -> {:error, unavailable(reason)}
-        end
-
-      {:error, error} ->
-        {:error, error}
-    end
-  end
+  defdelegate classify_transit_key(status, body), to: Transport
 
   @doc """
   Classify a raw tombstone-read response into `:destroyed`, `:absent` or
@@ -536,303 +357,103 @@ defmodule AshVault.KeyProviders.OpenBao do
   """
   @doc since: "0.1.0"
   @spec classify_tombstone(integer(), term()) :: :destroyed | :absent | {:unavailable, term()}
-  def classify_tombstone(200, body) do
-    # A proxy answering 200 with an HTML page at the tombstone path must not make every
-    # scope in the system report `KeyDestroyed`. Fail-closed is not an excuse for
-    # deciding erasure from a status code.
-    if is_map(body) and is_map(Map.get(body, "data")) do
-      :destroyed
-    else
-      {:unavailable, {:ambiguous_tombstone_response, 200}}
-    end
-  end
-
-  def classify_tombstone(404, body) do
-    cond do
-      # A soft-deleted tombstone still carries its metadata (`data: {"data": null,
-      # "metadata": {...}}`): it existed, so it counts as destroyed.
-      is_map(body) and is_map(Map.get(body, "data")) ->
-        :destroyed
-
-      # A missing KV mount is status-identical to "no tombstone here". It is an
-      # outage, never "not destroyed", and the mount is NEVER created here: a freshly
-      # created, empty tombstone store reports every erased scope as intact.
-      route_missing_body?(body) ->
-        {:unavailable, :kv_mount_unavailable}
-
-      # The one shape a genuinely absent KV-v2 secret returns, verified live against
-      # openbao 2.6.2: `404 {"errors":[]}`. Anything else — an ingress HTML 404 during
-      # a config reload, a gateway error page, a body that is not a map at all — is an
-      # outage. `Map.has_key?/2` is load-bearing: a body with no "errors" key must not
-      # be read as an empty error list.
-      is_map(body) and Map.get(body, "errors") == [] and Map.has_key?(body, "errors") ->
-        :absent
-
-      true ->
-        {:unavailable, {:ambiguous_tombstone_response, 404}}
-    end
-  end
-
-  def classify_tombstone(status, _body) when is_integer(status),
-    do: {:unavailable, {:http_status, status}}
-
-  defp write_tombstone(scope, retried? \\ false) do
-    body = %{data: %{destroyed_at: DateTime.to_iso8601(DateTime.utc_now())}}
-
-    case post(kv_path("/data/tombstones/#{key_name(scope)}"), body) do
-      {:ok, %{status: status}} when status in 200..299 ->
-        :ok
-
-      {:ok, %{status: 404} = response} ->
-        if route_missing?(response) and not retried? do
-          with :ok <- ensure_kv_mount(), do: write_tombstone(scope, true)
-        else
-          unavailable!(response)
-        end
-
-      {:ok, response} ->
-        unavailable!(response)
-
-      {:error, error} ->
-        {:error, error}
-    end
-  end
-
-  defp ensure_kv_mount do
-    body = %{type: "kv", options: %{version: "2"}}
-
-    case post("/v1/sys/mounts/#{kv_mount()}", body) do
-      {:ok, %{status: status}} when status in 200..299 ->
-        :ok
-
-      {:ok, %{status: 400} = response} ->
-        if already_mounted?(response), do: :ok, else: unavailable!(response)
-
-      {:ok, response} ->
-        unavailable!(response)
-
-      {:error, error} ->
-        {:error, error}
-    end
-  end
-
-  # ── HTTP ───────────────────────────────────────────────────────────────────────
-
-  defp get(path), do: request(:get, path)
-
-  defp post(path, body \\ %{}), do: request(:post, path, body)
-
-  defp request(method, path, body \\ nil) do
-    with {:ok, token} <- token() do
-      options =
-        [
-          method: method,
-          base_url: address(),
-          url: path,
-          headers: [{"x-vault-token", token}],
-          receive_timeout: receive_timeout(),
-          retry: :transient,
-          max_retries: max_retries()
-        ]
-        |> then(fn options -> if body, do: Keyword.put(options, :json, body), else: options end)
-
-      perform(options)
-    end
-  end
-
-  # `Req.request/1` returns `{:error, exception}` for a transport failure, but it also
-  # *raises* (a bad `:base_url`, an unsupported scheme, a broken step) and can exit
-  # (an out-of-range port). An exception escaping a Req step as a non-AshVault error
-  # would be classified by callers as "some unknown failure" rather than a provider
-  # outage — and, worse, such an exception can carry the whole `Req.Request`, whose
-  # headers hold the token. Everything becomes `ProviderUnavailable`, carrying only the
-  # kind and reason.
-  defp perform(options) do
-    case transport_status() do
-      :ready ->
-        case options |> Req.new() |> Req.request() do
-          {:ok, response} -> {:ok, response}
-          {:error, exception} -> {:error, unavailable(transport_reason(exception))}
-        end
-
-      {:not_started, app} ->
-        {:error, unavailable({:not_started, app})}
-    end
-  rescue
-    exception -> {:error, unavailable(transport_reason(exception))}
-  catch
-    :exit, _reason -> {:error, unavailable({:transport, :exit})}
-    :throw, _value -> {:error, unavailable({:transport, :throw})}
-  end
+  defdelegate classify_tombstone(status, body), to: Transport
 
   @doc """
   Whether the HTTP transport this provider needs is actually running.
 
-  A missing OTP application is **not** an outage, and reporting it as one is the single
-  most expensive confusion this module can cause. With `:req` unstarted, every call here
-  used to come back as
-
-      %ProviderUnavailable{reason: {:transport, ArgumentError}}
-
-  which is byte-for-byte what a genuinely unreachable OpenBao looks like — so an
-  operator pages whoever owns the secrets infrastructure, over a missing line in
-  `extra_applications`. `ArgumentError` is `Finch`'s registry lookup failing
-  (`unknown registry: Req.Finch`); no socket was ever opened and OpenBao was never
-  asked anything.
-
-  The check is positive and cheap: `Req`'s default pool is a supervisor registered under
-  the name `Req.Finch`, so a live pid there settles it in one `Process.whereis/1` with
-  no scan of the application controller. Only when that name is unregistered — which is
-  the broken case, and also the case for an application that has pointed `Req` at a pool
-  of its own — does it fall back to asking which applications are running.
-
-  Deliberately **not** done by matching on the exception's message: a `Req` step can
-  raise an `ArgumentError` for reasons that have nothing to do with a missing
-  application, and this module's rule is that an exception's message never travels into
-  an error struct, because several `Req`/`Finch` messages interpolate the request, whose
-  headers carry the token.
-
-  Public so the three-way distinction — running, `:req` missing, `:finch` missing — can
-  be asserted without stopping an application out from under the test suite.
+  See `AshVault.KeyProviders.OpenBao.Transport.transport_status/0` — a missing `:req`
+  or `:finch` application is a dependency mistake, not an OpenBao outage, and the two
+  must never be reported identically.
   """
   @doc since: "0.1.0"
   @spec transport_status() :: :ready | {:not_started, :req | :finch}
-  def transport_status do
-    cond do
-      is_pid(Process.whereis(Req.Finch)) -> :ready
-      # `:req` first, and it is the actionable one: starting `:req` starts `:finch`
-      # with it, so naming `:finch` to someone who is missing both sends them to fix
-      # the wrong dependency.
-      not started?(:req) -> {:not_started, :req}
-      not started?(:finch) -> {:not_started, :finch}
-      # `:req` is up and has been pointed at a pool that is not `Req.Finch`. Nothing to
-      # report: let the request run and fail on its own terms if it is going to.
-      true -> :ready
+  defdelegate transport_status(), to: Transport
+
+  @doc """
+  Extract a key version's creation time from transit key metadata.
+
+  Returns `{:error, %AshVault.Errors.ProviderUnavailable{}}` rather than fabricating a
+  timestamp. A key whose `created_at` is always `DateTime.utc_now()` is never older
+  than a `max_age`, so every age-based `AshVault.RotationPolicy` silently never fires
+  and nothing anywhere logs a reason.
+
+  Public so the refusal can be tested against metadata shapes a live server will not
+  produce on demand.
+  """
+  @doc since: "0.1.0"
+  @spec created_at(map(), term()) :: {:ok, DateTime.t()} | {:error, Exception.t()}
+  def created_at(meta, version), do: Transport.created_at(__MODULE__, meta, version)
+
+  # ── transit ────────────────────────────────────────────────────────────────────
+
+  defp check_tombstone(scope), do: Transport.check_tombstone(__MODULE__, key_name(scope))
+
+  defp meta_or_create(name) do
+    case Transport.read_meta(__MODULE__, name) do
+      {:ok, :missing} -> create_key(name)
+      {:ok, meta} -> {:ok, meta}
+      {:error, error} -> {:error, error}
     end
   end
 
-  defp started?(app), do: List.keymember?(Application.started_applications(), app, 0)
+  defp create_key(name) do
+    body = %{
+      type: key_type(),
+      exportable: true,
+      allow_plaintext_backup: false
+    }
 
-  # Only the exception's *kind* and reason travel into the error struct — never the
-  # request, whose headers carry the token, and never the exception's message, which for
-  # several Req/Finch errors interpolates the request.
-  defp transport_reason(%Req.TransportError{reason: reason}), do: {:transport, reason}
-
-  # The exception that a missing `:req`/`:finch` produces, caught here as well as in the
-  # preflight: an application can stop between the two, and a custom pool name makes the
-  # preflight deliberately permissive.
-  defp transport_reason(%ArgumentError{}) do
-    case transport_status() do
-      {:not_started, app} -> {:not_started, app}
-      :ready -> {:transport, ArgumentError}
+    with {:ok, response} <- Transport.post(__MODULE__, path("/keys/#{name}"), body) do
+      transit_ok(response)
     end
   end
 
-  defp transport_reason(%{__struct__: module}), do: {:transport, module}
-  defp transport_reason(_), do: :transport_error
+  defp export(name, version) do
+    case Transport.get(__MODULE__, path("/export/encryption-key/#{name}/#{version}")) do
+      {:ok, %{status: 200, body: body}} ->
+        body
+        |> Transport.data()
+        |> Map.get("keys", %{})
+        |> Map.get(to_string(version))
+        |> decode_key()
 
-  defp data(body) when is_map(body), do: Map.get(body, "data") || %{}
-  defp data(_), do: %{}
+      {:ok, %{status: 404}} ->
+        {:error, :not_found}
 
-  defp errors(%{body: body}) when is_map(body) do
-    case Map.get(body, "errors") do
-      list when is_list(list) -> list
-      _ -> []
+      # A version above `latest_version`, or below `min_decryption_version`, is a 400
+      # on this server, not a 404.
+      {:ok, %{status: 400} = response} ->
+        if unknown_version?(response),
+          do: {:error, :not_found},
+          else: Transport.unavailable!(__MODULE__, response)
+
+      {:ok, response} ->
+        Transport.unavailable!(__MODULE__, response)
+
+      {:error, error} ->
+        {:error, error}
     end
   end
 
-  defp errors(_), do: []
-
-  defp error_message(response) do
-    response |> errors() |> Enum.filter(&is_binary/1) |> Enum.join(" ")
+  defp decode_key(encoded) when is_binary(encoded) do
+    case Base.decode64(encoded) do
+      {:ok, key} -> {:ok, key}
+      :error -> {:error, Transport.unavailable(__MODULE__, :malformed_key_material)}
+    end
   end
 
-  defp route_missing?(response), do: error_message(response) =~ "no handler for route"
+  defp decode_key(_), do: {:error, :not_found}
 
-  defp route_missing_body?(body), do: route_missing?(%{body: body})
-
-  defp already_mounted?(response), do: error_message(response) =~ "already in use"
+  defp transit_ok(%{status: 200, body: body}), do: {:ok, Transport.data(body)}
+  defp transit_ok(response), do: Transport.unavailable!(__MODULE__, response)
 
   defp unknown_version?(response) do
-    error_message(response) =~ ~r/version|no existing key|not found/i
+    Transport.error_message(response) =~ ~r/version|no existing key|not found/i
   end
 
-  defp unavailable!(response), do: {:error, unavailable(response)}
+  defp path(suffix), do: Transport.transit_path(__MODULE__, suffix)
 
-  defp unavailable(%Req.Response{status: status}), do: unavailable({:http_status, status})
-
-  defp unavailable(%{status: status}) when is_integer(status),
-    do: unavailable({:http_status, status})
-
-  defp unavailable(reason) do
-    ProviderUnavailable.exception(provider: __MODULE__, reason: normalise_reason(reason))
-  end
-
-  defp normalise_reason({:http_status, 403}), do: :forbidden
-  defp normalise_reason(reason), do: reason
-
-  # ── configuration ──────────────────────────────────────────────────────────────
-
-  defp config, do: AshVault.KeyProvider.config(__MODULE__)
-
-  defp address, do: Keyword.get(config(), :address) || @default_address
-
-  defp transit_mount, do: Keyword.get(config(), :transit_mount) || @default_transit_mount
-
-  defp kv_mount, do: Keyword.get(config(), :kv_mount) || @default_kv_mount
-
-  defp key_type, do: Keyword.get(config(), :key_type) || @default_key_type
-
-  defp receive_timeout, do: Keyword.get(config(), :receive_timeout) || @default_receive_timeout
-
-  defp max_retries do
-    case Keyword.get(config(), :max_retries) do
-      retries when is_integer(retries) and retries >= 0 -> retries
-      _ -> @default_max_retries
-    end
-  end
-
-  defp transit_path(suffix), do: "/v1/#{transit_mount()}#{suffix}"
-
-  defp kv_path(suffix), do: "/v1/#{kv_mount()}#{suffix}"
-
-  # Resolves the token without ever placing it in a log line or an error struct.
-  defp token do
-    case Keyword.get(config(), :token) do
-      token when is_binary(token) and token != "" -> {:ok, token}
-      {:system, variable} when is_binary(variable) -> from_env(variable)
-      fun when is_function(fun, 0) -> from_fun(fun)
-      _ -> {:error, unavailable(:missing_token)}
-    end
-  end
-
-  defp from_env(variable) do
-    case System.get_env(variable) do
-      token when is_binary(token) and token != "" -> {:ok, token}
-      _ -> {:error, unavailable(:missing_token)}
-    end
-  end
-
-  defp from_fun(fun) do
-    case fun.() do
-      token when is_binary(token) and token != "" -> {:ok, token}
-      _ -> {:error, unavailable(:missing_token)}
-    end
-  end
-
-  # Deliberately NOT `:erlang.term_to_binary/1`. The external term format is not
-  # guaranteed stable across OTP releases, and it feeds BOTH the transit key name and
-  # the tombstone path: an encoding change would relocate the tombstone (scope
-  # resurrects with a fresh key) and the key name (every existing ciphertext becomes
-  # `KeyNotFound`). CORE_SPEC §6 requires scope keys stable across releases.
-  defp validate_scope!(scope) when is_binary(scope), do: scope
-
-  defp validate_scope!(scope) do
-    raise ArgumentError, """
-    #{inspect(__MODULE__)} scopes must be binaries, got: #{inspect(scope)}.
-
-    Scopes reach a key provider already normalised to a binary by the vault's
-    `AshVault.Scope` implementation.
-    """
-  end
+  defp key_type,
+    do: Keyword.get(AshVault.KeyProvider.config(__MODULE__), :key_type) || @default_key_type
 end

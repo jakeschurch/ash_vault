@@ -42,6 +42,13 @@ defmodule AshVault.Dsl do
         default: false,
         doc: "Add a unique identity on the lookup token, per tenant. Requires `searchable?`."
       ],
+      pre_check_with: [
+        type: {:behaviour, Ash.Domain},
+        doc:
+          "Domain to pre-check the generated unique identity against, in a before_action " <>
+            "hook. Required for `unique?: true` on a data layer that cannot enforce " <>
+            "uniqueness itself (ETS, Mnesia); it costs a read on every write."
+      ],
       normalize: [
         type: {:or, [{:in, [:none, :downcase, :downcase_trim]}, :mfa, {:fun, 1}]},
         default: :none,

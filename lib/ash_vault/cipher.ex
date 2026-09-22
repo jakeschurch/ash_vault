@@ -42,7 +42,10 @@ defmodule AshVault.Cipher do
   @callback decrypt(payload(), key :: AshVault.Key.t(), aad :: binary()) ::
               {:ok, binary()} | {:error, :opaque_key_unsupported} | {:error, term()}
 
-  @builtin %{"aes_256_gcm_v1" => AshVault.Ciphers.AES.GCM}
+  @builtin %{
+    "aes_256_gcm_v1" => AshVault.Ciphers.AES.GCM,
+    "openbao_transit_v1" => AshVault.Ciphers.OpenBaoTransit
+  }
 
   @doc """
   Look up a cipher module by id.

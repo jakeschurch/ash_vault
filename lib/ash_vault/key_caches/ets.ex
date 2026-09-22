@@ -39,6 +39,13 @@ defmodule AshVault.KeyCaches.ETS do
   fail-closed answer, and dropping one to make room for a key would be precisely
   backwards.
 
+  Because they cannot be evicted, they are also **excluded from the `:max_entries`
+  count**. Counting an inevictable entry towards an evictable bound is how a cache stops
+  honouring it: enough destroyed scopes and `trim/1` runs out of candidates with the
+  count still over the limit, and from then on every write is over budget and the bound
+  means nothing. They carry no bytes (`AshVault.KeyCache.entry_bytes/1` returns `0` for
+  `:destroyed`), so `:max_bytes` never had the same problem.
+
   ## Not started?
 
   If the owning process is not running, `fetch/3` answers `{:miss, 0}` and `put/6` is a
@@ -167,6 +174,10 @@ defmodule AshVault.KeyCaches.ETS do
 
   @doc """
   Entry count and total cached key bytes.
+
+  `:entries` counts *every* slot, inevictable `:tombstone` entries included, so it can
+  legitimately exceed `:max_entries` — that bound applies only to the evictable ones. See
+  the "Bounds" section of the moduledoc.
   """
   @impl AshVault.KeyCache
   @spec stats(AshVault.KeyCache.name()) :: %{
@@ -243,6 +254,7 @@ defmodule AshVault.KeyCaches.ETS do
        entries: entries,
        generations: generations,
        count: 0,
+       tombstones: 0,
        bytes: 0,
        max_entries: Keyword.get(opts, :max_entries, @default_max_entries),
        max_bytes: Keyword.get(opts, :max_bytes, @default_max_bytes)
@@ -268,10 +280,19 @@ defmodule AshVault.KeyCaches.ETS do
 
     freed = Enum.reduce(removed, 0, fn {_k, _e, _x, _g, _l, bytes}, acc -> acc + bytes end)
 
+    tombstones =
+      Enum.count(removed, fn {{_scope, slot}, _e, _x, _g, _l, _b} -> slot == :tombstone end)
+
     next = generation(state.name, scope) + 1
     :ets.insert(state.generations, {scope, next})
 
-    {:reply, :ok, %{state | count: state.count - length(removed), bytes: state.bytes - freed}}
+    {:reply, :ok,
+     %{
+       state
+       | count: state.count - length(removed),
+         tombstones: state.tombstones - tombstones,
+         bytes: state.bytes - freed
+     }}
   end
 
   def handle_call(:evict_all, _from, state) do
@@ -288,7 +309,7 @@ defmodule AshVault.KeyCaches.ETS do
       :ets.insert(state.generations, {scope, generation(state.name, scope) + 1})
     end)
 
-    {:reply, :ok, %{state | count: 0, bytes: 0}}
+    {:reply, :ok, %{state | count: 0, tombstones: 0, bytes: 0}}
   end
 
   def handle_call(:stats, _from, state) do
@@ -315,15 +336,23 @@ defmodule AshVault.KeyCaches.ETS do
 
     state =
       case previous do
-        nil -> %{state | count: state.count + 1, bytes: state.bytes + bytes}
-        old -> %{state | bytes: state.bytes - old + bytes}
+        nil ->
+          %{
+            state
+            | count: state.count + 1,
+              tombstones: state.tombstones + if(slot == :tombstone, do: 1, else: 0),
+              bytes: state.bytes + bytes
+          }
+
+        old ->
+          %{state | bytes: state.bytes - old + bytes}
       end
 
     trim(state)
   end
 
   defp trim(state) do
-    if state.count <= state.max_entries and state.bytes <= state.max_bytes do
+    if within_bounds?(state) do
       state
     else
       # Tombstones are excluded: they hold no key material, they are the fail-closed
@@ -337,7 +366,7 @@ defmodule AshVault.KeyCaches.ETS do
         |> Enum.sort_by(fn {_scope, _slot, last_used, _bytes} -> last_used end)
 
       Enum.reduce_while(candidates, state, fn {scope, slot, _last_used, bytes}, acc ->
-        if acc.count <= acc.max_entries and acc.bytes <= acc.max_bytes do
+        if within_bounds?(acc) do
           {:halt, acc}
         else
           :ets.delete(acc.entries, {scope, slot})
@@ -345,5 +374,11 @@ defmodule AshVault.KeyCaches.ETS do
         end
       end)
     end
+  end
+
+  # Tombstones are inevictable, so they do not count against the evictable bound. See the
+  # "Bounds" section of the moduledoc.
+  defp within_bounds?(state) do
+    state.count - state.tombstones <= state.max_entries and state.bytes <= state.max_bytes
   end
 end

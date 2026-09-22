@@ -6,6 +6,7 @@ defmodule Example.Accounts do
   resources do
     resource Example.Accounts.Organization
     resource Example.Accounts.User
+    resource Example.Accounts.AuthUser
     resource Example.Accounts.Contact
   end
 end

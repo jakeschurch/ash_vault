@@ -17,6 +17,9 @@ defmodule AshVault.Test.Domain do
     resource(AshVault.Test.EtsContact)
     resource(AshVault.Test.EtsSecretDoc)
     resource(AshVault.Test.SearchUser)
+    resource(AshVault.Test.LooseSearchUser)
+    resource(AshVault.Test.DedupeUser)
     resource(AshVault.Test.EtsNoLookupDoc)
+    resource(AshVault.Test.EtsNonBinaryScopeDoc)
   end
 end

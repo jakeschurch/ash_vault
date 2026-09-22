@@ -42,7 +42,7 @@ defmodule AshVault.Vault.Runtime do
   """
   @spec encrypt!(binary(), Context.t(), opts()) :: binary()
   def encrypt!(plaintext, %Context{} = ctx, opts) when is_binary(plaintext) do
-    scope = resolve_scope!(ctx, opts, :encrypt)
+    scope = resolve_scope!(ctx, opts.scope, :encrypt)
     key_info = current_key!(opts.key_provider, scope, ctx)
     key_info = maybe_rotate(key_info, scope, ctx, opts)
 
@@ -70,6 +70,11 @@ defmodule AshVault.Vault.Runtime do
       {:error, :opaque_key_unsupported} ->
         raise opaque_key_unsupported(opts, opts.cipher, ctx, :encrypt)
 
+      # A network-backed cipher already knows who was unavailable and why; re-wrapping it
+      # would re-attribute the outage to the cipher module.
+      {:error, %ProviderUnavailable{} = error} ->
+        raise error
+
       {:error, reason} ->
         raise ProviderUnavailable.exception(provider: opts.cipher, reason: reason)
     end
@@ -96,12 +101,25 @@ defmodule AshVault.Vault.Runtime do
     )
   end
 
-  # One place enforces the scope invariant, so a custom `AshVault.Scope` that returns a
-  # non-binary fails here with a clear message rather than differently in each provider.
-  defp resolve_scope!(ctx, opts, operation) do
+  @doc """
+  Resolve `scope_module` against `ctx`, enforcing the scope invariant.
+
+  One place enforces it, so a custom `AshVault.Scope` that returns a non-binary fails
+  here with a clear message rather than differently in each provider — a provider's own
+  `validate_scope!/1` would raise a bare `ArgumentError` naming the provider, which tells
+  an operator nothing about the scope module that actually produced the bad term.
+
+  Public because the lookup-token path (`AshVault.Lookup.field_key/3`) resolves a scope
+  outside `encrypt!/3` and `decrypt!/3` and must reach the same check.
+
+  Raises `AshVault.Errors.InvalidScope` for a non-binary, and re-raises
+  `AshVault.Errors.MissingScope` tagged with `operation`.
+  """
+  @spec resolve_scope!(Context.t(), module(), atom()) :: binary()
+  def resolve_scope!(%Context{} = ctx, scope_module, operation) do
     scope =
       try do
-        opts.scope.resolve!(ctx)
+        scope_module.resolve!(ctx)
       rescue
         error in [MissingScope] ->
           reraise %{error | operation: operation}, __STACKTRACE__
@@ -115,7 +133,7 @@ defmodule AshVault.Vault.Runtime do
       # an error that Ash then logs and ships to APM. The diagnosis needs the shape only:
       # "you returned a struct, not a binary".
       raise InvalidScope.exception(
-              scope_module: opts.scope,
+              scope_module: scope_module,
               scope: AshVault.Scope.describe(scope),
               resource: ctx.resource,
               field: ctx.field
@@ -148,7 +166,7 @@ defmodule AshVault.Vault.Runtime do
         {:error, error} -> raise error
       end
 
-    scope = resolve_scope!(ctx, opts, :decrypt)
+    scope = resolve_scope!(ctx, opts.scope, :decrypt)
     key = get_key!(opts.key_provider, scope, env.key_version, ctx)
     aad = build_aad(scope, ctx)
 
@@ -164,6 +182,14 @@ defmodule AshVault.Vault.Runtime do
 
       {:error, :opaque_key_unsupported} ->
         raise opaque_key_unsupported(opts, cipher_mod, ctx, :decrypt)
+
+      # A cipher that reaches over the network — `AshVault.Ciphers.OpenBaoTransit` does
+      # the AEAD inside OpenBao — can fail for reasons that have nothing to do with the
+      # stored bytes. A 403, a deleted transit key or a connection refused must reach the
+      # operator as the outage it is. Reporting it as CiphertextIntegrityFailed would tell
+      # them their data was tampered with, which is this codebase's cardinal lie.
+      {:error, %ProviderUnavailable{} = error} ->
+        raise error
 
       {:error, _reason} ->
         raise CiphertextIntegrityFailed.exception(

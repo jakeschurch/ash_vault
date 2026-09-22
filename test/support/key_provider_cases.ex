@@ -30,6 +30,22 @@ defmodule AshVault.Test.Support.KeyProviderCases do
       name, so the tuple form is dispatched to the provider's `name`-taking variants.
     * `:scope` — a zero-arity function generating a fresh, unused scope.
     * `:key_bytes` — optional, the key size the provider mints. Defaults to 32.
+    * `:opaque_keys?` — optional, `true` for a provider that serves `AshVault.Key`
+      handles rather than raw bytes (`AshVault.KeyProviders.OpenBaoTransit`). Defaults
+      to `false`.
+
+  ## Non-exporting providers
+
+  Exactly **one** case in this suite is about raw bytes: "first current_key mints
+  version 1" asserts `is_binary/1` and the key size. `opaque_keys?: true` swaps that
+  assertion for `AshVault.Key.opaque?/1` and leaves every other case running verbatim —
+  including the three that compare keys for equality, which a non-exporting provider
+  still satisfies because its handles are deterministic functions of scope and version.
+
+  Nothing else in the contract is waived. A provider that never exports key material
+  still has to mint at v1, stay stable across calls, differ per scope, keep old versions
+  fetchable after a rotation, refuse unknown and non-integer versions, reject non-binary
+  scopes, tombstone on destroy, and never re-mint behind a tombstone.
   """
 
   @doc false
@@ -51,9 +67,19 @@ defmodule AshVault.Test.Support.KeyProviderCases do
 
           assert {:ok, key_info} = current_key(provider, scope)
           assert key_info.version == 1
-          assert is_binary(key_info.key)
-          assert byte_size(key_info.key) == key_bytes
           assert %DateTime{} = key_info.created_at
+
+          # The one assertion a non-exporting provider cannot make. It has no bytes to
+          # hand over — that is the entire point — so it is held to "this is a usable
+          # opaque handle" instead. Every other case in this suite runs unchanged.
+          if Map.get(context, :opaque_keys?, false) do
+            assert AshVault.Key.opaque?(key_info.key)
+            assert AshVault.Key.key?(key_info.key)
+            refute is_binary(key_info.key)
+          else
+            assert is_binary(key_info.key)
+            assert byte_size(key_info.key) == key_bytes
+          end
         end
 
         test "current_key is stable across calls", %{provider: provider, scope: scope} do

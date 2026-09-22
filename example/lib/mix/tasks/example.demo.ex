@@ -2,17 +2,18 @@ defmodule Mix.Tasks.Example.Demo do
   @shortdoc "Walk the whole AshVault story end to end, with narration."
 
   @moduledoc """
-  The runnable demonstration. Seven steps, in order:
+  The runnable demonstration. Eight steps, in order:
 
     1. two organizations, each with users and contacts
     2. a raw SQL read of the encrypted columns — ciphertext only
     3. the same rows through Ash — plaintext
     4. a field policy denying a field, and a policy denying key rotation
     5. rotate organization A's key; old rows keep their old key version
-    6. a `pg_dump` taken while A is healthy, then crypto-erase A
-    7. restore that dump — A's rows come back, and still cannot be decrypted
+    6. register and sign in by an **encrypted** email address
+    7. a `pg_dump` taken while A is healthy, then crypto-erase A
+    8. restore that dump — A's rows come back, and still cannot be decrypted
 
-  Step 7 is the reason the library exists. Everything before it is scaffolding.
+  Step 8 is the reason the library exists. Everything before it is scaffolding.
 
       mix example.demo
       ASHVAULT_PROVIDER=local mix example.demo
@@ -24,6 +25,7 @@ defmodule Mix.Tasks.Example.Demo do
 
   alias AshVault.Envelope
   alias AshVault.Errors.KeyDestroyed
+  alias Example.Accounts.AuthUser
   alias Example.Accounts.Contact
   alias Example.Accounts.Organization
   alias Example.Accounts.User
@@ -45,6 +47,10 @@ defmodule Mix.Tasks.Example.Demo do
   @b_email "bob@beta-needle.invalid"
   @b_phone "+1-555-0200-NEEDLE"
 
+  # Registered in BOTH organizations, deliberately: the same address under two tenants is
+  # what shows the lookup token is per-scope.
+  @auth_email "ada@acme-needle.invalid"
+
   @impl Mix.Task
   def run(_args) do
     Backup.available?() ||
@@ -61,8 +67,9 @@ defmodule Mix.Tasks.Example.Demo do
     step_3_ash_read(org_a, org_b)
     step_4_policies(org_a)
     step_5_rotate(org_a, org_b)
-    dump_path = step_6_backup_and_erase(org_a, org_b)
-    step_7_restore(dump_path, org_a, org_b)
+    step_6_sign_in(org_a, org_b)
+    dump_path = step_7_backup_and_erase(org_a, org_b)
+    step_8_restore(dump_path, org_a, org_b)
 
     outro(org_a)
   end
@@ -301,8 +308,119 @@ defmodule Mix.Tasks.Example.Demo do
 
   # ── 6 ────────────────────────────────────────────────────────────────────────────
 
-  defp step_6_backup_and_erase(org_a, org_b) do
-    step(6, "Take a backup while org A is healthy, then crypto-erase org A")
+  defp step_6_sign_in(org_a, org_b) do
+    step(6, "Register and sign in, by an email address that is encrypted at rest")
+
+    say([
+      "  `Example.Accounts.AuthUser` is `encrypt :email, searchable?: true, unique?: true,",
+      "  normalize: :downcase_trim`. A password login has to FIND a row by email before it",
+      "  can check anything, and `WHERE encrypted_email = $1` can never match — AES-GCM",
+      "  draws a fresh nonce per write. The deterministic `email_lookup` token is what",
+      "  makes the query possible.",
+      "",
+      "  Password hashing and verification are ash_authentication's own",
+      "  `AshAuthentication.BcryptProvider`. Its `password` STRATEGY cannot be pointed at",
+      "  an encrypted field — see Example.Accounts.AuthUser's moduledoc for the three",
+      "  reasons and the deps/ citations — so the register and sign-in actions are written",
+      "  out by hand and AshVault supplies the lookup.",
+      ""
+    ])
+
+    {:ok, _ada} = register(org_a, @auth_email, "correct horse battery staple")
+    {:ok, _bob} = register(org_b, @auth_email, "a different password entirely")
+
+    columns =
+      query!(
+        "SELECT column_name, data_type FROM information_schema.columns " <>
+          "WHERE table_name = 'auth_users' ORDER BY ordinal_position",
+        []
+      )
+
+    [[token_a]] = query!("SELECT email_lookup FROM auth_users WHERE org_id = $1", [uuid(org_a)])
+    [[token_b]] = query!("SELECT email_lookup FROM auth_users WHERE org_id = $1", [uuid(org_b)])
+
+    say([
+      "  a) what is on disk",
+      "",
+      "     auth_users columns: " <> Enum.map_join(columns, ", ", fn [c, t] -> "#{c} #{t}" end),
+      "     Still no `email` column. One ciphertext column and one token column.",
+      "",
+      "     both organizations registered the SAME address, #{inspect(@auth_email)}:",
+      "       org A token  \\x#{Base.encode16(token_a, case: :lower)}",
+      "       org B token  \\x#{Base.encode16(token_b, case: :lower)}",
+      "       identical?   #{token_a == token_b}",
+      "",
+      "     The token key is per-scope, so the same address is a different token in each",
+      "     tenant. That is what keeps the equality leak inside one tenant instead of",
+      "     across all of them — and it is why the unique index is per tenant:",
+      "       #{index_definition("auth_users_email_lookup_unique_index")}"
+    ])
+
+    say([
+      "",
+      "  b) sign in",
+      "",
+      "     correct password, and the address typed the way a human types it:",
+      "       sign_in(#{inspect("  ADA@Acme-Needle.INVALID  ")}) → " <>
+        sign_in_summary(org_a, "  ADA@Acme-Needle.INVALID  ", "correct horse battery staple"),
+      "       (`normalize: :downcase_trim` hashed the same bytes that were encrypted)",
+      "",
+      "     wrong password:",
+      "       → " <> sign_in_summary(org_a, @auth_email, "hunter2"),
+      "",
+      "     an address nobody registered:",
+      "       → " <> sign_in_summary(org_a, "nobody@acme-needle.invalid", "hunter2"),
+      "",
+      "     org B's password against org A's tenant — two different rows, two different",
+      "     keys, no crossover:",
+      "       → " <> sign_in_summary(org_a, @auth_email, "a different password entirely"),
+      "",
+      "     and with NO tenant at all:",
+      "       → " <> no_tenant_sign_in_summary(),
+      "",
+      "     That last one is the important one. A tenant-less lookup that quietly returned",
+      "     zero rows would read as \"no such user\" at a login form, and would look",
+      "     perfectly healthy in review, in logs and in tests."
+    ])
+
+    [[id_before]] = query!("SELECT id FROM auth_users WHERE org_id = $1", [uuid(org_a)])
+
+    duplicate = register(org_a, @auth_email, "another password")
+
+    {:ok, upserted} =
+      AuthUser
+      |> Ash.Changeset.for_create(:register_or_update, %{
+        org_id: org_a,
+        email: "Ada@ACME-needle.invalid",
+        password: "rotated in place"
+      })
+      |> Ash.create(tenant: org_a)
+
+    [[id_after]] = query!("SELECT id FROM auth_users WHERE org_id = $1", [uuid(org_a)])
+
+    say([
+      "",
+      "  c) uniqueness and upsert, both on the token",
+      "",
+      "     registering the same address twice: " <> summarize_error(duplicate),
+      "       enforced by a real unique index on (org_id, email_lookup). A unique index on",
+      "       encrypted_email would constrain nothing at all.",
+      "",
+      "     `upsert_identity: :email_lookup_unique` with a differently-cased address:",
+      "       rows in org A:  #{length(query!("SELECT id FROM auth_users WHERE org_id = $1", [uuid(org_a)]))}",
+      "       same row?       #{id_before == id_after} (#{Ecto.UUID.load!(id_after)})",
+      "       returned id matches: #{Ecto.UUID.load!(id_after) == upserted.id}",
+      "",
+      "     and the new password took:",
+      "       → " <> sign_in_summary(org_a, @auth_email, "rotated in place"),
+      "       → " <> sign_in_summary(org_a, @auth_email, "correct horse battery staple")
+    ])
+  end
+
+  # ── 6 ────────────────────────────────────────────────────────────────────────────
+
+  defp step_7_backup_and_erase(org_a, org_b) do
+    step(7, "Take a backup while org A is healthy, then crypto-erase org A")
 
     dump_path =
       Path.join(System.tmp_dir!(), "ash_vault_example_#{System.unique_integer([:positive])}.sql")
@@ -329,7 +447,7 @@ defmodule Mix.Tasks.Example.Demo do
       "    org B's 32-byte key, any encoding: #{key_in_dump?(dump, key_b)}",
       "",
       "  This is the backup a leaked tarball, an old S3 object or a compliance",
-      "  retention policy would be holding. Keep it in mind for step 7."
+      "  retention policy would be holding. Keep it in mind for step 8."
     ])
 
     {:ok, %AshVault.Erasure{scope: erased_scope, destroyed_at: erased_at}} =
@@ -364,8 +482,8 @@ defmodule Mix.Tasks.Example.Demo do
 
   # ── 7 ────────────────────────────────────────────────────────────────────────────
 
-  defp step_7_restore(dump_path, org_a, org_b) do
-    step(7, "Restore the pre-erasure backup. The data comes back. The key does not.")
+  defp step_8_restore(dump_path, org_a, org_b) do
+    step(8, "Restore the pre-erasure backup. The data comes back. The key does not.")
 
     ada_before = blob_of(:users, "encrypted_email", org_a, "Ada")
 
@@ -457,6 +575,56 @@ defmodule Mix.Tasks.Example.Demo do
     Contact
     |> Ash.Changeset.for_create(:create, %{org_id: org, label: label, phone: phone}, tenant: org)
     |> Ash.create!()
+  end
+
+  defp register(org, email, password) do
+    AuthUser
+    |> Ash.Changeset.for_create(:register, %{
+      org_id: org,
+      email: email,
+      password: password,
+      password_confirmation: password
+    })
+    |> Ash.create(tenant: org)
+  end
+
+  defp sign_in_summary(org, email, password) do
+    AuthUser
+    |> Ash.Query.for_read(:sign_in, %{email: email, password: password}, tenant: org)
+    |> Ash.read_one(tenant: org)
+    |> case do
+      {:ok, nil} -> "refused (no matching user)"
+      {:ok, user} -> "signed in as #{inspect(user.email)} (#{user.id})"
+      {:error, error} -> "error — #{inspect(error.__struct__)}"
+    end
+  end
+
+  # `AshVault.Preparations.FilterByLookup` adds the error to the query rather than
+  # filtering on nothing, so `Ash.read_one/2` returns it like any other Ash error.
+  defp no_tenant_sign_in_summary do
+    AuthUser
+    |> Ash.Query.for_read(:sign_in, %{email: @auth_email, password: "irrelevant"})
+    |> Ash.read_one()
+    |> case do
+      {:ok, nil} ->
+        "SILENTLY EMPTY (this would be a bug)"
+
+      {:error, %Ash.Error.Invalid{errors: errors}} ->
+        classes =
+          errors |> Enum.map(&(&1.__struct__ |> Module.split() |> List.last())) |> Enum.uniq()
+
+        "REFUSED — #{inspect(classes)}"
+
+      other ->
+        inspect(other)
+    end
+  end
+
+  defp index_definition(name) do
+    case query!("SELECT indexdef FROM pg_indexes WHERE indexname = $1", [name]) do
+      [[definition]] -> definition
+      _ -> "(not found)"
+    end
   end
 
   defp read_user_email(org, name) do

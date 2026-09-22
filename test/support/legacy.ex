@@ -153,3 +153,113 @@ defmodule AshVault.Test.LegacyUser do
     end
   end
 end
+
+defmodule AshVault.Test.LegacySearchDomain do
+  @moduledoc """
+  A domain of its own for the searchable-backfill fixtures.
+
+  They are ETS-backed and self-contained, so keeping them out of
+  `AshVault.Test.Domain` keeps the `:postgres`-tagged fixtures and this pair independent.
+  """
+
+  use Ash.Domain, validate_config_inclusion?: false
+
+  resources do
+    resource(AshVault.Test.LegacySearchUser)
+    resource(AshVault.Test.LegacyPlainSearchUser)
+  end
+end
+
+defmodule AshVault.Test.LegacySearchUser do
+  @moduledoc """
+  A resource mid-migration whose encrypted field is also `searchable?: true`, with a
+  lossy `normalize:`.
+
+  This is the combination `backfill_from:` + `searchable?: true` — the one that used to
+  write half a row: ciphertext holding the *un-normalized* legacy value and a NULL
+  `email_lookup`, which `verify` then confirmed as correct.
+
+  ETS rather than PostgreSQL, so the fixture needs no migration and no shared table to
+  truncate.
+  """
+
+  use Ash.Resource,
+    domain: AshVault.Test.LegacySearchDomain,
+    data_layer: Ash.DataLayer.Ets,
+    extensions: [AshVault]
+
+  ash_vault do
+    vault AshVault.Test.Vault
+    scope :tenant
+
+    encrypt :email,
+      searchable?: true,
+      normalize: :downcase_trim,
+      backfill_from: :legacy_email
+  end
+
+  ets do
+    private? true
+  end
+
+  attributes do
+    uuid_primary_key :id
+    attribute :legacy_email, :string, public?: true
+    attribute :email, :string, public?: true
+  end
+
+  actions do
+    default_accept :*
+    defaults [:read, :destroy, create: :*]
+
+    update :update do
+      primary? true
+      require_atomic? false
+    end
+  end
+end
+
+defmodule AshVault.Test.LegacyPlainSearchUser do
+  @moduledoc """
+  `AshVault.Test.LegacySearchUser` with `normalize: :none`.
+
+  The token is still mandatory here — a NULL one is just as unfindable — but nothing
+  about the ciphertext changes, which is what isolates "the token was never written" from
+  "the value was normalized".
+  """
+
+  use Ash.Resource,
+    domain: AshVault.Test.LegacySearchDomain,
+    data_layer: Ash.DataLayer.Ets,
+    extensions: [AshVault]
+
+  ash_vault do
+    vault AshVault.Test.Vault
+    scope :tenant
+
+    encrypt :email,
+      searchable?: true,
+      normalize: :none,
+      backfill_from: :legacy_email
+  end
+
+  ets do
+    private? true
+  end
+
+  attributes do
+    uuid_primary_key :id
+    attribute :legacy_email, :string, public?: true
+    attribute :email, :string, public?: true
+  end
+
+  actions do
+    default_accept :*
+    defaults [:read, :destroy, create: :*]
+
+    update :update do
+      primary? true
+      require_atomic? false
+    end
+  end
+end

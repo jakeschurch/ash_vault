@@ -14,12 +14,17 @@ defmodule AshVault.Encrypted do
   `:searchable?` adds a deterministic `<name>_lookup` token column; `:unique?` puts a
   unique identity on it; `:normalize` decides what "equal" means for both. See
   `AshVault.Lookup`.
+
+  `:pre_check_with` is the domain to check that identity against in a `before_action`
+  hook, for a data layer that cannot enforce uniqueness itself. Required there, refused
+  nowhere, and off by default everywhere — it costs a read on every write.
   """
 
   defstruct [
     :name,
     :encrypt_nil?,
     :backfill_from,
+    :pre_check_with,
     searchable?: false,
     unique?: false,
     normalize: :none,
@@ -30,6 +35,7 @@ defmodule AshVault.Encrypted do
           name: atom(),
           encrypt_nil?: boolean() | nil,
           backfill_from: atom() | nil,
+          pre_check_with: module() | nil,
           searchable?: boolean(),
           unique?: boolean(),
           normalize: AshVault.Lookup.normalize()

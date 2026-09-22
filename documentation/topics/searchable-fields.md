@@ -204,6 +204,198 @@ Two details worth knowing:
   `keys` is what `Ash.get/3`-by-identity and upsert-by-identity require as inputs.
 * **`nil` never conflicts.** `nils_distinct?` defaults to true, which is also what a plain
   Postgres unique index does: any number of rows may hold a nil value.
+* **It is Postgres-shaped.** A data layer with no unique constraint of its own — ETS,
+  Mnesia — cannot enforce an identity, and Ash refuses to accept one there unless it is
+  given a domain to pre-check against. AshVault will not set that for you, so
+  `unique?: true` on such a resource is a DSL error until you opt in:
+
+  ```elixir
+  encrypt :email, searchable?: true, unique?: true, pre_check_with: MyApp.Domain
+  ```
+
+  The opt-in is deliberate. `pre_check_with` works — the pre-check hook runs after the
+  encrypt hook, so the token is on the changeset when the check queries for it, and a
+  duplicate really is rejected, normalization and all — but it is a full read action on
+  **every write**, and it is not race-free: two concurrent creates can both see no
+  conflict. That is the honest ceiling on a data layer with no unique constraint, and it
+  is not a cost to add to someone's write path silently. PostgreSQL needs none of it: the
+  generated identity carries no `pre_check_with` there, and the unique index does the
+  work.
+
+## What `unique?` unlocks
+
+### Upsert by an encrypted field
+
+`upsert_identity: :<field>_lookup_unique` makes "create or update this user by email"
+work, which is the thing people reach for the moment they have a unique encrypted column:
+
+```elixir
+create :register_or_update do
+  accept [:org_id, :email]
+
+  upsert? true
+  upsert_identity :email_lookup_unique
+end
+```
+
+```elixir
+MyApp.User
+|> Ash.Changeset.for_create(:register_or_update, %{org_id: org, email: "Jake@Example.com"})
+|> Ash.create!(tenant: org)
+```
+
+The encrypt hook runs in `before_action`, so the natural worry is whether the token exists
+by the time Ash resolves the identity. It does, and the question turns out to be moot in
+both directions:
+
+* the identity's `keys` are only ever read as **column names** — Ash turns them into the
+  `ON CONFLICT` target and adds the multitenancy attribute itself. The emitted statement is
+
+  ```sql
+  INSERT INTO "users" (..., "email_lookup", "encrypted_email") VALUES (...)
+  ON CONFLICT ("org_id", "email_lookup")
+  DO UPDATE SET "encrypted_email" = EXCLUDED."encrypted_email"
+  ```
+
+* the identity is never eager- or pre-checked: Ash short-circuits identity validation for
+  the identity being upserted on, and the generated identity sets neither
+  `eager_check_with` nor `pre_check_with` anyway.
+
+The values are read at data-layer time, inside `Ash.Changeset.with_hooks/3` — after every
+`before_action` hook — so the ciphertext and the token are ordinary changeset attributes
+by then.
+
+Four behaviours to know before you use it:
+
+* **The update half re-encrypts.** The `DO UPDATE SET` list carries `encrypted_email`, so
+  the row gets a fresh nonce and fresh ciphertext. The token, being deterministic, does
+  not move.
+* **Uniqueness stays per tenant.** Two tenants upserting the same address get two rows —
+  and not only because `org_id` is in the conflict target: the token key is per scope, so
+  the two tokens differ as well.
+* **A `nil` value inserts, every time.** A nil plaintext produces a nil token, and
+  `ON CONFLICT` never matches NULL. "Upsert by email" with no email is an INSERT, forever.
+  That is correct — there is no key to match on — and completely silent.
+* **Never name the field itself in `upsert_fields`.** `upsert_fields: [:email]` does not
+  raise. `:email` is a *calculation* now, AshPostgres filters it out of the list as "not an
+  attribute that is changing", the list empties, and the empty case falls back to the
+  conflict keys — producing `DO UPDATE SET "org_id" = EXCLUDED."org_id", "email_lookup" =
+  EXCLUDED."email_lookup"`, an update that writes the row's own key back over itself. The
+  ciphertext is silently not updated. Write `upsert_fields: [:encrypted_email]`, or leave
+  the option out and take the default, which is correct.
+
+Changing `normalize:` after rows exist interacts with this exactly as it does with every
+other lookup: the old rows hash to different tokens, `ON CONFLICT` stops firing for them,
+and an "upsert" inserts a second row for an address that is already there. It is a
+backfill, not a rotation — see [Migration](#migration).
+
+### `Ash.get/3` by the generated identity
+
+The identity is an ordinary one, so it works as an `Ash.get/3` key — with the token, not
+the plaintext, because `keys` is `[:email_lookup]`:
+
+```elixir
+token = AshVault.Lookup.token_for!(MyApp.User, :email, "jake@example.com", context)
+
+{:ok, user} = Ash.get(MyApp.User, [email_lookup: token], tenant: "acme")
+```
+
+Prefer `AshVault.Query.filter_by/4` or the generated `:by_<field>` action for ordinary
+lookups: they take the plaintext and build the token for you, with the scope resolved the
+same way a write resolves it. Reach for `Ash.get/3` when you already hold a token — the
+one case being code that read the column and now wants the row back.
+
+### Finding duplicates: `GROUP BY <field>_lookup`
+
+Before you can add `unique?: true` to an existing column you have to know whether it is
+already unique. The token column answers that with no key and no decryption at all:
+
+```sql
+SELECT email_lookup, count(*), array_agg(id)
+FROM users
+WHERE org_id = $1 AND email_lookup IS NOT NULL
+GROUP BY email_lookup
+HAVING count(*) > 1;
+```
+
+Then resolve a group back to rows through an ordinary filter — still without decrypting
+anything:
+
+```elixir
+MyApp.User
+|> Ash.Query.filter(email_lookup == ^token)
+|> Ash.read!(tenant: org)
+```
+
+Two caveats:
+
+* **The group means "same normalized value", not "same email".** `:downcase_trim` puts
+  `" Jake@Example.COM "` and `"jake@example.com"` in one group; `:none` does not. The
+  column implements exactly one equality relation, and it is the one `normalize:` chose.
+* **Duplicates never span tenants.** Each scope has its own token key, so a `GROUP BY`
+  across the whole table can only ever group rows within one tenant. That is the leakage
+  boundary working as intended — and it means dedupe is a per-tenant job.
+
+This query is also, uncomfortably, exactly what an attacker with a database dump runs. See
+[the equality-leakage tradeoff](#the-equality-leakage-tradeoff-stated-plainly).
+
+## AshAuthentication
+
+A password login has to find a user by email before it can check a password, so a
+searchable field is the only thing that makes an encrypted email column compatible with
+authentication at all. The lookup side works, and works well. The
+`AshAuthentication.Strategy.Password` **DSL** does not — it cannot be pointed at an
+AshVault-encrypted `identity_field`, for three independent reasons, all of them downstream
+of the same fact: `encrypt` removes the plaintext attribute.
+
+1. `identity_field` must name an attribute that is uniquely constrained, i.e.
+   `identity :unique_email, [:email]`. That identity enforces nothing once the attribute is
+   a calculation — there is no column for the index to cover — and
+   `AshVault.Verifiers.VerifyVault` rejects it as a DSL error for exactly that reason.
+2. The register action AshAuthentication generates carries
+   `require_attributes: [identity_field]`, and Ash dereferences that name as an attribute
+   while building the changeset. The attribute is gone, so the first registration raises
+   `BadMapError`.
+3. `SignInPreparation` filters `ref(identity_field) == ^identity`. The decrypt calculation
+   is `filterable?: false`, so that is an `Ash.Error.Query.InvalidFilterReference`. A
+   hand-written sign-in action cannot route around it, because AshAuthentication *requires*
+   that preparation to be present on whatever action `sign_in_action_name` names.
+
+Tenant threading — the thing that looks most likely to break — is fine:
+`AshAuthentication.Strategy.Password.Actions.sign_in/3` passes its options straight into
+`Ash.Query.for_read/4`, so `tenant:` reaches the query.
+
+What does work, and is what the example application demonstrates end to end, is using
+AshAuthentication's password *machinery* with AshVault's lookup:
+
+```elixir
+create :register do
+  accept [:org_id, :email]
+
+  argument :password, :string, allow_nil?: false, sensitive?: true
+  argument :password_confirmation, :string, allow_nil?: false, sensitive?: true
+
+  validate confirm(:password, :password_confirmation)
+  change MyApp.HashPassword          # AshAuthentication.BcryptProvider.hash/1
+end
+
+read :sign_in do
+  argument :email, :string, allow_nil?: false, sensitive?: true
+  argument :password, :string, allow_nil?: false, sensitive?: true
+
+  prepare {AshVault.Preparations.FilterByLookup, field: :email}
+  prepare MyApp.VerifyPassword       # AshAuthentication.BcryptProvider.valid?/2
+  get? true
+end
+```
+
+The hash is byte-for-byte what a stock AshAuthentication application stores, the miss path
+still calls `simulate/0`, and a sign-in with no tenant raises
+`AshVault.Errors.MissingScope` rather than reading as "no such user". `example/` has the
+whole thing, and `mix example.demo` narrates it.
+
+AshVault does **not** depend on ash_authentication. It is a dev/test dependency of the
+library and an ordinary dependency of the example application.
 
 ## Migration
 
@@ -272,3 +464,5 @@ obvious shortcut, and it is explicitly not the mechanism.
 * `c:AshVault.KeyProvider.lookup_key/1` — the provider contract
 * [Threat model](threat-model.md) — the residual-risk entry for lookup tokens
 * [Crypto-erasure](crypto-erasure.md) — why destroying the lookup key is part of erasure
+* `example/lib/example/accounts/auth_user.ex` — a runnable password login over an
+  encrypted, searchable email address

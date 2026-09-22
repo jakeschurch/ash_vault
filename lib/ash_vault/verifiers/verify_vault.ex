@@ -28,10 +28,52 @@ defmodule AshVault.Verifiers.VerifyVault do
     * `backfill_from` names an attribute that still exists
     * `key_lifecycle` is only configured on a `scope_owner? true` resource
     * no duplicate `encrypt` entries
+    * nothing else on the resource still points at the plaintext attribute in a way that
+      the encrypted form cannot honour — see `Constructs an encrypted attribute voids`
+      below
 
   `use Spark.Dsl.Extension` auto-prepends `Spark.Dsl.Verifiers.VerifyEntityUniqueness` and
   `VerifySectionSingletonEntities` to the verifier list, so entity-level uniqueness is
   already covered; the duplicate check here catches sugar/entity collisions.
+
+  ## Constructs an encrypted attribute voids
+
+  `AshVault.Transformers.SetupEncryption` *removes* the plaintext attribute and replaces
+  it with a `filterable?: false, sortable?: false` calculation. Anything elsewhere on the
+  resource that was declared against that attribute is therefore now declared against
+  something that is not a column, and most of those constructs fail **silently** rather
+  than loudly.
+
+  Ash and AshPostgres already catch most of them, and this verifier deliberately does not
+  duplicate their errors:
+
+    * a relationship's `source_attribute` —
+      `deps/ash/lib/ash/resource/verifiers/validate_relationship_attributes.ex:33-40`
+      raises "expects source attribute `email` to be defined"; the other side is caught on
+      the other resource at `:75-83` of the same file.
+    * the multitenancy attribute —
+      `deps/ash/lib/ash/resource/verifiers/validate_multitenancy.ex:57-66` raises
+      "Attribute email used in multitenancy configuration does not exist".
+    * a `postgres` `check_constraints` entry —
+      `deps/ash_postgres/lib/verifiers/validate_check_constraints.ex:17-30` raises.
+
+  Two do not, and this verifier covers them:
+
+    * **an identity whose `keys` include the encrypted field.** Ash's own
+      `deps/ash/lib/ash/resource/verifiers/verify_identities.ex:16` accepts a key that is
+      *either* an attribute *or* a calculation — and the encrypted field is now exactly
+      that, a calculation. So `identity :unique_email, [:email]` compiles with no
+      complaint whatsoever on a Postgres-backed resource, the migration generator has no
+      column to index, and duplicates start landing while the developer believes the
+      field is unique. (ETS-backed resources happen to fail via
+      `Ash.DataLayer.Verifiers.RequirePreCheckWith`, but that is an ETS-only accident:
+      Postgres enforces identities with a real index and needs no pre-check, so the
+      realistic configuration is the unguarded one.)
+
+    * **a `postgres` `custom_indexes` entry naming the encrypted field.** Nothing in
+      AshPostgres validates those field names — `AshPostgres.DataLayer.Info.custom_indexes/1`
+      hands them straight to the migration generator — so the index is generated against
+      a column that does not exist.
   """
 
   use Spark.Dsl.Verifier
@@ -50,7 +92,9 @@ defmodule AshVault.Verifiers.VerifyVault do
          :ok <- verify_no_duplicates(dsl, module),
          :ok <- verify_decrypt_by_default(dsl, module),
          :ok <- verify_backfill_from(dsl, module),
-         :ok <- verify_searchable(dsl, module) do
+         :ok <- verify_searchable(dsl, module),
+         :ok <- verify_no_plaintext_identity(dsl, module),
+         :ok <- verify_no_plaintext_custom_index(dsl, module) do
       verify_key_lifecycle(dsl, module)
     end
   end
@@ -101,6 +145,133 @@ defmodule AshVault.Verifiers.VerifyVault do
       _ok -> :ok
     end
   end
+
+  # Ash's own identity verifier accepts a calculation as an identity key
+  # (deps/ash/lib/ash/resource/verifiers/verify_identities.ex:16), and the encrypted
+  # field is a calculation by the time it runs — so `identity :unique_email, [:email]`
+  # sails through while enforcing nothing at all.
+  #
+  # The identity `AshVault.Transformers.SetupEncryption` generates for `unique?: true` is
+  # keyed on `<field>_lookup`, never on `<field>`, so it cannot trip this check.
+  defp verify_no_plaintext_identity(dsl, module) do
+    encrypted = AshVault.Info.encrypted_field_names(dsl)
+
+    dsl
+    |> Ash.Resource.Info.identities()
+    |> Enum.find_value(fn identity ->
+      case Enum.filter(identity.keys, &(&1 in encrypted)) do
+        [] -> nil
+        keys -> {identity, keys}
+      end
+    end)
+    |> case do
+      nil ->
+        :ok
+
+      {identity, keys} ->
+        error(
+          module,
+          [:identities, identity.name],
+          """
+          `identity #{inspect(identity.name)}, #{inspect(identity.keys)}` is keyed on \
+          #{inspect(keys)}, which #{plural(keys, "is an encrypted field", "are encrypted fields")}.
+
+          That identity enforces nothing. `encrypt` removes the plaintext attribute
+          entirely, so there is no column for a unique index to cover, and AES-GCM draws a
+          fresh nonce per write — two rows holding the same plaintext have completely
+          different ciphertext bytes. Ash accepts the identity anyway, because the
+          encrypted field is now a *calculation* and calculations are legal identity keys
+          (deps/ash/lib/ash/resource/verifiers/verify_identities.ex:16). Nothing raises,
+          nothing is enforced, and duplicates land silently.
+
+          Uniqueness on an encrypted field is enforced on its deterministic lookup token:
+
+              ash_vault do
+                encrypt #{inspect(hd(keys))}, searchable?: true, unique?: true
+              end
+
+          which generates the `#{AshVault.lookup_field_name(hd(keys))}` column and an
+          identity named `:#{AshVault.lookup_field_name(hd(keys))}_unique` on it. Read
+          `AshVault.Lookup` first: a token publishes the equality relation on that column
+          into every backup you will ever take.
+
+          Then delete `identity #{inspect(identity.name)}`.
+          """
+        )
+    end
+  end
+
+  # Nothing in AshPostgres validates `custom_indexes` field names, so an index on a
+  # removed column is generated into a migration that cannot run. `check_constraints`
+  # *are* validated (deps/ash_postgres/lib/verifiers/validate_check_constraints.ex:17-30),
+  # which is why only this one is covered here.
+  defp verify_no_plaintext_custom_index(dsl, module) do
+    encrypted = AshVault.Info.encrypted_field_names(dsl)
+
+    # `apply/3` rather than a direct call: ash_postgres is a dev/test dependency of
+    # AshVault, so a compile-time reference to it would warn in any application that
+    # uses a different data layer.
+    with true <- Code.ensure_loaded?(AshPostgres.DataLayer.Info),
+         AshPostgres.DataLayer <- Ash.DataLayer.data_layer(dsl),
+         {index, [_ | _] = fields} <- offending_custom_index(dsl, encrypted) do
+      error(
+        module,
+        [:postgres, :custom_indexes],
+        """
+        The custom index on #{inspect(index.fields)} names #{inspect(fields)}, which \
+        #{plural(fields, "is an encrypted field", "are encrypted fields")}.
+
+        `encrypt` removes the plaintext attribute, so there is no such column to index: \
+        the migration generator emits \
+        `CREATE INDEX ... (#{Enum.map_join(fields, ", ", &to_string/1)})` against a table \
+        that does not have #{plural(fields, "it", "them")}.
+
+        An index on the `encrypted_` column instead would be useless anyway. AES-GCM \
+        draws a fresh nonce per write, so equal plaintexts are unequal bytes.
+
+        The indexable column is the deterministic lookup token:
+
+            ash_vault do
+              encrypt #{inspect(hd(fields))}, searchable?: true
+            end
+
+        which generates `#{AshVault.lookup_field_name(hd(fields))}`. Index that, or add
+        `unique?: true` and let AshVault generate the unique identity for you.
+        """
+      )
+    else
+      _no_offence -> :ok
+    end
+  end
+
+  defp offending_custom_index(dsl, encrypted) do
+    AshPostgres.DataLayer.Info
+    |> apply(:custom_indexes, [dsl])
+    |> Enum.find_value(fn index ->
+      fields =
+        index.fields
+        |> List.wrap()
+        |> Enum.map(&to_field_name/1)
+        |> Enum.filter(&(&1 in encrypted))
+
+      if fields == [], do: nil, else: {index, fields}
+    end)
+  end
+
+  # `custom_indexes` accepts atoms, strings and expression fragments. Only the first two
+  # can name an attribute; anything else is left alone rather than guessed at.
+  defp to_field_name(field) when is_atom(field), do: field
+
+  defp to_field_name(field) when is_binary(field) do
+    String.to_existing_atom(field)
+  rescue
+    ArgumentError -> nil
+  end
+
+  defp to_field_name(_field), do: nil
+
+  defp plural([_one], singular, _plural), do: singular
+  defp plural(_many, _singular, plural), do: plural
 
   defp verify_vault(dsl, module) do
     case AshVault.Info.ash_vault_vault!(dsl) do

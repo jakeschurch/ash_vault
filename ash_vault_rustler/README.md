@@ -274,42 +274,79 @@ That is a genuine adoption cost, and this repo's own host is the worst case for 
 has `cargo` but no linker at all, which is why every build and test here runs inside
 `nix develop`.
 
-### The `rustler_precompiled` path
+### The `rustler_precompiled` path — wired, and deliberately off
 
-The intended shape, once there is a tagged release with CI artifacts:
+The switch exists in `AshVaultRustler.Native`. It is **off**, and the default build is
+still from source, because a `base_url` pointing at a release that does not exist turns
+every `mix test` in every consuming project into a NIF load failure — a far worse default
+than requiring a toolchain. Nothing here can be finished on a developer machine: it needs
+real published artifacts.
 
-1. Add `{:rustler_precompiled, "~> 0.8"}` and make `{:rustler, "~> 0.38"}` optional.
-2. Switch `AshVaultRustler.Native` from
+What is already done:
 
-   ```elixir
-   use Rustler, otp_app: :ash_vault_rustler, crate: "ashvault_nif"
+* `{:rustler_precompiled, "~> 0.8"}` is a dependency, alongside `rustler`. Neither is
+  `optional:`, because `AshVaultRustler.Native` chooses between them at **compile** time
+  from an environment variable, so whichever the switch picks has to already be present.
+* `AshVaultRustler.Native` carries both `use` forms, the target list, and the `base_url`.
+* `.github/workflows/nif-release.yml` cross-compiles every target and attaches the
+  artifacts to a release, on a `ash_vault_rustler-v*` tag or on `workflow_dispatch`.
+* `mix nif.checksum` generates the checksum file.
+
+Try the precompiled code path without a release, which is as far as this can be taken
+locally:
+
+```sh
+ASH_VAULT_RUSTLER_PRECOMPILED=1 ASH_VAULT_RUSTLER_BUILD=1 mix compile --force
+```
+
+`ASH_VAULT_RUSTLER_PRECOMPILED=1` takes the `RustlerPrecompiled` branch;
+`ASH_VAULT_RUSTLER_BUILD=1` makes it build from source rather than download, which is
+also what CI uses to produce the artifacts. Both are read at compile time, so changing
+either needs `--force`.
+
+### Releasing a precompiled NIF
+
+For the maintainer, in order. Steps 1-3 are mechanical; **step 5 is the irreversible
+one**, and it is last on purpose.
+
+1. Set the version in `ash_vault_rustler/mix.exs`. `base_url` is built from it, so the
+   tag, the version and the artifact names must agree exactly.
+2. Confirm `base_url` in `AshVaultRustler.Native` names the real repository. It is
+   currently `https://github.com/jakeschurch/ash_vault/releases/download/ash_vault_rustler-v#{@version}`.
+   If the repository is ever moved or renamed, this is the line that silently 404s.
+3. Push the tag and let the workflow finish:
+
+   ```sh
+   git tag ash_vault_rustler-v0.1.0 && git push origin ash_vault_rustler-v0.1.0
    ```
 
-   to
+   Every matrix job must be green. A missing target is not a soft failure: a consumer on
+   that target gets a download error at compile time. Run the workflow by hand first
+   (`workflow_dispatch`) if there is any doubt — a bad release has to be deleted, and a
+   deleted release breaks anyone who already downloaded from it.
+4. Generate and **commit** the checksum file, from `ash_vault_rustler/`:
 
-   ```elixir
-   use RustlerPrecompiled,
-     otp_app: :ash_vault_rustler,
-     crate: "ashvault_nif",
-     base_url: "https://github.com/<org>/ash_vault/releases/download/v#{@version}",
-     version: @version,
-     targets: ~w(
-       aarch64-apple-darwin x86_64-apple-darwin
-       aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu
-       aarch64-unknown-linux-musl x86_64-unknown-linux-musl
-     ),
-     force_build: System.get_env("ASH_VAULT_RUSTLER_BUILD") in ["1", "true"]
+   ```sh
+   mix nif.checksum
+   git add checksum-Elixir.AshVaultRustler.Native.exs
    ```
 
-3. A GitHub Actions matrix cross-compiles those targets on tag, and
-   `mix rustler_precompiled.download AshVaultRustler.Native --all --print` generates
-   `checksum-Elixir.AshVaultRustler.Native.exs`, which **is committed** — it is what makes
-   a downloaded `.so` verifiable rather than merely convenient.
-4. Building from source stays available through `ASH_VAULT_RUSTLER_BUILD=1`.
+   This is what makes a downloaded `.so` verifiable rather than merely convenient. It is
+   not optional and it is not generated at consumer build time — without it in the
+   package, `RustlerPrecompiled` refuses to use a downloaded artifact.
+5. Flip the default: in `AshVaultRustler.Native`, change
 
-It is deliberately **not** wired up yet: a `base_url` pointing at a release that does not
-exist turns every `mix test` into a NIF load failure, which is a worse default than
-requiring a toolchain. The switch is a handful of lines once the first release exists.
+   ```elixir
+   @precompiled_by_default false
+   ```
+
+   to `true`. From that commit on, `ASH_VAULT_RUSTLER_BUILD=1` is the escape hatch back
+   to a source build, and `ASH_VAULT_RUSTLER_PRECOMPILED` stops mattering.
+6. Verify from a clean checkout on a machine **without** a Rust toolchain that
+   `mix deps.get && mix compile` succeeds. That is the entire point of the exercise, and
+   it is the one check that cannot be done in the repository that produced the artifacts.
+
+Until step 5 lands, consumers build from source exactly as they do today.
 
 ---
 

@@ -274,7 +274,16 @@ defmodule AshVault.Lookup do
   @spec field_key(module(), atom(), Context.t()) :: {:ok, binary()} | {:error, Exception.t()}
   def field_key(resource, field, %Context{} = context) do
     vault = AshVault.Info.vault!(resource, context.ash_context)
-    scope = vault.__ash_vault__(:scope).resolve!(context)
+
+    # Through `Runtime.resolve_scope!/3`, not `scope.resolve!/1` directly. Calling the
+    # scope module here skipped the one place that enforces "a scope is a binary", so a
+    # custom `AshVault.Scope` returning a non-binary escaped as a bare `ArgumentError`
+    # from whichever provider's `validate_scope!/1` happened to see it first — a wrong
+    # -shaped error leaving a non-bang `Ash.read/2`, where every other path in the
+    # library raises `AshVault.Errors.InvalidScope`.
+    scope =
+      AshVault.Vault.Runtime.resolve_scope!(context, vault.__ash_vault__(:scope), :lookup)
+
     provider = vault.__ash_vault__(:key_provider)
 
     case AshVault.KeyProvider.lookup_key(provider, scope) do

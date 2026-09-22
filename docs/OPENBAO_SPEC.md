@@ -17,9 +17,10 @@ backup. Instead we use an **exportable transit key** as the scope's key material
 
 Tradeoff to document in the threat model: `exportable: true` means a holder of a
 transit-export capability can read raw key material. The AshVault app needs exactly that
-capability; nothing else should have it. Non-exportable transit (encrypt/decrypt round trips
-through OpenBao per value) is a possible future provider — `AshVault.KeyProviders.OpenBaoTransit` —
-but it changes the `KeyProvider` contract (no raw key), so it is out of scope for v1.
+capability; nothing else should have it. Non-exportable transit — encrypt/decrypt round trips through OpenBao per value — now ships as
+`AshVault.KeyProviders.OpenBaoTransit`, paired with `AshVault.Ciphers.OpenBaoTransit`. It serves
+`AshVault.Key` handles instead of raw key material and costs one round trip per value. See the
+"Choosing between the two OpenBao providers" section of `documentation/topics/threat-model.md`.
 
 ## Verified endpoints
 

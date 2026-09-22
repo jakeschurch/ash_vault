@@ -140,9 +140,14 @@ mix ash_vault.backfill RESOURCE FIELD [options]
   --domain MODULE      Ash domain (inferred from `:ash_domains` when omitted)
   --action NAME        update action to write with (default: the primary update action;
                        it must be `require_atomic? false`)
-  --verify             decrypt a sample and compare to the plaintext column; write nothing
+  --lookup             populate `<field>_lookup` tokens for rows that ALREADY hold
+                       ciphertext (see "Searchable fields" below); not part of an
+                       ordinary backfill
+  --verify             decrypt a sample and compare to the plaintext column — and, for a
+                       `searchable?` field, recompute and compare its `<field>_lookup`
+                       token; write nothing
   --dry-run            report what would be done; write nothing
-  --resume-from ID     start after this primary key
+  --resume-from ID     start after this primary key (one tenant only)
   --sample N           rows to check in `--verify` mode (`0` checks every row)
   --yes                skip the confirmation prompt
 ```
@@ -156,6 +161,14 @@ mix ash_vault.backfill MyApp.Accounts.User email \
 
 A failure in one tenant stops the run and names that tenant.
 
+`--all-tenants` cannot be combined with `--resume-from`, and the task refuses the pair.
+A primary key is a keyset offset into *one* tenant's rows; applied to the others it is an
+arbitrary cut, and because the pending count skips the same prefix every tenant would
+report `done == total, remaining: 0` with rows left unencrypted. Resume the single tenant
+that failed with `--tenant`, then re-run `--all-tenants` with no `--resume-from` — the
+backfill is idempotent, so the tenants that already finished cost one scan and write
+nothing.
+
 ### What it guarantees
 
 * **Idempotent and resumable with no state file.** Rows are selected with
@@ -164,8 +177,11 @@ A failure in one tenant stops the run and names that tenant.
   no-op — and asserted so in the test suite by comparing ciphertext *bytes*, not merely
   "it still decrypts" (re-encrypting would produce a different nonce).
 * **Each batch is its own transaction.** The table is never wrapped in one.
-* **Only the encrypted column is written.** One `Ash.bulk_update/4` per batch, with
-  `authorize?: false` and `return_records?: false`.
+* **Only the encrypted column is written** — plus the `<field>_lookup` token when the
+  field is `searchable?: true`, because a row holding one without the other is a row that
+  decrypts correctly and cannot be found. Both come from `AshVault.write_attributes/4`,
+  the same function an ordinary create or update goes through. One `Ash.bulk_update/4`
+  per batch, with `authorize?: false` and `return_records?: false`.
 * **Backfilled rows decrypt through the ordinary read path.** The context is built by the
   same `AshVault.Context.Builder.from_changeset/3` an ordinary write uses, from a real
   changeset over the real record, with the plaintext *field* name — so the AAD matches. A
@@ -186,6 +202,64 @@ Resume with:
 
 `--resume-from` is an optimisation that skips re-scanning the committed prefix, never a
 correctness requirement: the `IS NULL` filter already makes a plain re-run correct.
+
+### Searchable fields
+
+A field declared `searchable?: true` has a second column, `<field>_lookup`: a
+deterministic HMAC of the normalized value, which is what
+`AshVault.Query.filter_by/4`, the generated `by_<field>` read action and any
+`unique?: true` identity actually match on.
+
+**Nothing extra to do.** Back-filling such a field writes the ciphertext and the token in
+the same batch, and `mix ash_vault.verify` checks both. A row with ciphertext and a NULL
+token is not "partly migrated" — it is invisible: `filter_by` returns `[]`, the
+`by_<field>` action finds nothing, and a `unique?: true` constraint over the token column
+is not enforced, so duplicates get in.
+
+One consequence worth stating outright, because it is visible in the data:
+
+> #### `normalize:` is lossy on the ciphertext too {: .warning}
+>
+> AshVault normalizes **once** and encrypts *that* value, so the stored plaintext and the
+> stored token always agree about what the row holds. Under
+> `normalize: :downcase_trim`, a `legacy_email` of `" Jake@Example.COM "` back-fills to a
+> ciphertext that decrypts to `"jake@example.com"`. That is the same thing an ordinary
+> write does; the backfill is deliberately not a special case. If the original spelling
+> matters to you, keep it in its own column — do not rely on the encrypted one to
+> preserve it.
+>
+> `mix ash_vault.verify` knows this: it normalizes the plaintext column before comparing,
+> so a correctly back-filled row is not reported as a `value_mismatch`.
+
+#### `--lookup`
+
+`--lookup` is for the two cases where the ciphertext is already there and only the token
+is missing:
+
+* you added `searchable?: true` to a field that was **already** encrypted, so every
+  existing row has a NULL token;
+* you rotated the provider's lookup secret, so every existing token is stale. (`mix
+  ash_vault.rotate` deliberately does *not* touch tokens — if it moved them, every
+  existing row would silently stop being findable.)
+
+```
+mix ash_vault.backfill MyApp.Accounts.User email --tenant acme --lookup
+```
+
+It reads, decrypts, normalizes, hashes and writes **only** the token column; the
+ciphertext is never rewritten. Like the ciphertext backfill it is idempotent and
+resumable with no state file — it selects only rows whose token `IS NULL` and whose
+ciphertext `IS NOT NULL`.
+
+It cannot be combined with `--verify` (one writes, the other writes nothing), and does
+not need to be: plain `--verify` checks the token column, reporting `lookup_missing` for
+a NULL token and `lookup_mismatch` for one that is not what a lookup computes.
+
+It also **cannot repair a changed `normalize:`**. Changing `normalize:` on a populated
+column makes the ciphertext and the token disagree, and hashing the newly normalized
+value would leave those rows findable under one spelling and readable as another. The
+task detects that, names the row and aborts. Reconciling the two requires re-encrypting,
+and after Step 6 there is no plaintext column left to re-encrypt from.
 
 ### Nil sources
 
@@ -221,9 +295,20 @@ It decrypts a sample and compares to the plaintext column. The default sample is
 the table or 1000 rows, whichever is smaller, always including the first and the last row;
 `--sample 0` checks every row. It writes nothing.
 
-Exit status is non-zero on the first tenant with any mismatch — a row whose ciphertext is
-NULL, whose plaintext differs, or which fails to decrypt at all — and the summary names
-the offending primary keys.
+For a `searchable?: true` field it also recomputes the `<field>_lookup` token from the
+value it just decrypted — the same computation a query does — and compares it to the
+stored one.
+
+Exit status is non-zero on the first tenant with any mismatch, and the summary names the
+offending primary keys with a reason:
+
+| reason | what it means |
+| --- | --- |
+| `not_backfilled` | the encrypted column is still NULL |
+| `value_mismatch` | it decrypts, to something other than the (normalized) plaintext column |
+| `decrypt_failed` | it does not decrypt at all |
+| `lookup_missing` | `searchable?` field, ciphertext present, token NULL — the row is invisible to `filter_by` |
+| `lookup_mismatch` | the stored token is not the one a lookup computes for this value |
 
 Run `--sample 0` at least once per tenant before you contract. It is the last cheap check
 you get.

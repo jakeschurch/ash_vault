@@ -11,6 +11,8 @@ defmodule AshVaultRustler.MixProject do
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       deps: deps(),
+      aliases: aliases(),
+      package: package(),
       name: "AshVaultRustler",
       description:
         "A Rust-backed AshVault key cache and AES-256-GCM cipher that hold key material " <>
@@ -35,8 +37,30 @@ defmodule AshVaultRustler.MixProject do
   defp deps do
     [
       {:ash_vault, path: ".."},
+      # Not `optional: true` even though only one of the two is used per build: the
+      # `use` in `AshVaultRustler.Native` is chosen at COMPILE time from an environment
+      # variable, so whichever one the switch picks has to already be there. See
+      # `AshVaultRustler.Native` for the switch and the README for the release steps.
       {:rustler, "~> 0.38"},
+      {:rustler_precompiled, "~> 0.8"},
       {:ex_doc, ">= 0.0.0", only: :dev, runtime: false}
+    ]
+  end
+
+  # `checksum-Elixir.AshVaultRustler.Native.exs` is what makes a downloaded `.so`
+  # verifiable rather than merely convenient, so it ships in the package and is committed
+  # to the repo. Regenerate it with `mix nif.checksum` after a release build.
+  defp package do
+    [
+      files: ~w(lib native/ashvault_nif/src native/ashvault_nif/Cargo.* .formatter.exs
+                mix.exs README.md checksum-*.exs),
+      licenses: ["MIT"]
+    ]
+  end
+
+  defp aliases do
+    [
+      "nif.checksum": ["rustler_precompiled.download AshVaultRustler.Native --all --print"]
     ]
   end
 

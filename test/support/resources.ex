@@ -484,6 +484,109 @@ defmodule AshVault.Test.SearchUser do
   attributes do
     uuid_primary_key :id
     attribute :org_id, :uuid, allow_nil?: false, public?: true
+    attribute :name, :string, public?: true
+    attribute :email, :string, public?: true
+  end
+
+  actions do
+    default_accept :*
+    defaults [:read, :destroy, create: :*, update: :*]
+
+    # Upsert by an encrypted field. The identity is the one
+    # `AshVault.Transformers.SetupEncryption` generates for `unique?: true`, so the
+    # ON CONFLICT target is the lookup token — never the randomized ciphertext.
+    create :upsert_by_email do
+      accept [:org_id, :name, :email]
+      upsert? true
+      upsert_identity :email_lookup_unique
+    end
+  end
+end
+
+defmodule AshVault.Test.LooseSearchUser do
+  @moduledoc """
+  The same `search_users` table and the same field, with a *different* `normalize:`.
+
+  It exists to demonstrate the one thing SEARCHABLE_SPEC warns about loudest: changing
+  `normalize:` after rows exist changes every token, so a row written under one strategy
+  is invisible to a lookup — and to an upsert — under the other.
+  """
+
+  use Ash.Resource,
+    domain: AshVault.Test.Domain,
+    data_layer: AshPostgres.DataLayer,
+    extensions: [AshVault]
+
+  ash_vault do
+    vault AshVault.Test.Vault
+    scope :tenant
+
+    encrypt :email, searchable?: true, unique?: true, normalize: :none
+  end
+
+  postgres do
+    table "search_users"
+    repo AshVault.Test.Repo
+  end
+
+  multitenancy do
+    strategy :attribute
+    attribute :org_id
+  end
+
+  attributes do
+    uuid_primary_key :id
+    attribute :org_id, :uuid, allow_nil?: false, public?: true
+    attribute :name, :string, public?: true
+    attribute :email, :string, public?: true
+  end
+
+  actions do
+    default_accept :*
+    defaults [:read, :destroy, create: :*, update: :*]
+
+    create :upsert_by_email do
+      accept [:org_id, :name, :email]
+      upsert? true
+      upsert_identity :email_lookup_unique
+    end
+  end
+end
+
+defmodule AshVault.Test.DedupeUser do
+  @moduledoc """
+  A searchable field with no `unique?`, over its own table with a non-unique index.
+
+  This is what a table looks like before anyone adds the constraint, and it is the only
+  shape in which the `GROUP BY <field>_lookup` dedupe recipe has anything to find.
+  """
+
+  use Ash.Resource,
+    domain: AshVault.Test.Domain,
+    data_layer: AshPostgres.DataLayer,
+    extensions: [AshVault]
+
+  ash_vault do
+    vault AshVault.Test.Vault
+    scope :tenant
+
+    encrypt :email, searchable?: true, normalize: :downcase_trim
+  end
+
+  postgres do
+    table "dedupe_users"
+    repo AshVault.Test.Repo
+  end
+
+  multitenancy do
+    strategy :attribute
+    attribute :org_id
+  end
+
+  attributes do
+    uuid_primary_key :id
+    attribute :org_id, :uuid, allow_nil?: false, public?: true
+    attribute :name, :string, public?: true
     attribute :email, :string, public?: true
   end
 
@@ -522,6 +625,47 @@ defmodule AshVault.Test.EtsNoLookupDoc do
   attributes do
     uuid_primary_key :id
     attribute :label, :string, public?: true
+  end
+
+  actions do
+    default_accept :*
+    defaults [:read, :destroy, create: :*, update: :*]
+  end
+end
+
+defmodule AshVault.Test.EtsNonBinaryScopeDoc do
+  @moduledoc """
+  A searchable resource whose vault's `AshVault.Scope` returns a non-binary.
+
+  It exists for one regression. `AshVault.Lookup.field_key/3` used to call
+  `scope.resolve!/1` directly rather than going through
+  `AshVault.Vault.Runtime.resolve_scope!/3`, so the binary-scope invariant failed here as
+  a bare `ArgumentError` out of the provider's own `validate_scope!/1` — a wrong-shaped
+  error escaping a non-bang `Ash.read/2` — instead of the `AshVault.Errors.InvalidScope`
+  every other path in the library raises.
+  """
+
+  use Ash.Resource,
+    domain: AshVault.Test.Domain,
+    data_layer: Ash.DataLayer.Ets,
+    extensions: [AshVault]
+
+  ash_vault do
+    vault AshVault.Test.Support.NonBinaryScopeVault
+    # Must match the vault's own scope, or `AshVault.Verifiers.VerifyVault` rejects the
+    # resource at compile time — rotation and erasure would otherwise act on other keys.
+    scope AshVault.Test.Support.NonBinaryScope
+
+    encrypt :email, searchable?: true
+  end
+
+  ets do
+    private? true
+  end
+
+  attributes do
+    uuid_primary_key :id
+    attribute :email, :string, public?: true
   end
 
   actions do

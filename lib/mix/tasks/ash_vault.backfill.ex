@@ -51,10 +51,19 @@ defmodule Mix.Tasks.AshVault.Backfill do
   data key version and deliberately leaves every token alone — if it moved them, every
   existing row would silently stop being findable.
 
+  > #### It is NOT part of an ordinary backfill {: .info}
+  >
+  > Back-filling a `searchable?: true` field writes the ciphertext **and** its token in
+  > the same batch, through `AshVault.write_attributes/4` — the same function an ordinary
+  > create or update calls. `--lookup` is for the two cases where the ciphertext is
+  > already there and only the token is missing: retro-fitting `searchable?: true` onto a
+  > populated column, and rotating the provider's lookup secret.
+
   Like the ciphertext backfill it is resumable and idempotent with no state file: it
   selects only rows whose token `IS NULL` and whose ciphertext `IS NOT NULL`, so a
-  second run is a no-op. `--verify` does not apply (an HMAC is one-way, so there is
-  nothing to decrypt and compare) and is refused.
+  second run is a no-op. It writes, so it cannot be combined with `--verify`, which
+  writes nothing — and does not need to be: plain `--verify` checks the token column for
+  you, by recomputing it from the decrypted value.
 
   ## Options
 
@@ -67,9 +76,12 @@ defmodule Mix.Tasks.AshVault.Backfill do
                            action; it must be `require_atomic? false`)
       --lookup             populate `<field>_lookup` tokens for rows that already have
                            ciphertext; reads and decrypts, writes only the token column
-      --verify             decrypt a sample and compare to the plaintext column; write nothing
+      --verify             decrypt a sample and compare to the plaintext column — and,
+                           for a `searchable?` field, recompute and compare its
+                           `<field>_lookup` token; write nothing
       --dry-run            report what would be done; write nothing
-      --resume-from ID     start after this primary key
+      --resume-from ID     start after this primary key (one tenant only; it cannot be
+                           combined with `--all-tenants`)
       --sample N           rows to check in `--verify` mode (`0` checks every row)
       --yes                skip the confirmation prompt
 
@@ -83,7 +95,9 @@ defmodule Mix.Tasks.AshVault.Backfill do
     * The key provider is checked **before** the first batch; an unreachable provider
       fails with `ProviderUnavailable` rather than half a written table. If it goes away
       mid-run, the task stops at the batch boundary and prints the exact resume command.
-    * Only the encrypted column is written.
+    * Only the encrypted column is written — plus the `<field>_lookup` token when the
+      field is `searchable?: true`, because a row holding one without the other is a row
+      that decrypts correctly and cannot be found.
 
   ## Output
 
@@ -127,6 +141,26 @@ defmodule Mix.Tasks.AshVault.Backfill do
         [resource, field] -> {Shared.resource!(resource), String.to_atom(field)}
         _ -> Shared.abort!("usage: mix ash_vault.backfill RESOURCE FIELD [options]")
       end
+
+    if opts[:all_tenants] && opts[:resume_from] do
+      Shared.abort!("""
+      `--all-tenants` and `--resume-from` cannot be combined.
+
+      `--resume-from` is a keyset offset into ONE tenant's rows. Applied across tenants it
+      would be a different, meaningless row in each of the others: every tenant would skip
+      the rows whose primary key sorts below that id and report `done == total,
+      remaining: 0`, because the pending count excludes the skipped prefix too. The run
+      would look complete with rows left unencrypted.
+
+      Resume the one tenant that failed:
+
+          mix ash_vault.backfill RESOURCE FIELD --tenant TENANT --resume-from #{opts[:resume_from]}
+
+      then re-run `--all-tenants` with no `--resume-from`. The backfill is idempotent —
+      it selects only rows whose target column is still NULL — so the tenants that already
+      finished cost one scan and write nothing.
+      """)
+    end
 
     tenants = Shared.tenants!(opts)
 

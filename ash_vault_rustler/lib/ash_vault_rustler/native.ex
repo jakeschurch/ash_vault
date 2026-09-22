@@ -26,9 +26,73 @@ defmodule AshVaultRustler.Native do
   each NIF body in `catch_unwind`, so a panic in Rust becomes an `ErlangError` for the
   caller rather than an aborted VM. `panic_for_test/0` exists purely so that claim can be
   tested rather than asserted; see `test/panic_test.exs`.
+
+  ## Distribution: source build by default, precompiled behind a switch
+
+  Building from source needs a Rust toolchain and a linker, which is a real adoption
+  cost. `rustler_precompiled` removes it by downloading a verified artifact instead — but
+  only once a tagged release with CI artifacts exists, because a `base_url` pointing at a
+  release that is not there turns every `mix test` into a NIF load failure. That is a far
+  worse default than requiring a toolchain.
+
+  So the switch is wired and **off**. With `ASH_VAULT_RUSTLER_PRECOMPILED` unset, this is
+  a plain `use Rustler` and nothing about the build changes. Set it at compile time to
+  take the precompiled path:
+
+      ASH_VAULT_RUSTLER_PRECOMPILED=1 mix compile
+
+  `ASH_VAULT_RUSTLER_BUILD=1` forces a source build on that path, which is what CI uses
+  to produce the artifacts in the first place.
+
+  Both are read at **compile** time, so changing either needs a `mix deps.compile
+  ash_vault_rustler --force` to take effect. `README.md` has the release checklist,
+  including the one-line change that makes precompiled the default.
   """
 
-  use Rustler, otp_app: :ash_vault_rustler, crate: "ashvault_nif"
+  # The consumer-facing default. Flipping this literal to `true` — after the first
+  # release exists and `checksum-Elixir.AshVaultRustler.Native.exs` is committed — is what
+  # makes precompiled artifacts the default; the environment variable then becomes the
+  # opt-out rather than the opt-in.
+  @precompiled_by_default false
+
+  @precompiled? @precompiled_by_default or
+                  System.get_env("ASH_VAULT_RUSTLER_PRECOMPILED") in ["1", "true"]
+
+  @targets ~w(
+    aarch64-apple-darwin
+    x86_64-apple-darwin
+    aarch64-unknown-linux-gnu
+    x86_64-unknown-linux-gnu
+    aarch64-unknown-linux-musl
+    x86_64-unknown-linux-musl
+  )
+
+  @doc false
+  @spec precompiled?() :: boolean()
+  def precompiled?, do: @precompiled?
+
+  @doc false
+  @spec targets() :: [String.t()]
+  def targets, do: @targets
+
+  if @precompiled? do
+    # Declared inside the branch: outside it they are unused, and an unused module
+    # attribute is a `--warnings-as-errors` failure in the default (source) build.
+    @version Mix.Project.config()[:version]
+    @force_build? System.get_env("ASH_VAULT_RUSTLER_BUILD") in ["1", "true"]
+
+    use RustlerPrecompiled,
+      otp_app: :ash_vault_rustler,
+      crate: "ashvault_nif",
+      base_url:
+        "https://github.com/jakeschurch/ash_vault/releases/download/" <>
+          "ash_vault_rustler-v#{@version}",
+      version: @version,
+      targets: @targets,
+      force_build: @force_build?
+  else
+    use Rustler, otp_app: :ash_vault_rustler, crate: "ashvault_nif"
+  end
 
   @typedoc "An opaque reference to a Rust-side cache."
   @opaque cache :: reference()

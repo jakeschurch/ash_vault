@@ -191,14 +191,142 @@ This is documented rather than fixed because the fix is not AshVault's to make.
 
 ### Exportable transit keys
 
-The OpenBao provider uses `exportable: true` transit keys and exports raw key material to
-the app; that is what lets the envelope stay self-contained and keeps all wrapped key
-material out of the database. The consequence is that anything holding a
+`AshVault.KeyProviders.OpenBao` uses `exportable: true` transit keys and exports raw key
+material to the app; that is what lets the envelope stay self-contained and keeps all
+wrapped key material out of the database. The consequence is that anything holding a
 `transit/export` capability on those keys can read raw key material. The AshVault
 application needs exactly that capability; nothing else should have it.
 
-A non-exporting provider that round-trips each value through OpenBao is possible but
-changes the `AshVault.KeyProvider` contract (no raw key), so it is not in v1.
+The residual risk is smaller than it sounds and larger than it looks. Smaller, because an
+attacker who can call `transit/export` can almost always call `transit/decrypt` too —
+having the key and being able to use the key are close to the same capability. Larger,
+because an exported key *stays* in your process: it is a refcounted binary on some
+process heap, the BEAM will not zero it, and it shows up in a crash dump, a core file, or
+anything that reads `/proc/<pid>/mem`.
+
+`AshVault.KeyProviders.OpenBaoTransit` is the answer to the second half, and is described
+below.
+
+## Choosing between the two OpenBao providers
+
+AshVault ships two providers over the same OpenBao transit engine. They are not
+"basic and advanced"; they trade different things, and most applications should use the
+first one.
+
+| | `AshVault.KeyProviders.OpenBao` | `AshVault.KeyProviders.OpenBaoTransit` |
+|---|---|---|
+| Where the AEAD runs | in your BEAM, `:crypto` | inside OpenBao |
+| Raw DEK in process memory | yes, for the life of the call and beyond | **never** |
+| Network cost per value (measured) | encrypt 3, **decrypt 2** | encrypt 3, **decrypt 3** |
+| `AshVault.KeyProviders.Cached` helps | yes — both drop to **0** on a hit | no — it caches a key only when `is_binary/1`, so handles pass through uncached |
+| Searchable fields (`searchable?: true`) | yes | **no**, and it is a compile-time error |
+| Key size check at compile time | yes (`key_bytes/0`) | not applicable |
+| Envelope | `aes_256_gcm_v1`, nonce + tag + ciphertext | `openbao_transit_v1`, transit's `vault:vN:` string verbatim |
+| AAD binds scope, resource, field | yes | yes — `associated_data`, verified live |
+
+### What the transit provider actually buys
+
+Exactly one thing: the DEK never becomes an Elixir term. Not on a heap, not in a crash
+dump, not in a core file, not readable by anything that can attach to the BEAM after the
+fact. This is strictly stronger than the Rust NIF (`ash_vault_rustler`), which keeps key
+material off the *BEAM* heap but still inside your process's address space.
+
+It buys nothing else. It is not a defence against a compromised application process — an
+attacker with code execution can call `transit/encrypt` and `transit/decrypt` with your
+token exactly as the app does. What they cannot do is walk away with the key itself and
+decrypt your database offline, later, without the token.
+
+### What it costs, stated plainly
+
+**Three HTTP round trips per encrypted value, on both read and write.** Per value, not
+per query. These numbers are measured with a `[:finch, :request, :stop]` counter in
+`test/ash_vault/ciphers/open_bao_transit_test.exs`, not estimated:
+
+| | encrypt | decrypt |
+|---|---|---|
+| `AshVault.KeyProviders.OpenBaoTransit` | 3 | 3 |
+| `AshVault.KeyProviders.OpenBao` | 3 | 2 |
+| either, behind `AshVault.KeyProviders.Cached`, on a hit | 0 | 0 — *but see below* |
+
+The three calls on a transit decrypt are: the scope's tombstone read, the
+`transit/keys/<name>` metadata read (which is also where `exportable` is verified), and
+`transit/decrypt`. Only the last one is the cipher's.
+
+The caching row has an asterisk that matters. `AshVault.KeyProviders.Cached` caches a key
+only when it `is_binary/1`, so a `AshVault.Key` handle passes straight through it,
+uncached, on every single call. The handle is in principle cacheable — it is a
+deterministic `{transit_key_name, version}` pair with no secret in it — but caching it
+would also cache the tombstone decision that gates it, which is precisely the erasure-SLA
+trade `AshVault.KeyProviders.Cached` documents at length. Today the wrapper simply does
+nothing for this provider.
+
+So the honest comparison is not "one call versus zero". It is: **with caching on, the
+exporting provider costs 0 calls per value and this one costs 3.** Transit does have
+batch endpoints (`transit/encrypt` accepts a `batch_input`), but the `AshVault.Cipher`
+contract is one value at a time, so they go unused.
+
+Budget it honestly: at a 1 ms round trip inside one datacenter, a 50-row page with two
+encrypted columns is ~300 calls and ~300 ms of added latency, serialised, because
+`AshVault.Calculations.Decrypt` reduces over values one at a time. If OpenBao is a
+network hop away, it is worse. Measure before rolling it out beyond the fields that
+genuinely need it — and note that "beyond the fields that need it" is expressible: point
+one resource at a transit-backed vault and the rest at the exporting one, per
+[Two vaults in one application](two-vaults.md).
+
+### Choose the transit provider when
+
+* the threat you are actually modelling is **key material recovered from process memory**
+  — crash dumps shipped to a vendor, core files on a shared host, a hostile co-tenant on
+  the same box, or a compliance regime that asks where the key was at rest *and in use*;
+* the encrypted fields are few, read rarely, and never in a list view;
+* you can afford the latency, and you have measured it rather than assumed it.
+
+### Choose the exporting provider when
+
+* you have searchable fields — the transit provider cannot serve a lookup key, by
+  definition, and says so at compile time;
+* encrypted fields appear in lists, exports, or anything that reads many rows;
+* OpenBao is a network hop away rather than a sidecar;
+* you are not certain which you need. It is the default for a reason.
+
+### The OpenBao policy the transit provider needs
+
+Verified against openbao 2.6.2: `POST /v1/transit/encrypt/<name>` **creates the key** if
+it is absent, and pinning `key_version` does not prevent it. Withholding the `create`
+capability on the encrypt path makes OpenBao refuse that with `403` while still allowing
+encryption of existing keys:
+
+```hcl
+path "transit/keys/*"             { capabilities = ["read"] }
+path "transit/keys/+/rotate"      { capabilities = ["update"] }
+path "transit/keys/+/config"      { capabilities = ["update"] }
+path "transit/encrypt/*"          { capabilities = ["update"] }
+path "transit/decrypt/*"          { capabilities = ["update"] }
+path "ashvault/data/tombstones/*" { capabilities = ["create", "read", "update"] }
+```
+
+There is deliberately **no** `transit/export/*` grant. Give key creation and destruction
+to a separate, more privileged token.
+
+Without that policy the guarantee still holds for reads, because `destroy/1` writes its
+tombstone first and every read path checks it — but a write racing a `destroy/1` can
+recreate the deleted transit key with fresh material. The recreated key is orphaned and
+unreadable, not a resurrection; it is simply key material that should not exist.
+
+### The one thing the transit provider checks that you cannot see
+
+Creating a transit key that already exists is a silent no-op on OpenBao 2.6.2: the server
+returns the existing metadata and ignores the `exportable` flag in your request. So
+posting `exportable: false` proves nothing. `AshVault.KeyProviders.OpenBaoTransit` reads
+`data.exportable` back on every metadata fetch and refuses with
+`AshVault.Errors.ProviderUnavailable` if it is true, rather than quietly operating on
+exportable key material while promising it does not exist.
+
+This is also why the two providers use **different transit key names**
+(`ashvault_<scope>` versus `ashvault_nx_<scope>`): sharing a name would mean whichever
+provider touched a scope first silently decided whether its key is exportable. The
+consequence is that they hold separate key material and separate tombstones for the same
+scope, so erasing a subject with data under both means destroying under both vaults.
 
 ### Overwrite-before-unlink guarantees nothing about the media
 

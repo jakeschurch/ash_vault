@@ -291,4 +291,178 @@ defmodule AshVault.Extension.VerifierTest do
       end)
     end
   end
+
+  # Encrypting an attribute silently voids guarantees the rest of the resource declared
+  # on it. These are the two constructs neither Ash nor AshPostgres catches.
+  describe "constructs an encrypted attribute voids" do
+    # Postgres, not ETS, and deliberately so: an ETS resource happens to fail on this
+    # shape via `Ash.DataLayer.Verifiers.RequirePreCheckWith`, which needs an identity to
+    # declare `pre_check_with`. Postgres enforces identities with a real unique index and
+    # needs no pre-check, so it is the Postgres shape that compiles silently — and the
+    # one a real application has.
+    defp define_postgres!(name, body) do
+      ExUnit.CaptureIO.capture_io(:stderr, fn ->
+        Code.eval_string("""
+        defmodule #{name} do
+          use Ash.Resource,
+            domain: AshVault.Test.Domain,
+            data_layer: AshPostgres.DataLayer,
+            extensions: [AshVault],
+            validate_domain_inclusion?: false
+
+          ash_vault do
+            vault AshVault.Test.Vault
+            scope :tenant
+            encrypt :email
+          end
+
+          attributes do
+            uuid_primary_key :id
+            attribute :org_id, :uuid, allow_nil?: false, public?: true
+            attribute :email, :string, public?: true
+          end
+
+          actions do
+            default_accept :*
+            defaults [:read, create: :*]
+          end
+
+        #{body}
+        end
+        """)
+      end)
+
+      name.spark_dsl_config()
+    end
+
+    test "a unique identity on the encrypted attribute is rejected" do
+      dsl =
+        define_postgres!(Verify.PlaintextIdentity, """
+          postgres do
+            table "search_users"
+            repo AshVault.Test.Repo
+          end
+
+          identities do
+            identity :unique_email, [:email]
+          end
+        """)
+
+      # The construct really is invisible to Ash: its own identity verifier accepts the
+      # key because `:email` is a calculation now
+      # (deps/ash/lib/ash/resource/verifiers/verify_identities.ex:16). If this ever starts
+      # returning an error, AshVault's check has become redundant.
+      assert :ok = Ash.Resource.Verifiers.VerifyIdentityFields.verify(dsl)
+
+      assert {:error, %Spark.Error.DslError{} = error} =
+               AshVault.Verifiers.VerifyVault.verify(dsl)
+
+      message = Exception.message(error)
+      assert message =~ "identity :unique_email, [:email]"
+      assert message =~ "enforces nothing"
+      assert message =~ "searchable?: true, unique?: true"
+      assert message =~ "email_lookup"
+      assert error.path == [:identities, :unique_email]
+    end
+
+    test "the identity AshVault generates for unique?: true does not trip the check" do
+      # `SearchUser` is `encrypt :email, searchable?: true, unique?: true`, so it carries a
+      # generated `:email_lookup_unique` identity. Keyed on the token, never the field.
+      assert :ok =
+               AshVault.Verifiers.VerifyVault.verify(AshVault.Test.SearchUser.spark_dsl_config())
+
+      assert [:email_lookup] ==
+               AshVault.Test.SearchUser
+               |> Ash.Resource.Info.identity(:email_lookup_unique)
+               |> Map.fetch!(:keys)
+    end
+
+    test "a postgres custom index on the encrypted attribute is rejected" do
+      dsl =
+        define_postgres!(Verify.PlaintextCustomIndex, """
+          postgres do
+            table "search_users"
+            repo AshVault.Test.Repo
+
+            custom_indexes do
+              index [:email], unique: true
+            end
+          end
+        """)
+
+      assert {:error, %Spark.Error.DslError{} = error} =
+               AshVault.Verifiers.VerifyVault.verify(dsl)
+
+      message = Exception.message(error)
+      assert message =~ "custom index"
+      assert message =~ "[:email]"
+      assert message =~ "fresh nonce per write"
+      assert message =~ "email_lookup"
+      assert error.path == [:postgres, :custom_indexes]
+    end
+
+    test "a custom index on an untouched column is fine" do
+      dsl =
+        define_postgres!(Verify.CleanCustomIndex, """
+          postgres do
+            table "search_users"
+            repo AshVault.Test.Repo
+
+            custom_indexes do
+              index [:org_id]
+            end
+          end
+        """)
+
+      assert :ok = AshVault.Verifiers.VerifyVault.verify(dsl)
+    end
+
+    # Not AshVault's to catch — asserted here so that if Ash ever stops catching them,
+    # this suite says so rather than the gap reopening silently.
+    test "a relationship source_attribute is already caught by Ash" do
+      dsl =
+        define_postgres!(Verify.PlaintextRelationship, """
+          postgres do
+            table "search_users"
+            repo AshVault.Test.Repo
+          end
+
+          relationships do
+            belongs_to :org, AshVault.Test.Organization,
+              source_attribute: :email,
+              destination_attribute: :id,
+              attribute_type: :string,
+              define_attribute?: false
+          end
+        """)
+
+      error =
+        assert_raise Spark.Error.DslError, fn ->
+          Ash.Resource.Verifiers.ValidateRelationshipAttributes.verify(dsl)
+        end
+
+      assert Exception.message(error) =~ "expects source attribute `email` to be defined"
+    end
+
+    test "the multitenancy attribute is already caught by Ash" do
+      dsl =
+        define_postgres!(Verify.PlaintextTenantAttribute, """
+          postgres do
+            table "search_users"
+            repo AshVault.Test.Repo
+          end
+
+          multitenancy do
+            strategy :attribute
+            attribute :email
+          end
+        """)
+
+      assert {:error, %Spark.Error.DslError{} = error} =
+               Ash.Resource.Verifiers.ValidateMultitenancy.verify(dsl)
+
+      assert Exception.message(error) =~
+               "Attribute email used in multitenancy configuration does not exist"
+    end
+  end
 end

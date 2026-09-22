@@ -4,7 +4,7 @@ defmodule AshVault.Key do
 
   This is the type a key provider hands to a cipher. It is deliberately a *union*:
 
-      @type t :: binary() | %AshVault.Key{ref: reference(), owner: module()}
+      @type t :: binary() | %AshVault.Key{ref: term(), owner: module()}
 
   A raw 32-byte binary is a perfectly valid `AshVault.Key.t()` and always will be. Every
   provider AshVault ships returns binaries, `AshVault.Ciphers.AES.GCM` takes binaries,
@@ -48,8 +48,16 @@ defmodule AshVault.Key do
   """
   @type t :: binary() | opaque()
 
-  @typedoc "The handle form."
-  @type opaque :: %__MODULE__{ref: reference(), owner: module()}
+  @typedoc """
+  The handle form.
+
+  `:ref` is usually a NIF resource `reference()` — that is the case the struct was
+  introduced for. It is typed as `term()` because a handle need not point at memory this
+  node owns: `AshVault.KeyProviders.OpenBaoTransit` returns
+  `{transit_key_name, version}`, naming key material that lives in OpenBao and is never
+  fetched at all. Whatever it is, only `:owner` may interpret it.
+  """
+  @type opaque :: %__MODULE__{ref: term(), owner: module()}
 
   @doc """
   Whether a key is an opaque handle rather than raw bytes.
@@ -88,9 +96,21 @@ defmodule AshVault.Key do
       iex> AshVault.Key.key?(:nope)
       false
 
+  A handle is usable when it has both a `:ref` and an owner to interpret it. The `:ref`
+  is deliberately not required to be a `reference()`: a provider whose key material is
+  not on this node at all — `AshVault.KeyProviders.OpenBaoTransit` — names it rather than
+  pointing at it.
+
+      iex> AshVault.Key.key?(%AshVault.Key{ref: nil, owner: nil})
+      false
+
   """
   @spec key?(term()) :: boolean()
   def key?(key) when is_binary(key), do: true
-  def key?(%__MODULE__{ref: ref}) when is_reference(ref), do: true
+
+  def key?(%__MODULE__{ref: ref, owner: owner})
+      when not is_nil(ref) and is_atom(owner) and not is_nil(owner),
+      do: true
+
   def key?(_key), do: false
 end
