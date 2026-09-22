@@ -23,13 +23,24 @@ defmodule AshVault.Cipher do
   @doc "The exact key size, in bytes, this cipher requires."
   @callback key_bytes() :: pos_integer()
 
-  @doc "Encrypt `plaintext` under `key`, binding `aad` into the authentication tag."
-  @callback encrypt(plaintext :: binary(), key :: binary(), aad :: binary()) ::
-              {:ok, payload()} | {:error, term()}
+  @doc """
+  Encrypt `plaintext` under `key`, binding `aad` into the authentication tag.
 
-  @doc "Decrypt a payload under `key`, verifying it against `aad`."
-  @callback decrypt(payload(), key :: binary(), aad :: binary()) ::
-              {:ok, binary()} | {:error, term()}
+  `key` is an `AshVault.Key.t()`, which is a raw binary for every cipher and provider
+  AshVault ships, and may also be an opaque `%AshVault.Key{}` handle to material held
+  outside the BEAM heap. A cipher that cannot use a handle returns
+  `{:error, :opaque_key_unsupported}`; it must never fall back to anything else.
+  """
+  @callback encrypt(plaintext :: binary(), key :: AshVault.Key.t(), aad :: binary()) ::
+              {:ok, payload()} | {:error, :opaque_key_unsupported} | {:error, term()}
+
+  @doc """
+  Decrypt a payload under `key`, verifying it against `aad`.
+
+  Takes the same `AshVault.Key.t()` union as `c:encrypt/3`.
+  """
+  @callback decrypt(payload(), key :: AshVault.Key.t(), aad :: binary()) ::
+              {:ok, binary()} | {:error, :opaque_key_unsupported} | {:error, term()}
 
   @builtin %{"aes_256_gcm_v1" => AshVault.Ciphers.AES.GCM}
 

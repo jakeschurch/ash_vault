@@ -1,0 +1,19 @@
+[package]
+name = "ashvault_nif"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "ashvault_nif"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+aes-gcm = "0.11.1"
+dashmap = "6.2.1"
+getrandom = "0.4.3"
+region = "4.0.0"
+rustler = "0.38.0"
+subtle = "2.6.1"
+zeroize = "1.9.0"

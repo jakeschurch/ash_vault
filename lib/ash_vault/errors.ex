@@ -19,6 +19,9 @@ defmodule AshVault.Errors do
     * `AshVault.Errors.KeySizeMismatch` — the provider's keys are the wrong size for
       the cipher; a configuration fault, **not** retryable and not tampering
     * `AshVault.Errors.InvalidScope` — an `AshVault.Scope` returned a non-binary key
+    * `AshVault.Errors.OpaqueKeyUnsupported` — the provider returned an opaque
+      `AshVault.Key` handle and the cipher can only use raw bytes; a configuration
+      fault, not retryable and not tampering
 
   A destroyed key must never surface as `AshVault.Errors.AuthenticationFailed`:
   destruction is checked before any decryption is attempted.
@@ -236,4 +239,47 @@ defmodule AshVault.Errors.InvalidCiphertext do
     Value is not a valid AshVault envelope: #{inspect(reason)}.
     """
   end
+end
+
+defmodule AshVault.Errors.OpaqueKeyUnsupported do
+  @moduledoc """
+  Raised when a key provider returned an opaque `AshVault.Key` handle to a cipher that
+  can only work on raw key bytes.
+
+  This is a configuration fault, not a transport failure and emphatically not tampering:
+  the pairing of provider and cipher is wrong and will be wrong on every retry. The
+  alternative — silently fetching the bytes out of the handle and carrying on — would
+  put the key back on the BEAM heap, which is the exact thing the handle exists to
+  prevent, so AshVault refuses instead.
+  """
+
+  use Splode.Error,
+    fields: [:cipher, :provider, :resource, :field, :operation],
+    class: :invalid
+
+  def message(%{cipher: cipher, provider: provider} = error) do
+    """
+    #{inspect(cipher)} cannot use the opaque key handle returned by #{inspect(provider)}#{at(error)}.
+
+    #{inspect(provider)} returned an `%AshVault.Key{}` handle, which keeps key material
+    outside the BEAM heap, but #{inspect(cipher)} only accepts raw key bytes.
+
+    Either configure a cipher that understands handles (for example
+    `AshVaultRustler.Cipher`), or configure a provider that returns binaries.
+    AshVault will not unwrap the handle for you: doing so would copy the key onto the
+    BEAM heap, which is the one thing the handle exists to prevent.
+    """
+  end
+
+  defp at(%{resource: nil}), do: ""
+
+  # The verb follows the operation. Reporting a failed decrypt as "encrypting" is the
+  # same defect as REVIEW_FINDINGS #10 — it sends the operator looking at the wrong half
+  # of the system.
+  defp at(%{resource: resource, field: field, operation: operation}) do
+    ", #{verb(operation)} #{inspect(resource)}.#{field}"
+  end
+
+  defp verb(:decrypt), do: "decrypting"
+  defp verb(_operation), do: "encrypting"
 end

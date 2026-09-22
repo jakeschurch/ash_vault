@@ -18,15 +18,27 @@ defmodule AshVault.KeyProvider do
   """
 
   @type scope :: term()
+
+  @typedoc """
+  The key material a provider serves.
+
+  A raw binary for every provider AshVault ships. The union with `AshVault.Key` is the
+  opt-in extension point for a provider that keeps key material outside the BEAM heap
+  and hands out an opaque handle instead; see `AshVault.Key`.
+  """
+  @type key :: AshVault.Key.t()
   @type version :: non_neg_integer()
-  @type key_info :: %{version: version(), key: binary(), created_at: DateTime.t()}
+  @type key_info :: %{version: version(), key: AshVault.Key.t(), created_at: DateTime.t()}
 
   @doc "Fetch (minting on first use) the current key for a scope."
   @callback current_key(scope()) :: {:ok, key_info()} | {:error, term()}
 
   @doc "Fetch a specific historical key version for a scope."
   @callback get_key(scope(), version()) ::
-              {:ok, binary()} | {:error, :not_found} | {:error, :destroyed} | {:error, term()}
+              {:ok, AshVault.Key.t()}
+              | {:error, :not_found}
+              | {:error, :destroyed}
+              | {:error, term()}
 
   @doc "Mint a new key version for a scope, retaining history."
   @callback rotate(scope()) :: {:ok, version()} | {:error, term()}

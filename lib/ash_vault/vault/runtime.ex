@@ -65,9 +65,24 @@ defmodule AshVault.Vault.Runtime do
       {:error, {:invalid_key_size, actual}} ->
         raise key_size_mismatch(opts, actual)
 
+      # Same reasoning, one step further out: the provider hands out opaque key handles
+      # and this cipher cannot use one. Permanent, and nothing to do with tampering.
+      {:error, :opaque_key_unsupported} ->
+        raise opaque_key_unsupported(opts, opts.cipher, ctx, :encrypt)
+
       {:error, reason} ->
         raise ProviderUnavailable.exception(provider: opts.cipher, reason: reason)
     end
+  end
+
+  defp opaque_key_unsupported(opts, cipher, ctx, operation) do
+    AshVault.Errors.OpaqueKeyUnsupported.exception(
+      cipher: cipher,
+      provider: opts.key_provider,
+      resource: ctx.resource,
+      field: ctx.field,
+      operation: operation
+    )
   end
 
   defp key_size_mismatch(opts, actual, cipher \\ nil) do
@@ -142,6 +157,9 @@ defmodule AshVault.Vault.Runtime do
       # Never AuthenticationFailed: a config typo is not "your data was tampered with".
       {:error, {:invalid_key_size, actual}} ->
         raise key_size_mismatch(opts, actual, cipher_mod)
+
+      {:error, :opaque_key_unsupported} ->
+        raise opaque_key_unsupported(opts, cipher_mod, ctx, :decrypt)
 
       {:error, _reason} ->
         raise AuthenticationFailed.exception(

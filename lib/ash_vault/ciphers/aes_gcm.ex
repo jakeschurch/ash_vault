@@ -51,7 +51,7 @@ defmodule AshVault.Ciphers.AES.GCM do
   Returns `{:error, {:invalid_key_size, n}}` if the key is not exactly 32 bytes.
   """
   @impl AshVault.Cipher
-  @spec encrypt(binary(), binary(), binary()) ::
+  @spec encrypt(binary(), AshVault.Key.t(), binary()) ::
           {:ok, AshVault.Cipher.payload()} | {:error, term()}
   def encrypt(plaintext, key, aad)
       when is_binary(plaintext) and is_binary(key) and is_binary(aad) do
@@ -65,6 +65,12 @@ defmodule AshVault.Ciphers.AES.GCM do
     end
   end
 
+  # An opaque `AshVault.Key` handle deliberately keeps its bytes outside the BEAM, and
+  # `:crypto` can only work on a binary. Unwrapping it here would copy the key onto the
+  # heap — the one thing the handle exists to prevent — so this cipher declines instead,
+  # and `AshVault.Vault.Runtime` turns the decline into a named configuration error.
+  def encrypt(_plaintext, %AshVault.Key{}, _aad), do: {:error, :opaque_key_unsupported}
+
   @doc """
   Decrypt a payload, verifying the tag against `aad`.
 
@@ -77,7 +83,7 @@ defmodule AshVault.Ciphers.AES.GCM do
   `tag_len` in the envelope into a ≤256-guess forgery. See the moduledoc.
   """
   @impl AshVault.Cipher
-  @spec decrypt(AshVault.Cipher.payload(), binary(), binary()) ::
+  @spec decrypt(AshVault.Cipher.payload(), AshVault.Key.t(), binary()) ::
           {:ok, binary()} | {:error, term()}
   def decrypt(%{ciphertext: ciphertext, nonce: nonce, tag: tag}, key, aad)
       when is_binary(ciphertext) and is_binary(nonce) and is_binary(tag) and is_binary(key) and
@@ -91,6 +97,10 @@ defmodule AshVault.Ciphers.AES.GCM do
       end
     end
   end
+
+  # Must come before the catch-all: an opaque key is a configuration fault, and
+  # reporting it as `:auth_failed` would surface a misconfiguration as tampering.
+  def decrypt(_payload, %AshVault.Key{}, _aad), do: {:error, :opaque_key_unsupported}
 
   def decrypt(_payload, _key, _aad), do: {:error, :auth_failed}
 
