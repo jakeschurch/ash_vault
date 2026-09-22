@@ -84,7 +84,7 @@ jobs:
       # naming is the single easiest way to ship artifacts nothing can download.
       - name: Build the NIF
         id: build
-        uses: philss/rustler-precompiled-action@v1.1.4
+        uses: philss/rustler-precompiled-action@v1.1.5
         with:
           project-name: ashvault_nif
           project-version: ${{ steps.version.outputs.version }}
