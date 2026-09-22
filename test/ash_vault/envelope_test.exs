@@ -1,6 +1,8 @@
 defmodule AshVault.EnvelopeTest do
   use ExUnit.Case, async: true
 
+  import Bitwise
+
   alias AshVault.Envelope
   alias AshVault.Envelope.V1
   alias AshVault.Errors.InvalidCiphertext
@@ -111,25 +113,42 @@ defmodule AshVault.EnvelopeTest do
       end
     end
 
-    test "fuzzing with random binaries never raises" do
-      for _ <- 1..2000 do
-        blob = :crypto.strong_rand_bytes(:rand.uniform(64) - 1)
+    # P2 #17. `match?({:error, %{}}, ...)` passes on ANY struct, so the fuzz tests
+    # proved only "did not raise" — a misclassification (InvalidCiphertext where
+    # UnsupportedEnvelope is owed, or vice versa) sailed straight through. Every
+    # outcome below is now pinned to the struct the magic and version byte demand.
+    defp assert_classified(blob) do
+      result = Envelope.decode(blob)
 
-        assert match?({:ok, _}, Envelope.decode(blob)) or
-                 match?({:error, %{}}, Envelope.decode(blob))
+      case blob do
+        <<"AV", 1::8, _rest::binary>> ->
+          assert match?({:ok, %{version: 1}}, result) or
+                   match?({:error, %InvalidCiphertext{}}, result),
+                 "a v1 envelope must decode or be InvalidCiphertext, got #{inspect(result)}"
+
+        <<"AV", version::8, _rest::binary>> ->
+          assert {:error, %UnsupportedEnvelope{version: ^version}} = result
+
+        _other ->
+          assert {:error, %InvalidCiphertext{}} = result
+      end
+
+      result
+    end
+
+    test "fuzzing with random binaries is always classified correctly" do
+      for _ <- 1..2000 do
+        assert_classified(:crypto.strong_rand_bytes(:rand.uniform(64) - 1))
       end
     end
 
-    test "fuzzing with AV-prefixed random binaries never raises" do
+    test "fuzzing with AV-prefixed random binaries is always classified correctly" do
       for _ <- 1..2000 do
-        blob = "AV" <> :crypto.strong_rand_bytes(:rand.uniform(64) - 1)
-
-        assert match?({:ok, _}, Envelope.decode(blob)) or
-                 match?({:error, %{}}, Envelope.decode(blob))
+        assert_classified("AV" <> :crypto.strong_rand_bytes(:rand.uniform(64) - 1))
       end
     end
 
-    test "fuzzing by mutating a valid envelope never raises" do
+    test "fuzzing by mutating a valid envelope is always classified correctly" do
       blob = V1.encode(sample())
 
       for _ <- 1..2000 do
@@ -137,8 +156,17 @@ defmodule AshVault.EnvelopeTest do
         <<prefix::binary-size(^index), byte, rest::binary>> = blob
         mutated = <<prefix::binary, Bitwise.bxor(byte, :rand.uniform(255)), rest::binary>>
 
-        assert match?({:ok, _}, Envelope.decode(mutated)) or
-                 match?({:error, %{}}, Envelope.decode(mutated))
+        assert_classified(mutated)
+      end
+    end
+
+    test "a mutated version byte is UnsupportedEnvelope, never InvalidCiphertext" do
+      blob = V1.encode(sample())
+      <<"AV", _version::8, rest::binary>> = blob
+
+      for version <- 0..255, version != 1 do
+        assert {:error, %UnsupportedEnvelope{version: ^version}} =
+                 Envelope.decode(<<"AV", version::8, rest::binary>>)
       end
     end
 
@@ -150,6 +178,71 @@ defmodule AshVault.EnvelopeTest do
 
     test "V1.decode/1 rejects a foreign version directly" do
       assert {:error, %InvalidCiphertext{}} = V1.decode(<<"AV", 2::8, "rest">>)
+    end
+  end
+
+  describe "encode/1 rejects unencodable envelopes symmetrically (P2 #20)" do
+    # An over-long cipher id got a clean ArgumentError while an over-long nonce or tag,
+    # or a key_version past 2^32-1, fell off the guard clause as an opaque
+    # FunctionClauseError — the same class of mistake reported two different ways.
+    test "an over-long cipher id, nonce or tag all raise ArgumentError naming the field" do
+      long = :crypto.strong_rand_bytes(256)
+
+      assert_raise ArgumentError, ~r/cipher_id is too long.*at most 255 bytes/s, fn ->
+        V1.encode(sample(%{cipher: Base.encode16(long)}))
+      end
+
+      assert_raise ArgumentError, ~r/nonce is too long.*at most 255 bytes/s, fn ->
+        V1.encode(sample(%{nonce: long}))
+      end
+
+      assert_raise ArgumentError, ~r/tag is too long.*at most 255 bytes/s, fn ->
+        V1.encode(sample(%{tag: long}))
+      end
+    end
+
+    test "exactly 255 bytes still encodes, and roundtrips" do
+      nonce = :crypto.strong_rand_bytes(255)
+      tag = :crypto.strong_rand_bytes(255)
+
+      blob = V1.encode(sample(%{nonce: nonce, tag: tag}))
+      assert {:ok, %{nonce: ^nonce, tag: ^tag}} = Envelope.decode(blob)
+    end
+
+    test "a key_version past 2^32-1 raises ArgumentError, not FunctionClauseError" do
+      for version <- [4_294_967_296, 4_294_967_300, 1 <<< 64, -1] do
+        error =
+          assert_raise ArgumentError, fn -> V1.encode(sample(%{key_version: version})) end
+
+        assert Exception.message(error) =~ "key_version is out of range"
+        assert Exception.message(error) =~ "0 and 4294967295"
+      end
+    end
+
+    test "non-binary and non-integer fields raise ArgumentError too" do
+      assert_raise ArgumentError, ~r/key_version must be an integer/, fn ->
+        V1.encode(sample(%{key_version: "1"}))
+      end
+
+      assert_raise ArgumentError, ~r/nonce must be a binary/, fn ->
+        V1.encode(sample(%{nonce: nil}))
+      end
+
+      assert_raise ArgumentError, ~r/tag must be a binary/, fn ->
+        V1.encode(sample(%{tag: 16}))
+      end
+
+      assert_raise ArgumentError, ~r/ciphertext must be a binary/, fn ->
+        V1.encode(sample(%{ciphertext: nil}))
+      end
+
+      assert_raise ArgumentError, ~r/cipher must be an atom or a binary/, fn ->
+        V1.encode(sample(%{cipher: 42}))
+      end
+
+      assert_raise ArgumentError, ~r/not an encodable AshVault envelope/, fn ->
+        V1.encode(%{cipher: :aes_256_gcm_v1})
+      end
     end
   end
 

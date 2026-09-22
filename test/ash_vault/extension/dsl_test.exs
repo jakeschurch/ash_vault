@@ -23,6 +23,11 @@ defmodule AshVault.Extension.DslTest do
     end
 
     test "entity reader is named after the section path, not the entity" do
+      # `function_exported?/3` answers false for a module that simply has not been
+      # loaded into this process yet, which made this assertion flaky under a large
+      # parallel run. Force the load first.
+      Code.ensure_loaded!(AshVault.Info)
+
       assert function_exported?(AshVault.Info, :ash_vault, 1)
       refute function_exported?(AshVault.Info, :ash_vault_encrypt, 1)
     end

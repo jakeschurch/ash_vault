@@ -67,6 +67,66 @@ defmodule AshVault.Scopes.AshTenantTest do
     end
   end
 
+  describe "MissingScope messages (finding 10)" do
+    # The message hardcoded "no Ash tenant was present" for every reason. An operator
+    # who DID pass a tenant — in a shape with no `:id` — was sent hunting a missing
+    # tenant that is not missing, and the `vars: [tenant: ...]` the scope assembled was
+    # never read by anything.
+    test "the unsupported-shape message says what was received, not that a tenant is missing" do
+      error =
+        assert_raise MissingScope, fn ->
+          AshTenant.resolve!(context(%{tenant: {:weird, :shape}}))
+        end
+
+      message = Exception.message(error)
+
+      refute message =~ "no Ash tenant was present"
+      refute message =~ "Pass a tenant when executing the Ash action"
+
+      assert message =~ "of a shape"
+      assert message =~ "{:weird, :shape}"
+      assert message =~ "this is not a missing-tenant error"
+      assert message =~ "to_scope_key/2"
+      assert message =~ "AshVault.Scopes.AshTenant"
+    end
+
+    test "the missing-tenant message keeps the operator-facing text CORE_SPEC §1 froze" do
+      error = assert_raise MissingScope, fn -> AshTenant.resolve!(context(%{})) end
+
+      message = Exception.message(error)
+
+      assert message =~
+               "Cannot encrypt AshVault.Test.Support.Resources.User.ssn because no Ash tenant was present."
+
+      assert message =~ "This resource uses tenant-scoped encryption."
+
+      assert message =~
+               "Pass a tenant when executing the Ash action or configure another AshVault scope."
+    end
+
+    test "the verb follows the operation, and Exception.message/1 works for every reason" do
+      for reason <- [nil, :no_tenant, :unsupported_tenant_shape, :something_new] do
+        for operation <- [nil, :encrypt, :decrypt] do
+          error =
+            MissingScope.exception(
+              resource: Resources.User,
+              field: :ssn,
+              scope_module: AshTenant,
+              reason: reason,
+              tenant: "\"weird\"",
+              operation: operation
+            )
+
+          message = Exception.message(error)
+          assert message != ""
+
+          expected_verb = if operation == :decrypt, do: "decrypt", else: "encrypt"
+          assert message =~ "Cannot #{expected_verb} "
+        end
+      end
+    end
+  end
+
   describe "AshVault.Scopes.Global" do
     test "always resolves to \"global\"" do
       assert Global.resolve!(context(nil)) == "global"

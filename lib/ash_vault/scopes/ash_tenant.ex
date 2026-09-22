@@ -16,7 +16,10 @@ defmodule AshVault.Scopes.AshTenant do
     * an atom or integer is stringified
     * a struct with an `:id` is reduced to the stringified id
     * anything else raises `AshVault.Errors.MissingScope` with
-      `reason: :unsupported_tenant_shape`
+      `reason: :unsupported_tenant_shape`, whose message says what was received and
+      which shapes are accepted — a tenant WAS passed, it just could not be reduced to
+      a stable key, and telling the operator to "pass a tenant" would send them hunting
+      something that is not missing
 
   Stringification (rather than `:erlang.term_to_binary/1`) keeps scope keys readable and
   stable across processes, releases and OTP upgrades.
@@ -76,7 +79,7 @@ defmodule AshVault.Scopes.AshTenant do
             field: context && context.field,
             scope_module: __MODULE__,
             reason: :unsupported_tenant_shape,
-            vars: [tenant: inspect(tenant)]
+            tenant: inspect(tenant, limit: 5, printable_limit: 128, structs: false)
           )
   end
 

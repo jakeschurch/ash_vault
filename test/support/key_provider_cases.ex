@@ -137,6 +137,70 @@ defmodule AshVault.Test.Support.KeyProviderCases do
           assert {:error, :destroyed} = rotate(provider, scope)
         end
 
+        # Finding 9. Local raised, Memory accepted any term, and OpenBao ran
+        # `:erlang.term_to_binary/1` — making BOTH the transit key name and the
+        # tombstone path functions of the OTP external term format. An OTP encoding
+        # change relocates the tombstone (scope resurrects with a fresh key) and the
+        # key name (every existing ciphertext becomes KeyNotFound).
+        test "a non-binary scope is rejected identically by every provider",
+             %{provider: provider} do
+          for bad <- [:atom, 42, {:tuple, 1}, %{a: 1}, ["list"], nil] do
+            assert_raise ArgumentError, ~r/must be binaries/, fn ->
+              current_key(provider, bad)
+            end
+
+            assert_raise ArgumentError, ~r/must be binaries/, fn ->
+              get_key(provider, bad, 1)
+            end
+
+            assert_raise ArgumentError, ~r/must be binaries/, fn -> rotate(provider, bad) end
+            assert_raise ArgumentError, ~r/must be binaries/, fn -> destroy(provider, bad) end
+          end
+        end
+
+        test "rotate on a scope that has never been used returns {:ok, 1}",
+             %{provider: provider, scope: scope} do
+          scope = scope.()
+
+          assert {:ok, 1} = rotate(provider, scope)
+          assert {:ok, %{version: 1}} = current_key(provider, scope)
+          assert {:ok, 2} = rotate(provider, scope)
+        end
+
+        # Finding 15 / P2 #18: version is part of the public API, and a provider must
+        # not read a file (or an endpoint) named by an unvalidated term.
+        test "a zero, negative or non-integer version is :not_found",
+             %{provider: provider, scope: scope} do
+          scope = scope.()
+          assert {:ok, _} = current_key(provider, scope)
+
+          for version <- [0, -1, -99, :one, 1.5, "1", "../../etc/passwd"] do
+            assert {:error, :not_found} = get_key(provider, scope, version),
+                   "expected :not_found for version #{inspect(version)}"
+          end
+        end
+
+        # Finding 11. OpenBao fabricated `created_at: DateTime.utc_now()` when the
+        # metadata was missing. A key that is always "created now" is never older than
+        # a `max_age`, so age-based rotation silently never fires.
+        test "created_at is stable across calls and never moves backwards on rotate",
+             %{provider: provider, scope: scope} do
+          scope = scope.()
+
+          assert {:ok, %{created_at: %DateTime{} = first}} = current_key(provider, scope)
+          assert {:ok, %{created_at: %DateTime{} = second}} = current_key(provider, scope)
+          assert DateTime.compare(first, second) == :eq
+
+          assert {:ok, 2} = rotate(provider, scope)
+
+          assert {:ok, %{version: 2, created_at: %DateTime{} = rotated}} =
+                   current_key(provider, scope)
+
+          # Not `:gt`: OpenBao's transit metadata is in whole unix seconds, so two
+          # rotations inside one second legitimately share a timestamp.
+          assert DateTime.compare(rotated, first) != :lt
+        end
+
         test "destroying one scope leaves others untouched",
              %{provider: provider, scope: scope} do
           destroyed = scope.()

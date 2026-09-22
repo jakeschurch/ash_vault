@@ -1,0 +1,249 @@
+defmodule Mix.Tasks.AshVault.Backfill do
+  @shortdoc "Encrypt an existing plaintext column, online, in committed batches"
+
+  @moduledoc """
+  Encrypt an existing plaintext column into its `encrypted_<field>` column, online.
+
+  This is step 3 of the *expand / backfill / cut over / contract* migration:
+
+    1. **Expand** — an ordinary Ash/Ecto migration adds `encrypted_email`. Schema
+       migrations never need keys.
+    2. **Deploy** the transitional resource: `encrypt :email, backfill_from: :legacy_email`
+       (or pass `--from` here). The plaintext column is still there.
+    3. **Backfill** — this task. It needs the app runtime and a reachable key provider.
+    4. **Verify** — `mix ash_vault.verify`, or `--verify` here.
+    5. **Cut over** — point reads and writes at the encrypted field. *This is the
+       irreversible step*; do it only after a clean verify.
+    6. **Contract** — drop the plaintext column in a later migration.
+
+  There is no decrypt-back mode. Until step 6 the plaintext column is still there, which
+  is the rollback.
+
+  ## Usage
+
+      mix ash_vault.backfill MyApp.Accounts.User email --tenant acme
+      mix ash_vault.backfill MyApp.Accounts.User email --from legacy_email --batch-size 1000
+      mix ash_vault.backfill MyApp.Accounts.User email --all-tenants MyApp.Accounts.list_tenant_ids/0
+      mix ash_vault.backfill MyApp.Accounts.User email --tenant acme --dry-run
+      mix ash_vault.backfill MyApp.Accounts.User email --tenant acme --verify
+
+  ## Options
+
+      --from ATTR          plaintext source attribute (default: the field's `backfill_from`)
+      --batch-size N       rows per committed transaction (default 500)
+      --tenant TENANT      required when the key scope is `:tenant`
+      --all-tenants MFA    zero-arity `Module.function/0` listing tenants
+      --domain MODULE      Ash domain (inferred from `:ash_domains` when omitted)
+      --action NAME        update action to write with (default: the primary update
+                           action; it must be `require_atomic? false`)
+      --verify             decrypt a sample and compare to the plaintext column; write nothing
+      --dry-run            report what would be done; write nothing
+      --resume-from ID     start after this primary key
+      --sample N           rows to check in `--verify` mode (`0` checks every row)
+      --yes                skip the confirmation prompt
+
+  ## Guarantees
+
+    * Rows are ordered by primary key and paged with a keyset (`pk > last_seen`), never
+      `OFFSET`.
+    * Only rows whose encrypted column `IS NULL` are selected, so a re-run is a no-op and
+      an interrupted run resumes with no state file.
+    * Each batch is its own transaction. The table is never wrapped in one.
+    * The key provider is checked **before** the first batch; an unreachable provider
+      fails with `ProviderUnavailable` rather than half a written table. If it goes away
+      mid-run, the task stops at the batch boundary and prints the exact resume command.
+    * Only the encrypted column is written.
+
+  ## Output
+
+  One `key=value` line per batch, then a human summary:
+
+      ash_vault.backfill resource=MyApp.Accounts.User field=email source=legacy_email ...
+      batch=1 rows=500 done=500 remaining=1500 rate=812.3 eta_s=1.8 elapsed_s=0.62
+      Backfilled 2000 row(s) of MyApp.Accounts.User.email in 4 batch(es) (2.4s).
+  """
+
+  use Mix.Task
+
+  alias AshVault.Mix.Shared
+
+  @switches [
+    from: :string,
+    batch_size: :integer,
+    tenant: :string,
+    all_tenants: :string,
+    domain: :string,
+    action: :string,
+    verify: :boolean,
+    dry_run: :boolean,
+    resume_from: :string,
+    sample: :integer,
+    yes: :boolean
+  ]
+
+  @requirements ["app.start"]
+
+  @doc false
+  @impl Mix.Task
+  def run(argv) do
+    Shared.start_app!(argv)
+
+    {opts, args} = OptionParser.parse!(argv, strict: @switches)
+
+    {resource, field} =
+      case args do
+        [resource, field] -> {Shared.resource!(resource), String.to_atom(field)}
+        _ -> Shared.abort!("usage: mix ash_vault.backfill RESOURCE FIELD [options]")
+      end
+
+    tenants = Shared.tenants!(opts)
+
+    if !opts[:verify] and !opts[:dry_run] do
+      Shared.confirm!(
+        "Encrypt #{inspect(resource)}.#{field} for #{length(tenants)} tenant(s)?",
+        opts
+      )
+    end
+
+    Enum.each(tenants, &run_tenant(resource, field, &1, opts))
+  end
+
+  defp run_tenant(resource, field, tenant, opts) do
+    engine_opts = [
+      from: opts[:from] && String.to_atom(opts[:from]),
+      action: opts[:action] && String.to_atom(opts[:action]),
+      tenant: tenant,
+      domain: Shared.domain(opts),
+      batch_size: opts[:batch_size],
+      resume_from: opts[:resume_from],
+      sample: opts[:sample],
+      dry_run?: !!opts[:dry_run],
+      verify?: !!opts[:verify],
+      reporter: &report/1
+    ]
+
+    case AshVault.Backfill.run(resource, field, engine_opts) do
+      {:ok, %{verify?: true} = stats} ->
+        Shared.say(
+          "Verified #{stats.checked} of #{stats.total} row(s) of " <>
+            "#{inspect(resource)}.#{field}: no mismatches."
+        )
+
+      {:ok, stats} ->
+        Shared.say(summary(resource, field, tenant, stats))
+
+      {:error, error} ->
+        Shared.abort!(Exception.message(error))
+
+      {:error, error, %{verify?: true}} ->
+        Shared.abort!(failure_message(tenant, error))
+
+      {:error, error, stats} ->
+        Shared.say(resume_hint(resource, field, tenant, stats, opts))
+        Shared.abort!(failure_message(tenant, error))
+    end
+  end
+
+  defp summary(resource, field, tenant, stats) do
+    prefix = if stats.dry_run?, do: "Dry run: would back-fill", else: "Backfilled"
+
+    "#{prefix} #{stats.done} row(s) of #{inspect(resource)}.#{field}" <>
+      tenant_suffix(tenant) <>
+      " in #{stats.batches} batch(es) (#{stats.elapsed_s}s)" <>
+      skipped_suffix(stats) <> "."
+  end
+
+  defp tenant_suffix(nil), do: ""
+  defp tenant_suffix(tenant), do: " for tenant #{Shared.format(tenant)}"
+
+  defp skipped_suffix(%{skipped_nil_source: 0}), do: ""
+
+  defp skipped_suffix(%{skipped_nil_source: n}),
+    do: ", #{n} row(s) skipped (nil source, `encrypt_nil?: false`)"
+
+  defp failure_message(nil, error), do: Exception.message(error)
+
+  defp failure_message(tenant, error),
+    do: "tenant #{Shared.format(tenant)}: " <> Exception.message(error)
+
+  defp resume_hint(resource, field, tenant, stats, opts) do
+    """
+
+    Stopped at a batch boundary. #{stats.done} row(s) are committed; the rest are untouched.
+    Resume with:
+
+        mix ash_vault.backfill #{inspect(resource)} #{field}#{resume_args(tenant, stats, opts)}
+    """
+  end
+
+  defp resume_args(tenant, stats, opts) do
+    [
+      switch("--from", opts[:from]),
+      switch("--action", opts[:action]),
+      switch("--domain", opts[:domain]),
+      switch("--batch-size", opts[:batch_size]),
+      switch("--tenant", tenant),
+      switch("--resume-from", stats.resume_from)
+    ]
+    |> IO.iodata_to_binary()
+  end
+
+  defp switch(_name, nil), do: []
+  defp switch(name, value), do: [" ", name, " ", Shared.format(value)]
+
+  defp report({:preflight, payload}) do
+    Shared.kv(
+      "ash_vault.backfill": "start",
+      resource: payload.resource,
+      field: payload.field,
+      source: payload.source,
+      tenant: payload.tenant,
+      scope: payload.scope,
+      vault: payload.vault,
+      provider: payload.provider,
+      key: key_status(payload.key),
+      rows: payload.total,
+      batch_size: payload.batch_size,
+      dry_run: payload.dry_run?
+    )
+  end
+
+  defp report({:batch, payload}) do
+    Shared.kv(
+      batch: payload.batch,
+      rows: payload.rows,
+      done: payload.done,
+      skipped: payload.skipped_nil_source,
+      remaining: payload.remaining,
+      rate: payload.rate,
+      eta_s: payload.eta_s,
+      elapsed_s: payload.elapsed_s,
+      last_pk: payload.resume_from
+    )
+  end
+
+  defp report({:done, payload}) do
+    Shared.kv(
+      "ash_vault.backfill": "done",
+      rows: payload.total,
+      done: payload.done,
+      skipped: payload.skipped_nil_source,
+      batches: payload.batches,
+      elapsed_s: payload.elapsed_s
+    )
+  end
+
+  defp report({:verify_done, payload}) do
+    Shared.kv(
+      "ash_vault.backfill": "verify",
+      rows: payload.total,
+      checked: payload.checked,
+      mismatches: length(payload.mismatches)
+    )
+  end
+
+  defp report(_event), do: :ok
+
+  defp key_status({:current, version}), do: "v#{version}"
+  defp key_status(other), do: other
+end

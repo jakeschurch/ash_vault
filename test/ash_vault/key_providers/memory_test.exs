@@ -51,6 +51,27 @@ defmodule AshVault.KeyProviders.MemoryTest do
       refute key == new_key
     end
 
+    # Finding 13. Without format_status/1 any crash in this GenServer emits a SASL
+    # report carrying every scope's raw key bytes into the logs and into any APM
+    # handler attached to them.
+    test "key material never appears in a process status report", %{provider: {Memory, name}} do
+      assert {:ok, %{key: key}} = Memory.current_key(name, "sensitive")
+      assert {:ok, 2} = Memory.rotate(name, "sensitive")
+      assert {:ok, %{key: rotated}} = Memory.current_key(name, "sensitive")
+
+      status = :sys.get_status(Process.whereis(name))
+      rendered = inspect(status, limit: :infinity, printable_limit: :infinity)
+
+      refute rendered =~ inspect(key)
+      refute rendered =~ inspect(rotated)
+      refute rendered =~ Base.encode16(key)
+      assert rendered =~ ":redacted"
+
+      # The rest of the state is still there to debug with.
+      assert rendered =~ "destroyed"
+      assert rendered =~ "key_bytes"
+    end
+
     test "calls against a dead instance surface as a provider error" do
       assert {:error, {:provider_unavailable, _}} =
                Memory.current_key(:ash_vault_memory_never_started, "x")

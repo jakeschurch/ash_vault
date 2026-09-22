@@ -37,6 +37,30 @@ defmodule AshVault.KeyProviders.Local do
   `:root` is required, either as a `start_link/1` option or under that config key.
   `start_link/1` also takes `:name` (default `__MODULE__`) and `:key_bytes` (default 32).
 
+  ## The key root must be initialised explicitly {: .error}
+
+  > #### `Local` never creates its own key root {: .error}
+  >
+  > Before the provider will start, the root directory must already exist **and**
+  > contain the sentinel file `.ash_vault_root`. Create both, once, with:
+  >
+  >     mix ash_vault.local.init /var/lib/my_app/ash_vault_keys
+  >
+  > or, from code, `AshVault.KeyProviders.Local.init_root!/1`.
+
+  This is a deliberate, breaking operational requirement, and it exists because the
+  moduledoc tells you to put the key root on its own volume. If that volume fails to
+  mount — a reordered systemd unit, a degraded array, an NFS server that is not up
+  yet — a provider that ran `File.mkdir_p!/1` would create the root on the *underlying*
+  filesystem, find no tombstones at all, report itself healthy, and mint a fresh
+  version 1 for every tenant you have ever crypto-erased. No attacker is needed; a
+  boot-order bug is enough.
+
+  The sentinel lives on the mounted volume, so its absence is exactly the signal that
+  distinguishes "the key store is not there" from "the key store is empty". It is never
+  created automatically — a fresh install has an empty root too, and auto-creating the
+  sentinel would make the two indistinguishable again.
+
   All operations are serialised through a `GenServer`, reads included. Simplicity beats
   throughput here; `AshVault.KeyProviders.OpenBao` is the answer for load.
 
@@ -82,10 +106,23 @@ defmodule AshVault.KeyProviders.Local do
 
   ## Destruction
 
-  `destroy/1` overwrites each `v*.key` with random bytes of the same length and fsyncs
-  before unlinking, then removes `meta.json` and the scope directory, then writes the
-  tombstone. It returns `:ok` only once the tombstone is on disk; a destroy that could
-  not record its tombstone is reported as `{:error, reason}`, never as success.
+  `destroy/1` writes the **tombstone first**, fsyncs it, and only then overwrites each
+  `v*.key` with random bytes of the same length, fsyncs, unlinks, and removes
+  `meta.json` and the scope directory. Once the shred completes the tombstone is
+  rewritten with a `shredded_at`, so an interrupted destroy is visible to an operator.
+
+  The ordering is load-bearing. Shredding first and tombstoning second leaves a window
+  — ENOSPC, EACCES, a read-only remount, a crash — in which the scope has no key
+  material *and* no tombstone. The next `current_key/1` would see an absent scope and
+  mint a fresh version 1; existing rows carry `key_version: 1`, so `get_key/2` would
+  hand back the **new** v1 key and the caller would get
+  `AshVault.Errors.AuthenticationFailed` — erasure wearing the costume of tampering.
+  Tombstone-first fails safe: the worst case is a scope marked destroyed whose key
+  files linger, and the provider refuses to serve them anyway.
+
+  A tombstone is honoured on **presence alone**: its contents are never parsed to
+  decide whether a scope is destroyed, so a truncated or unreadable tombstone still
+  means destroyed.
 
   > #### Overwrite-before-unlink guarantees nothing about the media {: .warning}
   >
@@ -102,6 +139,10 @@ defmodule AshVault.KeyProviders.Local do
 
     * tombstone present → `{:error, :destroyed}`, for `current_key/1`, `get_key/2` and
       `rotate/1` alike, forever
+    * tombstone **unreadable** (`:eacces`, `:eio`, `:estale`, `:eloop`, …) →
+      `{:error, %AshVault.Errors.ProviderUnavailable{}}`. A tombstone read that cannot
+      complete is never answered with "not destroyed": only a positive `:enoent`
+      counts as absence
     * no scope directory, or no `meta.json` → an ordinary absent scope: `current_key/1`
       mints version 1, `get_key/2` returns `{:error, :not_found}`
     * `meta.json` present but corrupt or truncated → `{:error, %AshVault.Errors.ProviderUnavailable{}}`
@@ -121,6 +162,7 @@ defmodule AshVault.KeyProviders.Local do
   @default_key_bytes 32
   @key_file_mode 0o600
   @meta_file "meta.json"
+  @sentinel_file ".ash_vault_root"
 
   @doc """
   Start the provider.
@@ -150,6 +192,49 @@ defmodule AshVault.KeyProviders.Local do
     |> Application.get_env(__MODULE__, [])
     |> Keyword.get(:key_bytes, @default_key_bytes)
   end
+
+  @doc """
+  Create and initialise a key root: the directory itself (mode `0700`) and the
+  `.ash_vault_root` sentinel the provider refuses to start without.
+
+  This is the **operator** step. It is deliberately not something the provider does for
+  itself — see the moduledoc. It is idempotent, and it never touches existing key
+  material.
+
+  Raises `File.Error` if the directory or the sentinel cannot be created.
+  """
+  @spec init_root!(binary()) :: :ok
+  def init_root!(root) when is_binary(root) and root != "" do
+    root = Path.expand(root)
+
+    File.mkdir_p!(root)
+    File.chmod!(root, 0o700)
+
+    sentinel = sentinel_path(root)
+
+    unless File.regular?(sentinel) do
+      File.write!(
+        sentinel,
+        Jason.encode!(%{
+          "initialised_at" => DateTime.to_iso8601(DateTime.utc_now()),
+          "note" =>
+            "AshVault key root marker. Do not delete: #{inspect(__MODULE__)} refuses to " <>
+              "start without it, which is what stops an unmounted volume from looking " <>
+              "like an empty, never-used key store."
+        })
+      )
+
+      File.chmod!(sentinel, @key_file_mode)
+    end
+
+    :ok
+  end
+
+  @doc """
+  The name of the sentinel file that marks a directory as an initialised key root.
+  """
+  @spec sentinel_file() :: String.t()
+  def sentinel_file, do: @sentinel_file
 
   @doc """
   The directory name, relative to the root, holding a scope's key material.
@@ -272,16 +357,54 @@ defmodule AshVault.KeyProviders.Local do
   def init(opts) do
     root = Keyword.fetch!(opts, :root)
 
-    # A root we create ourselves is ours to lock down; only a pre-existing directory gets
-    # the warning, because that is the operator's decision to make.
-    pre_existing? = File.dir?(root)
-    File.mkdir_p!(root)
-    unless pre_existing?, do: File.chmod!(root, 0o700)
-
+    # Deliberately NOT `File.mkdir_p!/1`. See the moduledoc: creating the root is how an
+    # unmounted key volume turns into a pristine-looking key store that resurrects every
+    # tenant you have ever crypto-erased.
+    verify_initialised!(root)
     verify_writable!(root)
     warn_on_loose_permissions(root)
 
     {:ok, %{root: root, key_bytes: Keyword.fetch!(opts, :key_bytes)}}
+  end
+
+  defp verify_initialised!(root) do
+    cond do
+      not File.dir?(root) ->
+        raise ArgumentError, uninitialised_message(root, "does not exist, or is not a directory")
+
+      not File.regular?(sentinel_path(root)) ->
+        raise ArgumentError,
+              uninitialised_message(
+                root,
+                "exists but holds no #{@sentinel_file} sentinel, so it is either " <>
+                  "uninitialised or not the volume you think it is"
+              )
+
+      true ->
+        :ok
+    end
+  end
+
+  defp uninitialised_message(root, what) do
+    """
+    #{inspect(__MODULE__)} key root #{root} #{what}.
+
+    #{inspect(__MODULE__)} never creates its own key root. If it did, a key volume that
+    failed to mount would be silently replaced by an empty directory on the underlying
+    filesystem: no tombstones, no key material, and a fresh version 1 minted for every
+    tenant that was ever crypto-erased.
+
+    Initialise the root once, explicitly, as the operator:
+
+        mix ash_vault.local.init #{root}
+
+    or from code:
+
+        #{inspect(__MODULE__)}.init_root!(#{inspect(root)})
+
+    If the directory already existed and you are seeing this, do NOT run the task
+    blindly — check that the volume holding the key material is actually mounted first.
+    """
   end
 
   defp verify_writable!(root) do
@@ -342,9 +465,7 @@ defmodule AshVault.KeyProviders.Local do
   # -- operations ------------------------------------------------------------
 
   defp do_current_key(state, scope) do
-    if destroyed?(state, scope) do
-      {:error, :destroyed}
-    else
+    with :absent <- tombstone_state(state, scope) do
       case read_meta(state, scope) do
         :missing -> mint(state, scope, 1)
         {:ok, meta} -> load_current(state, scope, meta)
@@ -358,7 +479,9 @@ defmodule AshVault.KeyProviders.Local do
 
     case File.read(key_path(state, scope, version)) do
       {:ok, key} ->
-        {:ok, %{version: version, key: key, created_at: Map.fetch!(meta.versions, version)}}
+        with :ok <- validate_key_size(state, key, scope, version) do
+          {:ok, %{version: version, key: key, created_at: Map.fetch!(meta.versions, version)}}
+        end
 
       # The meta names a version whose key file is gone. That is data loss, not
       # erasure — it must never be reported as `:destroyed`.
@@ -370,22 +493,54 @@ defmodule AshVault.KeyProviders.Local do
     end
   end
 
+  # A key file of the wrong length is a corrupt or truncated key store, not a key. Handed
+  # to the cipher it becomes `{:error, {:invalid_key_size, n}}`, which the vault would
+  # report as `AshVault.Errors.AuthenticationFailed` — "your data was tampered with" for
+  # what is in fact a broken key file.
+  defp validate_key_size(%{key_bytes: expected}, key, _scope, _version)
+       when byte_size(key) == expected,
+       do: :ok
+
+  defp validate_key_size(%{key_bytes: expected}, key, scope, version) do
+    {:error,
+     unavailable(
+       {:invalid_key_size,
+        %{
+          scope_dir: scope_dir(scope),
+          version: version,
+          expected: expected,
+          actual: byte_size(key)
+        }}
+     )}
+  end
+
   defp do_get_key(state, scope, version) do
-    if destroyed?(state, scope) do
-      {:error, :destroyed}
-    else
-      case File.read(key_path(state, scope, version)) do
-        {:ok, key} -> {:ok, key}
-        {:error, reason} when reason in [:enoent, :enotdir] -> {:error, :not_found}
-        {:error, reason} -> {:error, unavailable({:key_read_failed, reason})}
+    with :absent <- tombstone_state(state, scope) do
+      # `version` is public API. Without this guard a caller passing
+      # "../../../etc/ssl/private/server" reads any `.key` file this process can reach.
+      if is_integer(version) and version > 0 do
+        read_key_file(state, scope, version)
+      else
+        {:error, :not_found}
       end
     end
   end
 
+  defp read_key_file(state, scope, version) do
+    case File.read(key_path(state, scope, version)) do
+      {:ok, key} ->
+        with :ok <- validate_key_size(state, key, scope, version), do: {:ok, key}
+
+      {:error, reason} when reason in [:enoent, :enotdir] ->
+        {:error, :not_found}
+
+      {:error, reason} ->
+        {:error, unavailable({:key_read_failed, reason})}
+    end
+  end
+
   defp do_rotate(state, scope) do
-    if destroyed?(state, scope) do
-      {:error, :destroyed}
-    else
+    with :absent <- tombstone_state(state, scope) do
       case read_meta(state, scope) do
         :missing ->
           with {:ok, %{version: version}} <- mint(state, scope, 1), do: {:ok, version}
@@ -400,11 +555,16 @@ defmodule AshVault.KeyProviders.Local do
     end
   end
 
+  # Tombstone FIRST. See the moduledoc: shredding first leaves a window in which a
+  # scope has no key material and no tombstone, and the next `current_key/1` mints a
+  # fresh v1 that makes every existing row look tampered with.
   defp do_destroy(state, scope) do
     dir = scope_path(state, scope)
 
-    with :ok <- shred_directory(dir) do
-      write_tombstone(state, scope)
+    with :ok <- write_tombstone(state, scope),
+         :ok <- shred_directory(dir) do
+      mark_shredded(state, scope)
+      :ok
     end
   end
 
@@ -487,20 +647,60 @@ defmodule AshVault.KeyProviders.Local do
 
   # -- tombstones ------------------------------------------------------------
 
-  defp destroyed?(state, scope), do: File.exists?(tombstone_path(state, scope))
+  # Fails CLOSED. `File.exists?/1` answers `false` for *any* stat failure, not just
+  # absence — a parent directory at mode 000 (`:eacces`), a failing disk (`:eio`), a
+  # stale NFS handle (`:estale`), a symlink loop (`:eloop`). During any such window
+  # `File.exists?/1` would report a destroyed scope as intact and the provider would
+  # mint it a fresh key. Only a positive `:enoent` is absence.
+  @spec tombstone_state(map(), binary()) ::
+          :absent | {:error, :destroyed} | {:error, Exception.t()}
+  defp tombstone_state(state, scope) do
+    path = tombstone_path(state, scope)
+
+    case File.stat(path) do
+      # Presence alone decides. The contents are never parsed: a truncated or
+      # unreadable tombstone must still mean destroyed.
+      {:ok, _stat} -> {:error, :destroyed}
+      {:error, :enoent} -> :absent
+      {:error, reason} -> {:error, unavailable({:tombstone_unreadable, path, reason})}
+    end
+  end
 
   defp write_tombstone(state, scope) do
     path = tombstone_path(state, scope)
 
-    if File.exists?(path) do
+    case File.stat(path) do
       # Already destroyed. Keep the original `destroyed_at`; destroy/1 is idempotent.
-      :ok
-    else
-      atomic_write(
-        path,
-        Jason.encode!(%{"destroyed_at" => DateTime.to_iso8601(DateTime.utc_now())})
-      )
+      {:ok, _stat} ->
+        :ok
+
+      {:error, :enoent} ->
+        atomic_write(
+          path,
+          Jason.encode!(%{"destroyed_at" => DateTime.to_iso8601(DateTime.utc_now())})
+        )
+
+      {:error, reason} ->
+        {:error, unavailable({:tombstone_unreadable, path, reason})}
     end
+  end
+
+  # Best effort, and deliberately so: the tombstone already exists and already means
+  # destroyed. This only records that the shred finished, so an operator can tell an
+  # interrupted destroy from a completed one.
+  defp mark_shredded(state, scope) do
+    path = tombstone_path(state, scope)
+
+    with {:ok, body} <- File.read(path),
+         {:ok, %{} = decoded} <- Jason.decode(body) do
+      _ =
+        atomic_write(
+          path,
+          Jason.encode!(Map.put(decoded, "shredded_at", DateTime.to_iso8601(DateTime.utc_now())))
+        )
+    end
+
+    :ok
   end
 
   # -- shredding -------------------------------------------------------------
@@ -619,6 +819,8 @@ defmodule AshVault.KeyProviders.Local do
 
   defp tombstone_path(state, scope),
     do: Path.join(state.root, scope_dir(scope) <> ".tombstone")
+
+  defp sentinel_path(root), do: Path.join(root, @sentinel_file)
 
   defp key_path(state, scope, version),
     do: Path.join(scope_path(state, scope), "v#{version}.key")

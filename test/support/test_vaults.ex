@@ -160,3 +160,124 @@ defmodule AshVault.Test.Support.RotatingVault do
     key_provider: AshVault.KeyProviders.Memory,
     rotation_policy: AshVault.Test.Support.RotateOnWritePolicy
 end
+
+defmodule AshVault.Test.Support.ShortKeyProvider do
+  @moduledoc """
+  A provider that *claims* 32-byte keys but serves 16-byte ones.
+
+  This is what a truncated `v1.key` on disk, or a provider whose runtime configuration
+  drifted from its compile-time answer, looks like from the cipher's side. The
+  compile-time check in `AshVault.Vault.verify_key_sizes!/2` cannot catch it, which is
+  exactly why the runtime branches have to.
+  """
+
+  @behaviour AshVault.KeyProvider
+
+  @key <<7::128>>
+
+  @doc false
+  @impl AshVault.KeyProvider
+  def key_bytes, do: 32
+
+  @doc false
+  @impl AshVault.KeyProvider
+  def current_key(_scope),
+    do: {:ok, %{version: 1, key: @key, created_at: ~U[2000-01-01 00:00:00Z]}}
+
+  @doc false
+  @impl AshVault.KeyProvider
+  def get_key(_scope, _version), do: {:ok, @key}
+
+  @doc false
+  @impl AshVault.KeyProvider
+  def rotate(_scope), do: {:ok, 1}
+
+  @doc false
+  @impl AshVault.KeyProvider
+  def destroy(_scope), do: :ok
+end
+
+defmodule AshVault.Test.Support.ShortKeyVault do
+  @moduledoc "Vault whose provider serves keys of the wrong size."
+
+  use AshVault.Vault, key_provider: AshVault.Test.Support.ShortKeyProvider
+end
+
+defmodule AshVault.Test.Support.DestroyedRotateProvider do
+  @moduledoc """
+  A fixed-key provider whose `rotate/1` reports `{:error, :destroyed}`.
+
+  Models a write racing a `destroy!`: `rotate_best_effort` used to swallow this, log a
+  warning, and encrypt under the pre-destroy key — a "successful" write storing
+  ciphertext nobody can ever read.
+  """
+
+  @behaviour AshVault.KeyProvider
+
+  @key <<9::256>>
+
+  @doc false
+  @impl AshVault.KeyProvider
+  def current_key(_scope),
+    do: {:ok, %{version: 1, key: @key, created_at: ~U[2000-01-01 00:00:00Z]}}
+
+  @doc false
+  @impl AshVault.KeyProvider
+  def get_key(_scope, 1), do: {:ok, @key}
+  def get_key(_scope, _version), do: {:error, :not_found}
+
+  @doc false
+  @impl AshVault.KeyProvider
+  def rotate(_scope), do: {:error, :destroyed}
+
+  @doc false
+  @impl AshVault.KeyProvider
+  def destroy(_scope), do: :ok
+end
+
+defmodule AshVault.Test.Support.DestroyedRotateVault do
+  @moduledoc "Rotate-on-write vault whose provider reports the scope as destroyed."
+
+  use AshVault.Vault,
+    key_provider: AshVault.Test.Support.DestroyedRotateProvider,
+    rotation_policy: AshVault.Test.Support.RotateOnWritePolicy
+end
+
+defmodule AshVault.Test.Support.NonBinaryScope do
+  @moduledoc "A scope implementation that returns a term rather than a binary."
+
+  @behaviour AshVault.Scope
+
+  @doc false
+  @impl AshVault.Scope
+  def resolve!(_context), do: {:tenant, "acme"}
+end
+
+defmodule AshVault.Test.Support.NonBinaryScopeVault do
+  @moduledoc "Vault with a custom scope that violates the binary-scope invariant."
+
+  use AshVault.Vault,
+    key_provider: AshVault.KeyProviders.Memory,
+    scope: AshVault.Test.Support.NonBinaryScope
+end
+
+defmodule AshVault.Test.Support.FixedKeyVault do
+  @moduledoc """
+  A vault whose provider hands out the SAME key for every scope, with manual rotation.
+
+  This is what makes a cross-scope decrypt test prove what it claims: with per-scope
+  keys, the failure could come from the key differing rather than from the AAD binding
+  the scope. Here only the AAD differs.
+  """
+
+  use AshVault.Vault, key_provider: AshVault.Test.Support.FailingRotateProvider
+end
+
+defmodule AshVault.Test.Support.LocalVaultForTests do
+  @moduledoc """
+  A vault over the filesystem provider, for end-to-end tests that need key material to
+  survive a provider restart. Talks to the default-named `AshVault.KeyProviders.Local`.
+  """
+
+  use AshVault.Vault, key_provider: AshVault.KeyProviders.Local
+end

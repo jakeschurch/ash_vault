@@ -31,10 +31,32 @@ defmodule AshVault.Test.Db do
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS legacy_users (
+      id uuid PRIMARY KEY,
+      org_id uuid NOT NULL,
+      legacy_email text,
+      encrypted_email bytea
+    )
+    """,
+    """
+    ALTER TABLE legacy_users
+      ADD COLUMN IF NOT EXISTS legacy_ssn text,
+      ADD COLUMN IF NOT EXISTS encrypted_ssn bytea
+    """,
+    """
     CREATE TABLE IF NOT EXISTS contacts (
       id uuid PRIMARY KEY,
       org_id uuid NOT NULL,
       encrypted_phone bytea
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS acceptance_users (
+      id uuid PRIMARY KEY,
+      org_id uuid NOT NULL,
+      label text,
+      encrypted_email bytea,
+      encrypted_ssn bytea
     )
     """
   ]
@@ -78,7 +100,10 @@ defmodule AshVault.Test.Db do
   """
   @spec reset!() :: :ok
   def reset! do
-    AshVault.Test.Repo.query!("TRUNCATE users, contacts, organizations")
+    AshVault.Test.Repo.query!(
+      "TRUNCATE users, contacts, legacy_users, organizations, acceptance_users"
+    )
+
     :ok
   end
 end

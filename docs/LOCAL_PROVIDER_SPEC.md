@@ -60,11 +60,25 @@ missing key file makes a tenant's data unreadable — an accidental crypto-erasu
    filesystem), then fsync the containing directory.
 2. Write `meta.json` the same way. Key file lands **before** the meta entry that references
    it — so a crash leaves an orphan key file (harmless) rather than a dangling reference.
-3. `destroy/1` order: (a) overwrite every `v*.key` with random bytes of the same length and
-   fsync, (b) delete them, (c) delete `meta.json`, (d) remove the scope directory,
-   (e) write the tombstone and fsync it and the root directory. Return `:ok` only if the
-   tombstone write succeeded. If (e) fails, return `{:error, reason}` — a destroy that did
-   not record its tombstone must not be reported as success.
+3. `destroy/1` order — **CORRECTED, this supersedes the original ordering in this spec**:
+   **(a) write the tombstone FIRST** and fsync it, then (b) overwrite every `v*.key` with
+   random bytes of the same length and fsync, (c) delete them, (d) delete `meta.json`,
+   (e) remove the scope directory.
+
+   The original spec said shred-then-tombstone. That is wrong and dangerous. If the tombstone
+   write fails after the keys are already shredded (ENOSPC, EACCES, a read-only remount), the
+   scope has no key material AND no tombstone — so the next `current_key/1` sees a missing
+   scope and **mints a fresh v1**. The tenant looks brand new, starts writing under a new key,
+   and every pre-existing ciphertext is permanently unreadable, with nothing on disk recording
+   that a destroy was ever attempted. Silent, total, undetectable data loss.
+
+   Tombstone-first fails safe: the worst case is a scope marked destroyed whose key files
+   linger, and the provider refuses to serve them anyway. Optionally rewrite the tombstone with
+   a `shredded_at` once the shred completes, so an interrupted destroy is visible to an operator.
+
+   Required test: shred a scope, make the root unwritable (`File.chmod!(root, 0o500)`), assert
+   `{:error, _}` from `destroy/1`, then assert the NEXT `current_key/1` does **not** return
+   `{:ok, %{version: 1}}`.
 
 Overwriting before unlinking is best-effort: on CoW and log-structured filesystems (btrfs,
 ZFS, SSD FTLs) it does not guarantee the old bytes are gone. Say so in the @moduledoc —

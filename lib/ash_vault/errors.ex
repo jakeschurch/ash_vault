@@ -16,6 +16,9 @@ defmodule AshVault.Errors do
     * `AshVault.Errors.UnsupportedEnvelope` — envelope version this build cannot parse
     * `AshVault.Errors.UnsupportedCipher` — cipher id not in the registry
     * `AshVault.Errors.InvalidCiphertext` — malformed, truncated or foreign bytes
+    * `AshVault.Errors.KeySizeMismatch` — the provider's keys are the wrong size for
+      the cipher; a configuration fault, **not** retryable and not tampering
+    * `AshVault.Errors.InvalidScope` — an `AshVault.Scope` returned a non-binary key
 
   A destroyed key must never surface as `AshVault.Errors.AuthenticationFailed`:
   destruction is checked before any decryption is attempted.
@@ -30,14 +33,94 @@ defmodule AshVault.Errors.MissingScope do
   that uses tenant-scoped encryption.
   """
 
-  use Splode.Error, fields: [:resource, :field, :scope_module, :reason], class: :invalid
+  use Splode.Error,
+    fields: [:resource, :field, :scope_module, :reason, :tenant, :operation],
+    class: :invalid
 
-  def message(%{resource: resource, field: field}) do
+  def message(%{reason: :unsupported_tenant_shape} = error) do
     """
-    Cannot encrypt #{inspect(resource)}.#{field} because no Ash tenant was present.
+    Cannot #{verb(error)} #{inspect(error.resource)}.#{error.field} because the tenant is \
+    of a shape #{inspect(error.scope_module)} cannot turn into a stable scope key.
+
+    Received: #{error.tenant || "(not recorded)"}
+
+    A tenant was present — this is not a missing-tenant error. Accepted shapes are:
+
+      * a binary, used as-is
+      * an atom or an integer, stringified
+      * a struct with a non-nil `:id`, reduced to the stringified id
+
+    To support another shape, implement `to_scope_key/2` in your own
+    `AshVault.Scope` module (see `#{inspect(error.scope_module)}.to_scope_key/2`) and
+    configure it as the vault's `:scope`.
+    """
+  end
+
+  def message(%{reason: reason} = error) when reason not in [nil, :no_tenant] do
+    """
+    Cannot #{verb(error)} #{inspect(error.resource)}.#{error.field}: \
+    #{inspect(error.scope_module)} could not resolve a scope (#{inspect(reason)}).
+    """
+  end
+
+  def message(%{resource: resource, field: field} = error) do
+    """
+    Cannot #{verb(error)} #{inspect(resource)}.#{field} because no Ash tenant was present.
 
     This resource uses tenant-scoped encryption.
     Pass a tenant when executing the Ash action or configure another AshVault scope.
+    """
+  end
+
+  defp verb(%{operation: :decrypt}), do: "decrypt"
+  defp verb(_error), do: "encrypt"
+end
+
+defmodule AshVault.Errors.KeySizeMismatch do
+  @moduledoc """
+  Raised when the key material a provider supplies is not the size the cipher requires.
+
+  This is a **configuration** fault — a `key_bytes:` that disagrees with the cipher, an
+  OpenBao `key_type:` of `aes128-gcm96` under a 256-bit cipher, a truncated key file.
+  It is deliberately neither `AshVault.Errors.AuthenticationFailed` (which would tell
+  an operator their data had been tampered with) nor
+  `AshVault.Errors.ProviderUnavailable` (which would tell them to retry a permanent
+  misconfiguration forever). Fix the configuration; retrying cannot help.
+  """
+
+  use Splode.Error, fields: [:provider, :cipher, :expected, :actual], class: :invalid
+
+  def message(%{provider: provider, cipher: cipher, expected: expected, actual: actual}) do
+    """
+    Key size mismatch: #{inspect(cipher)} requires #{inspect(expected)}-byte keys, but \
+    #{inspect(provider)} supplied #{inspect(actual)} bytes.
+
+    This is a configuration fault, not tampering and not an outage. Retrying will not
+    help. Check the provider's `:key_bytes` (or OpenBao's `:key_type`) against the
+    vault's `:cipher`.
+    """
+  end
+end
+
+defmodule AshVault.Errors.InvalidScope do
+  @moduledoc """
+  Raised when an `AshVault.Scope` implementation returns something other than a binary.
+
+  Scope keys address key material in the provider and are baked into the AAD of every
+  ciphertext, so they must be stable across processes, releases and OTP upgrades. A
+  non-binary term is not: `:erlang.term_to_binary/1` is explicitly not stable, and an
+  encoding change would relocate a tenant's tombstone and key name at once.
+  """
+
+  use Splode.Error, fields: [:scope_module, :scope, :resource, :field], class: :invalid
+
+  def message(%{scope_module: scope_module, scope: scope}) do
+    """
+    #{inspect(scope_module)}.resolve!/1 returned #{scope}, which is not a binary.
+
+    AshVault scope keys must be binaries: they name key material in the provider and are
+    bound into every ciphertext's associated data, so they have to be stable across
+    processes, releases and OTP upgrades.
     """
   end
 end

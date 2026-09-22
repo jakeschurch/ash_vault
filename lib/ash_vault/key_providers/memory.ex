@@ -46,6 +46,19 @@ defmodule AshVault.KeyProviders.Memory do
   `destroy/1` wipes the scope's key material and records a permanent tombstone. Both
   `current_key/1` and `get_key/2` return `{:error, :destroyed}` afterwards, for the life
   of the process. Destroying twice is idempotent.
+
+  ## Scopes
+
+  Scopes must be binaries, matching `AshVault.KeyProviders.Local` and
+  `AshVault.KeyProviders.OpenBao`. A non-binary scope raises `ArgumentError`: a provider
+  that silently accepted arbitrary terms would let a custom `AshVault.Scope` pass tests
+  here and then behave differently — or unsafely — in production.
+
+  ## Key material never reaches a crash report
+
+  `format_status/1` redacts the key table. Without it, any crash in this `GenServer`
+  emits a SASL report containing every scope's raw key bytes, straight into the log
+  aggregator and any APM handler attached to it.
   """
 
   @behaviour AshVault.KeyProvider
@@ -82,7 +95,7 @@ defmodule AshVault.KeyProviders.Memory do
   @impl AshVault.KeyProvider
   @spec current_key(AshVault.KeyProvider.scope()) ::
           {:ok, AshVault.KeyProvider.key_info()} | {:error, term()}
-  def current_key(scope), do: call(__MODULE__, {:current_key, scope})
+  def current_key(scope), do: call(__MODULE__, {:current_key, validate_scope!(scope)})
 
   @doc """
   Fetch a specific key version for a scope.
@@ -90,7 +103,7 @@ defmodule AshVault.KeyProviders.Memory do
   @impl AshVault.KeyProvider
   @spec get_key(AshVault.KeyProvider.scope(), AshVault.KeyProvider.version()) ::
           {:ok, binary()} | {:error, :not_found} | {:error, :destroyed} | {:error, term()}
-  def get_key(scope, version), do: call(__MODULE__, {:get_key, scope, version})
+  def get_key(scope, version), do: call(__MODULE__, {:get_key, validate_scope!(scope), version})
 
   @doc """
   Mint the next key version for a scope, keeping previous versions fetchable.
@@ -98,46 +111,58 @@ defmodule AshVault.KeyProviders.Memory do
   @impl AshVault.KeyProvider
   @spec rotate(AshVault.KeyProvider.scope()) ::
           {:ok, AshVault.KeyProvider.version()} | {:error, term()}
-  def rotate(scope), do: call(__MODULE__, {:rotate, scope})
+  def rotate(scope), do: call(__MODULE__, {:rotate, validate_scope!(scope)})
 
   @doc """
   Irreversibly destroy every key for a scope and tombstone it.
   """
   @impl AshVault.KeyProvider
   @spec destroy(AshVault.KeyProvider.scope()) :: :ok | {:error, term()}
-  def destroy(scope), do: call(__MODULE__, {:destroy, scope})
+  def destroy(scope), do: call(__MODULE__, {:destroy, validate_scope!(scope)})
 
   @doc """
   Same as `current_key/1`, against an explicitly named instance.
   """
   @spec current_key(GenServer.server(), AshVault.KeyProvider.scope()) ::
           {:ok, AshVault.KeyProvider.key_info()} | {:error, term()}
-  def current_key(server, scope), do: call(server, {:current_key, scope})
+  def current_key(server, scope), do: call(server, {:current_key, validate_scope!(scope)})
 
   @doc """
   Same as `get_key/2`, against an explicitly named instance.
   """
   @spec get_key(GenServer.server(), AshVault.KeyProvider.scope(), AshVault.KeyProvider.version()) ::
           {:ok, binary()} | {:error, :not_found} | {:error, :destroyed} | {:error, term()}
-  def get_key(server, scope, version), do: call(server, {:get_key, scope, version})
+  def get_key(server, scope, version),
+    do: call(server, {:get_key, validate_scope!(scope), version})
 
   @doc """
   Same as `rotate/1`, against an explicitly named instance.
   """
   @spec rotate(GenServer.server(), AshVault.KeyProvider.scope()) ::
           {:ok, AshVault.KeyProvider.version()} | {:error, term()}
-  def rotate(server, scope), do: call(server, {:rotate, scope})
+  def rotate(server, scope), do: call(server, {:rotate, validate_scope!(scope)})
 
   @doc """
   Same as `destroy/1`, against an explicitly named instance.
   """
   @spec destroy(GenServer.server(), AshVault.KeyProvider.scope()) :: :ok | {:error, term()}
-  def destroy(server, scope), do: call(server, {:destroy, scope})
+  def destroy(server, scope), do: call(server, {:destroy, validate_scope!(scope)})
 
   defp call(server, message) do
     GenServer.call(server, message)
   catch
     :exit, reason -> {:error, {:provider_unavailable, reason}}
+  end
+
+  defp validate_scope!(scope) when is_binary(scope), do: scope
+
+  defp validate_scope!(scope) do
+    raise ArgumentError, """
+    #{inspect(__MODULE__)} scopes must be binaries, got: #{inspect(scope)}.
+
+    Scopes reach a key provider already normalised to a binary by the vault's
+    `AshVault.Scope` implementation.
+    """
   end
 
   @impl GenServer
@@ -172,6 +197,9 @@ defmodule AshVault.KeyProviders.Memory do
       destroyed?(state, scope) ->
         {:reply, {:error, :destroyed}, state}
 
+      not (is_integer(version) and version > 0) ->
+        {:reply, {:error, :not_found}, state}
+
       true ->
         case get_in(state.keys, [scope, version]) do
           %{key: key} -> {:reply, {:ok, key}, state}
@@ -199,6 +227,16 @@ defmodule AshVault.KeyProviders.Memory do
     }
 
     {:reply, :ok, state}
+  end
+
+  # Without this, a crash in this process emits a SASL report carrying every scope's
+  # raw key bytes into the logs and into any APM handler attached to them.
+  @impl GenServer
+  def format_status(status) do
+    Map.update(status, :state, nil, fn
+      %{} = state -> %{state | keys: :redacted}
+      other -> other
+    end)
   end
 
   defp destroyed?(state, scope), do: MapSet.member?(state.destroyed, scope)

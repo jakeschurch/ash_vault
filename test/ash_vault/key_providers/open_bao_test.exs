@@ -55,6 +55,16 @@ defmodule AshVault.KeyProviders.OpenBaoTest do
   use AshVault.Test.Support.KeyProviderCases, setup: &__MODULE__.configure_provider/1
 
   setup_all do
+    # The tombstone READ path no longer mounts the KV engine on demand (finding 2), so
+    # the mount is now explicit operator setup — here, and in production.
+    Application.put_env(:ash_vault, OpenBao,
+      address: @address,
+      token: @token,
+      kv_mount: @kv_mount
+    )
+
+    :ok = OpenBao.setup()
+
     on_exit(&clean_up/0)
     :ok
   end
@@ -126,6 +136,109 @@ defmodule AshVault.KeyProviders.OpenBaoTest do
 
       assert {:error, :destroyed} = OpenBao.current_key(scope)
       assert {:error, :destroyed} = OpenBao.get_key(scope, 1)
+    end
+  end
+
+  describe "a missing KV mount (finding 2)" do
+    # The provider used to see 404 "no handler for route", CREATE the KV engine, retry,
+    # get the genuine-absence shape from the empty store, and answer :absent. Every
+    # destroyed tenant resurrected, with no attacker and no race.
+    test "is ProviderUnavailable on every read path, and the mount is not created",
+         %{scope: scope} do
+      scope = scope.()
+      missing = "ashvault_missing_#{System.unique_integer([:positive])}"
+      put_config(token: @token, kv_mount: missing)
+
+      on_exit(fn -> raw(:delete, "/v1/sys/mounts/#{missing}") end)
+
+      for result <- [
+            OpenBao.current_key(scope),
+            OpenBao.get_key(scope, 1),
+            OpenBao.rotate(scope),
+            OpenBao.destroy(scope)
+          ] do
+        assert {:error, %ProviderUnavailable{reason: :kv_mount_unavailable}} = result
+      end
+
+      # The actual regression: nothing provisioned the tombstone store behind our back.
+      assert %{status: status} = raw(:get, "/v1/sys/mounts/#{missing}")
+      assert status in [400, 404], "the read path created the KV mount (status #{status})"
+    end
+
+    test "setup/0 mounts the KV engine and is idempotent" do
+      mount = "ashvault_setup_#{System.unique_integer([:positive])}"
+      put_config(token: @token, kv_mount: mount)
+      on_exit(fn -> raw(:delete, "/v1/sys/mounts/#{mount}") end)
+
+      assert :ok = OpenBao.setup()
+      assert :ok = OpenBao.setup()
+      assert %{status: 200} = raw(:get, "/v1/sys/mounts/#{mount}")
+    end
+  end
+
+  describe "destroy confirms the key is gone (finding 5)" do
+    # `destroy/1` used to report :ok from a 400 on the deletion_allowed CONFIG call —
+    # issued BEFORE any delete — whenever the message matched the bare substring
+    # "not found", which also appears in policy denials. The key stayed present and
+    # exportable while the tombstone was written and the operator closed the ticket.
+    test "the transit key really is absent afterwards", %{scope: scope} do
+      scope = scope.()
+      name = OpenBao.key_name(scope)
+
+      assert {:ok, %{version: 1}} = OpenBao.current_key(scope)
+      assert :ok = OpenBao.destroy(scope)
+
+      assert %{status: 404} = raw(:get, "/v1/#{@transit_mount}/keys/#{name}")
+      assert %{status: 404} = raw(:get, "/v1/#{@transit_mount}/export/encryption-key/#{name}/1")
+    end
+
+    test "a transit key that cannot be deleted is an error, not a silent :ok",
+         %{scope: scope} do
+      scope = scope.()
+      name = OpenBao.key_name(scope)
+
+      assert {:ok, %{version: 1}} = OpenBao.current_key(scope)
+
+      # Point the provider at a transit mount that does not exist: the delete cannot
+      # possibly have happened, so destroy must refuse rather than tombstone-and-lie.
+      put_config(
+        token: @token,
+        transit_mount: "transit_absent_#{System.unique_integer([:positive])}"
+      )
+
+      assert {:error, %ProviderUnavailable{}} = OpenBao.destroy(scope)
+
+      put_config(token: @token)
+
+      # No tombstone was written, and the key is untouched.
+      assert %{status: 200} = raw(:get, "/v1/#{@transit_mount}/keys/#{name}")
+      assert {:ok, %{version: 1}} = OpenBao.current_key(scope)
+    end
+
+    test "destroying a scope that never had a key still tombstones", %{scope: scope} do
+      scope = scope.()
+
+      assert :ok = OpenBao.destroy(scope)
+      assert {:error, :destroyed} = OpenBao.current_key(scope)
+    end
+  end
+
+  describe "created_at (finding 11)" do
+    # A key whose created_at is always DateTime.utc_now() is never older than a
+    # max_age, so age-based rotation silently never fires and nothing logs.
+    test "comes from the server, is stable, and never moves backwards", %{scope: scope} do
+      scope = scope.()
+
+      assert {:ok, %{created_at: first}} = OpenBao.current_key(scope)
+      Process.sleep(10)
+      assert {:ok, %{created_at: second}} = OpenBao.current_key(scope)
+
+      assert DateTime.compare(first, second) == :eq
+      assert DateTime.compare(first, DateTime.utc_now()) == :lt
+
+      assert {:ok, 2} = OpenBao.rotate(scope)
+      assert {:ok, %{version: 2, created_at: rotated}} = OpenBao.current_key(scope)
+      assert DateTime.compare(rotated, first) != :lt
     end
   end
 
@@ -220,6 +333,40 @@ defmodule AshVault.KeyProviders.OpenBaoTest do
       assert {:error, %ProviderUnavailable{reason: {:transport, _}}} = OpenBao.current_key(scope)
       assert {:error, %ProviderUnavailable{reason: {:transport, _}}} = OpenBao.get_key(scope, 1)
       assert {:error, %ProviderUnavailable{reason: {:transport, _}}} = OpenBao.destroy(scope)
+    end
+  end
+
+  describe "transport failures never escape as non-AshVault exceptions (finding 14)" do
+    test "a Req step that raises becomes ProviderUnavailable", %{scope: scope} do
+      scope = scope.()
+      put_config(token: @token, address: "ftp://127.0.0.1:8200", max_retries: 0)
+
+      for result <- [
+            OpenBao.current_key(scope),
+            OpenBao.get_key(scope, 1),
+            OpenBao.rotate(scope),
+            OpenBao.destroy(scope)
+          ] do
+        assert {:error, %ProviderUnavailable{reason: {:transport, _}}} = result
+      end
+    end
+
+    test "a Req call that exits becomes ProviderUnavailable", %{scope: scope} do
+      scope = scope.()
+      put_config(token: @token, address: "http://127.0.0.1:99999", max_retries: 0)
+
+      assert {:error, %ProviderUnavailable{reason: {:transport, _}}} = OpenBao.current_key(scope)
+    end
+
+    test "the token never reaches the error raised from a failing transport",
+         %{scope: scope} do
+      scope = scope.()
+      sentinel = "sentinel-transport-token-do-not-log"
+      put_config(token: sentinel, address: "ftp://127.0.0.1:8200", max_retries: 0)
+
+      assert {:error, %ProviderUnavailable{} = error} = OpenBao.current_key(scope)
+      refute inspect(error, structs: false, limit: :infinity) =~ sentinel
+      refute Exception.message(error) =~ sentinel
     end
   end
 

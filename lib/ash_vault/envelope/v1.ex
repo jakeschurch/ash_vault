@@ -40,6 +40,14 @@ defmodule AshVault.Envelope.V1 do
   Encode an envelope map to its wire representation.
 
   The `:cipher` key may be given as an atom or a binary; it is always stored as a binary.
+
+  Every field that does not fit the wire format raises `ArgumentError` naming the field
+  and the limit. The header encodes the cipher id, nonce and tag lengths in one byte
+  each and the key version in 32 bits, so the ceilings are 255 bytes and 4294967295
+  respectively. These used to be guard clauses, which meant an over-long nonce, an
+  over-long tag or a key version past 2^32-1 raised an opaque `FunctionClauseError`
+  while an over-long cipher id got a clean message — the same class of mistake
+  reported two different ways.
   """
   @impl AshVault.Envelope
   @spec encode(map()) :: binary()
@@ -49,19 +57,54 @@ defmodule AshVault.Envelope.V1 do
         nonce: nonce,
         tag: tag,
         ciphertext: ciphertext
-      })
-      when is_integer(key_version) and key_version >= 0 and key_version <= 0xFFFFFFFF and
-             is_binary(nonce) and byte_size(nonce) <= 255 and
-             is_binary(tag) and byte_size(tag) <= 255 and is_binary(ciphertext) do
+      }) do
     cipher_id = to_cipher_id(cipher)
 
-    if byte_size(cipher_id) > 255 do
-      raise ArgumentError, "cipher id is too long: #{inspect(cipher_id)}"
-    end
+    validate_length!(:cipher_id, cipher_id)
+    validate_length!(:nonce, nonce)
+    validate_length!(:tag, tag)
+    validate_key_version!(key_version)
+    validate_binary!(:ciphertext, ciphertext)
 
     <<@magic, @version::8, byte_size(cipher_id)::8, cipher_id::binary,
       key_version::32-unsigned-big, byte_size(nonce)::8, nonce::binary, byte_size(tag)::8,
       tag::binary, ciphertext::binary>>
+  end
+
+  def encode(other) do
+    raise ArgumentError,
+          "not an encodable AshVault envelope: expected a map with :cipher, :key_version, " <>
+            ":nonce, :tag and :ciphertext, got: #{inspect(other)}"
+  end
+
+  defp validate_length!(_field, value) when is_binary(value) and byte_size(value) <= 255, do: :ok
+
+  defp validate_length!(field, value) when is_binary(value) do
+    raise ArgumentError,
+          "#{field} is too long: the v1 envelope stores its length in one byte, so it must " <>
+            "be at most 255 bytes, got #{byte_size(value)}"
+  end
+
+  defp validate_length!(field, value), do: validate_binary!(field, value)
+
+  defp validate_binary!(_field, value) when is_binary(value), do: :ok
+
+  defp validate_binary!(field, value) do
+    raise ArgumentError, "#{field} must be a binary, got: #{inspect(value)}"
+  end
+
+  defp validate_key_version!(version)
+       when is_integer(version) and version >= 0 and version <= 0xFFFFFFFF,
+       do: :ok
+
+  defp validate_key_version!(version) when is_integer(version) do
+    raise ArgumentError,
+          "key_version is out of range: the v1 envelope stores it as a 32-bit unsigned " <>
+            "integer, so it must be between 0 and 4294967295, got #{version}"
+  end
+
+  defp validate_key_version!(version) do
+    raise ArgumentError, "key_version must be an integer, got: #{inspect(version)}"
   end
 
   @doc """
@@ -104,4 +147,8 @@ defmodule AshVault.Envelope.V1 do
     do: Atom.to_string(cipher)
 
   defp to_cipher_id(cipher) when is_binary(cipher), do: cipher
+
+  defp to_cipher_id(cipher) do
+    raise ArgumentError, "cipher must be an atom or a binary, got: #{inspect(cipher)}"
+  end
 end

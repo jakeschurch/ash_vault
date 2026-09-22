@@ -18,7 +18,10 @@ defmodule AshVault.Vault.Runtime do
   alias AshVault.Envelope
   alias AshVault.Errors.AuthenticationFailed
   alias AshVault.Errors.KeyDestroyed
+  alias AshVault.Errors.InvalidScope
   alias AshVault.Errors.KeyNotFound
+  alias AshVault.Errors.KeySizeMismatch
+  alias AshVault.Errors.MissingScope
   alias AshVault.Errors.ProviderUnavailable
   alias AshVault.RotationPolicy
 
@@ -39,7 +42,7 @@ defmodule AshVault.Vault.Runtime do
   """
   @spec encrypt!(binary(), Context.t(), opts()) :: binary()
   def encrypt!(plaintext, %Context{} = ctx, opts) when is_binary(plaintext) do
-    scope = opts.scope.resolve!(ctx)
+    scope = resolve_scope!(ctx, opts, :encrypt)
     key_info = current_key!(opts.key_provider, scope, ctx)
     key_info = maybe_rotate(key_info, scope, ctx, opts)
 
@@ -56,8 +59,48 @@ defmodule AshVault.Vault.Runtime do
           ciphertext: payload.ciphertext
         })
 
+      # A key of the wrong size is a configuration fault. Reporting it as
+      # `ProviderUnavailable` named the CIPHER as the "provider" and told the operator
+      # to retry a permanent misconfiguration forever.
+      {:error, {:invalid_key_size, actual}} ->
+        raise key_size_mismatch(opts, actual)
+
       {:error, reason} ->
         raise ProviderUnavailable.exception(provider: opts.cipher, reason: reason)
+    end
+  end
+
+  defp key_size_mismatch(opts, actual, cipher \\ nil) do
+    cipher = cipher || opts.cipher
+
+    KeySizeMismatch.exception(
+      provider: opts.key_provider,
+      cipher: cipher,
+      expected: cipher.key_bytes(),
+      actual: actual
+    )
+  end
+
+  # One place enforces the scope invariant, so a custom `AshVault.Scope` that returns a
+  # non-binary fails here with a clear message rather than differently in each provider.
+  defp resolve_scope!(ctx, opts, operation) do
+    scope =
+      try do
+        opts.scope.resolve!(ctx)
+      rescue
+        error in [MissingScope] ->
+          reraise %{error | operation: operation}, __STACKTRACE__
+      end
+
+    if is_binary(scope) do
+      scope
+    else
+      raise InvalidScope.exception(
+              scope_module: opts.scope,
+              scope: inspect(scope, limit: 5, printable_limit: 128, structs: false),
+              resource: ctx.resource,
+              field: ctx.field
+            )
     end
   end
 
@@ -86,7 +129,7 @@ defmodule AshVault.Vault.Runtime do
         {:error, error} -> raise error
       end
 
-    scope = opts.scope.resolve!(ctx)
+    scope = resolve_scope!(ctx, opts, :decrypt)
     key = get_key!(opts.key_provider, scope, env.key_version, ctx)
     aad = build_aad(scope, ctx)
 
@@ -95,6 +138,10 @@ defmodule AshVault.Vault.Runtime do
     case cipher_mod.decrypt(payload, key, aad) do
       {:ok, plaintext} ->
         plaintext
+
+      # Never AuthenticationFailed: a config typo is not "your data was tampered with".
+      {:error, {:invalid_key_size, actual}} ->
+        raise key_size_mismatch(opts, actual, cipher_mod)
 
       {:error, _reason} ->
         raise AuthenticationFailed.exception(
@@ -229,6 +276,17 @@ defmodule AshVault.Vault.Runtime do
          {:ok, rotated} <- opts.key_provider.current_key(scope) do
       rotated
     else
+      # A write racing a `destroy!` must NOT fall back to the pre-destroy key: that
+      # write would "succeed" and store ciphertext nobody can ever read. Rotation
+      # failures are best-effort; erasure is not a rotation failure.
+      {:error, :destroyed} ->
+        raise KeyDestroyed.exception(
+                scope: scope,
+                key_version: key_info.version,
+                resource: ctx.resource,
+                field: ctx.field
+              )
+
       {:error, reason} ->
         Logger.warning(
           "AshVault: key rotation for scope #{inspect(scope)} failed (#{inspect(reason)}); " <>

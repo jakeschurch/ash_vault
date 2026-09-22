@@ -7,6 +7,8 @@ defmodule AshVault.Test.Domain do
     resource(AshVault.Test.Organization)
     resource(AshVault.Test.User)
     resource(AshVault.Test.Contact)
+    resource(AshVault.Test.LegacyUser)
+    resource(AshVault.Test.AcceptanceUser)
     resource(AshVault.Test.EtsUser)
     resource(AshVault.Test.EtsNote)
     resource(AshVault.Test.EtsTicket)

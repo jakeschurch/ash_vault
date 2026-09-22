@@ -41,6 +41,58 @@ defmodule AshVault.Vault do
   @callback __ash_vault__(:key_provider | :cipher | :envelope | :scope | :rotation_policy) ::
               module()
 
+  @doc """
+  Compile-time guard: the key provider's key size must match the cipher's.
+
+  Called from the `use AshVault.Vault` macro. `AshVault.KeyProvider.key_bytes/1` had
+  zero callers, so a `key_bytes: 16` in config, an OpenBao `key_type: "aes128-gcm96"`,
+  or a truncated key file on disk all reached the cipher unchecked — and were then
+  reported as two different lies: `AshVault.Errors.AuthenticationFailed` on decrypt
+  ("your data was tampered with", for a config typo) and a retryable
+  `AshVault.Errors.ProviderUnavailable` naming the *cipher* as the provider on encrypt.
+
+  The check is deliberately conservative. It fires only when it can positively
+  determine a mismatch: both modules must already be compiled and both must export
+  `key_bytes/0`. A provider whose size depends on runtime configuration —
+  `AshVault.KeyProviders.OpenBao` reads `:key_type` from `Application.get_env/3`, which
+  operators set in `runtime.exs` — cannot be settled at compile time, and a provider
+  module may not even be compiled yet when the vault macro expands. Anything
+  unresolvable passes here; `AshVault.Vault.Runtime` raises
+  `AshVault.Errors.KeySizeMismatch` at the point of use, which is what actually carries
+  the guarantee.
+  """
+  @spec verify_key_sizes!(module(), map()) :: :ok
+  def verify_key_sizes!(vault, %{key_provider: provider, cipher: cipher}) do
+    with {:module, _} <- Code.ensure_compiled(provider),
+         {:module, _} <- Code.ensure_compiled(cipher),
+         true <- function_exported?(provider, :key_bytes, 0),
+         true <- function_exported?(cipher, :key_bytes, 0),
+         provider_bytes when is_integer(provider_bytes) <- safe_key_bytes(provider),
+         cipher_bytes when is_integer(cipher_bytes) <- safe_key_bytes(cipher),
+         true <- provider_bytes != cipher_bytes do
+      raise ArgumentError, """
+      #{inspect(vault)} is misconfigured: its key provider and cipher disagree on key size.
+
+        #{inspect(provider)}.key_bytes() == #{provider_bytes}
+        #{inspect(cipher)}.key_bytes()   == #{cipher_bytes}
+
+      Every encryption would fail with AshVault.Errors.KeySizeMismatch. Either configure
+      the provider to mint #{cipher_bytes}-byte keys, or choose a cipher that takes
+      #{provider_bytes}-byte keys.
+      """
+    end
+
+    :ok
+  end
+
+  defp safe_key_bytes(module) do
+    module.key_bytes()
+  rescue
+    _ -> nil
+  catch
+    _, _ -> nil
+  end
+
   @doc false
   defmacro __using__(opts) do
     quote bind_quoted: [opts: opts] do
@@ -65,6 +117,8 @@ defmodule AshVault.Vault do
         scope: opts[:scope] || AshVault.Scopes.AshTenant,
         rotation_policy: opts[:rotation_policy] || AshVault.RotationPolicies.Manual
       }
+
+      AshVault.Vault.verify_key_sizes!(__MODULE__, @ash_vault_opts)
 
       @doc "Encrypt a plaintext for a context, returning an encoded envelope."
       @impl AshVault.Vault

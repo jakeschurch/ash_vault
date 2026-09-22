@@ -13,10 +13,10 @@ defmodule AshVault.KeyProviders.LocalTest do
   @doc false
   def start_local(%{tmp_dir: tmp_dir}) do
     root = Path.join(tmp_dir, "keys")
-    File.mkdir_p!(root)
-    # ExUnit's tmp_dir is created under the umask, so it lands 0755. Tighten it so the
-    # provider's (correct) loose-permissions warning does not fire in every test.
-    File.chmod!(root, 0o700)
+    # The provider refuses to start on a root it did not see an operator initialise.
+    # `init_root!/1` also chmods 0700, which keeps the (correct) loose-permissions
+    # warning from firing in every test.
+    Local.init_root!(root)
 
     name = :"ash_vault_local_#{System.unique_integer([:positive])}"
     start_supervised!({Local, name: name, root: root})
@@ -33,6 +33,31 @@ defmodule AshVault.KeyProviders.LocalTest do
     stop_supervised!(Local)
     start_supervised!({Local, name: name, root: root})
     :ok
+  end
+
+  # `init/1` raising crashes the linked provider process, so the caller sees an exit
+  # rather than the exception. Trap it and hand back the ArgumentError.
+  defp start_error(root) do
+    Process.flag(:trap_exit, true)
+
+    result =
+      case Local.start_link(
+             name: :"ash_vault_local_x_#{System.unique_integer([:positive])}",
+             root: root
+           ) do
+        {:error, {%ArgumentError{} = error, _stacktrace}} -> error
+        {:error, %ArgumentError{} = error} -> error
+        other -> flunk("expected start_link to fail, got: #{inspect(other)}")
+      end
+
+    receive do
+      {:EXIT, _pid, _reason} -> :ok
+    after
+      0 -> :ok
+    end
+
+    Process.flag(:trap_exit, false)
+    result
   end
 
   defp scope_path(root, scope), do: Path.join(root, Local.scope_dir(scope))
@@ -56,6 +81,8 @@ defmodule AshVault.KeyProviders.LocalTest do
         end
       end)
 
+      Local.init_root!(root)
+
       name = :"ash_vault_local_cfg_#{System.unique_integer([:positive])}"
       start_supervised!(%{id: name, start: {Local, :start_link, [[name: name]]}})
 
@@ -63,18 +90,73 @@ defmodule AshVault.KeyProviders.LocalTest do
       assert {:ok, %{version: 1}} = Local.current_key(name, "cfg")
     end
 
-    test "creates the root, mode 0700, if it is missing", %{tmp_dir: tmp_dir} do
+    # Finding 1. `init/1` used to run `File.mkdir_p!/1` unconditionally. If `:root` is a
+    # mount point — exactly what the moduledoc tells operators to use — and the volume
+    # fails to mount, that created the root on the *underlying* filesystem: no
+    # tombstones, a pristine-looking key store, and a fresh v1 minted for every tenant
+    # that was ever crypto-erased. No attacker needed, just a boot-order bug.
+    test "refuses to start on a root that does not exist", %{tmp_dir: tmp_dir} do
       root = Path.join([tmp_dir, "deep", "nested", "root"])
-      name = :"ash_vault_local_mk_#{System.unique_integer([:positive])}"
-      start_supervised!(%{id: name, start: {Local, :start_link, [[name: name, root: root]]}})
 
+      assert Exception.message(start_error(root)) =~ "does not exist"
+      refute File.exists?(root), "start_link must not create the key root"
+    end
+
+    test "refuses to start on an existing root with no sentinel", %{tmp_dir: tmp_dir} do
+      root = Path.join(tmp_dir, "unmounted")
+      File.mkdir_p!(root)
+
+      assert Exception.message(start_error(root)) =~ "holds no .ash_vault_root sentinel"
+    end
+
+    # The whole point of the sentinel: an unmounted volume must not present itself as a
+    # brand-new, empty key store.
+    test "an unmounted key volume cannot resurrect a destroyed scope", %{tmp_dir: tmp_dir} do
+      mount_point = Path.join(tmp_dir, "mnt")
+      Local.init_root!(mount_point)
+
+      name = :"ash_vault_local_mnt_#{System.unique_integer([:positive])}"
+
+      start_supervised!(%{
+        id: name,
+        start: {Local, :start_link, [[name: name, root: mount_point]]}
+      })
+
+      assert {:ok, %{version: 1}} = Local.current_key(name, "erased")
+      assert :ok = Local.destroy(name, "erased")
+      stop_supervised!(name)
+
+      # The volume fails to mount: the mount point is back to a bare, empty directory
+      # on the underlying filesystem.
+      File.rm_rf!(mount_point)
+      File.mkdir_p!(mount_point)
+
+      assert Exception.message(start_error(mount_point)) =~ "sentinel"
+    end
+
+    test "init_root!/1 creates the root at 0700 with a sentinel, idempotently",
+         %{tmp_dir: tmp_dir} do
+      root = Path.join([tmp_dir, "deep", "nested", "root"])
+
+      assert :ok = Local.init_root!(root)
       assert File.dir?(root)
       assert Bitwise.band(File.stat!(root).mode, 0o777) == 0o700
+
+      sentinel = Path.join(root, Local.sentinel_file())
+      assert File.regular?(sentinel)
+      before = File.read!(sentinel)
+
+      assert :ok = Local.init_root!(root)
+      assert File.read!(sentinel) == before
+
+      name = :"ash_vault_local_init_#{System.unique_integer([:positive])}"
+      start_supervised!(%{id: name, start: {Local, :start_link, [[name: name, root: root]]}})
+      assert {:ok, %{version: 1}} = Local.current_key(name, "after-init")
     end
 
     test "warns loudly when the root is group/world readable", %{tmp_dir: tmp_dir} do
       root = Path.join(tmp_dir, "loose")
-      File.mkdir_p!(root)
+      Local.init_root!(root)
       File.chmod!(root, 0o755)
 
       name = :"ash_vault_local_loose_#{System.unique_integer([:positive])}"
@@ -318,6 +400,154 @@ defmodule AshVault.KeyProviders.LocalTest do
 
       assert {:ok, %{version: 1, key: ^v1}} = current_key(provider, scope)
       assert {:ok, 2} = rotate(provider, scope)
+    end
+  end
+
+  describe "tombstone reads fail closed" do
+    # Finding 3. `File.exists?/1` answers `false` for ANY stat failure, not just
+    # absence. With the tombstone unreadable the provider used to conclude "not
+    # destroyed" and mint a fresh key for an erased tenant.
+    @tag :unix
+    test "an unreadable tombstone is ProviderUnavailable, never a fresh key",
+         %{provider: provider, name: name, root: root, tmp_dir: tmp_dir, scope: scope} do
+      scope = scope.()
+      assert {:ok, _} = current_key(provider, scope)
+      assert :ok = destroy(provider, scope)
+
+      # Move the tombstone into a subdirectory the process cannot traverse, and point a
+      # fresh provider at it: stat now fails with :eacces, not :enoent.
+      blocked_root = Path.join(tmp_dir, "blocked")
+      Local.init_root!(blocked_root)
+      File.cp!(tombstone_path(root, scope), tombstone_path(blocked_root, scope))
+
+      blocked_name = :"ash_vault_local_blk_#{System.unique_integer([:positive])}"
+
+      start_supervised!(%{
+        id: blocked_name,
+        start: {Local, :start_link, [[name: blocked_name, root: blocked_root]]}
+      })
+
+      File.chmod!(blocked_root, 0o600)
+      on_exit(fn -> File.chmod(blocked_root, 0o700) end)
+
+      assert {:error, %ProviderUnavailable{reason: {:tombstone_unreadable, _, :eacces}}} =
+               Local.current_key(blocked_name, scope)
+
+      assert {:error, %ProviderUnavailable{}} = Local.get_key(blocked_name, scope, 1)
+      assert {:error, %ProviderUnavailable{}} = Local.rotate(blocked_name, scope)
+
+      File.chmod!(blocked_root, 0o700)
+      assert {:error, :destroyed} = Local.current_key(blocked_name, scope)
+
+      _ = name
+    end
+
+    test "a tombstone whose contents are unparseable still means destroyed",
+         %{provider: provider, root: root, scope: scope} do
+      scope = scope.()
+      assert {:ok, _} = current_key(provider, scope)
+      assert :ok = destroy(provider, scope)
+
+      File.write!(tombstone_path(root, scope), "")
+      assert {:error, :destroyed} = current_key(provider, scope)
+
+      File.write!(tombstone_path(root, scope), "{ truncated")
+      assert {:error, :destroyed} = current_key(provider, scope)
+    end
+  end
+
+  describe "destroy ordering" do
+    # Finding 7. Shred-then-tombstone leaves a window with no keys AND no tombstone: the
+    # next current_key mints a fresh v1, existing rows say key_version: 1, and the
+    # caller gets AuthenticationFailed — erasure disguised as tampering.
+    @tag :unix
+    test "a destroy that cannot write its tombstone never shreds the keys",
+         %{provider: provider, root: root, scope: scope} do
+      scope = scope.()
+      assert {:ok, %{version: 1, key: original}} = current_key(provider, scope)
+
+      File.chmod!(root, 0o500)
+      on_exit(fn -> File.chmod(root, 0o700) end)
+
+      assert {:error, _} = destroy(provider, scope)
+
+      # The load-bearing assertion: whatever happens, the next current_key must not
+      # hand out a freshly minted key under an old version number.
+      case current_key(provider, scope) do
+        {:error, _} -> :ok
+        {:ok, %{version: 1, key: ^original}} -> :ok
+        other -> flunk("destroy left the scope re-mintable: #{inspect(other)}")
+      end
+
+      File.chmod!(root, 0o700)
+    end
+
+    @tag :unix
+    test "a destroy interrupted after the tombstone leaves the scope destroyed",
+         %{provider: provider, root: root, scope: scope} do
+      scope = scope.()
+      assert {:ok, _} = current_key(provider, scope)
+
+      # Let the tombstone land, then make the scope directory unshreddable.
+      dir = scope_path(root, scope)
+      File.chmod!(dir, 0o500)
+      on_exit(fn -> File.chmod(dir, 0o700) end)
+
+      assert {:error, %ProviderUnavailable{}} = destroy(provider, scope)
+
+      assert File.exists?(tombstone_path(root, scope))
+      assert {:error, :destroyed} = current_key(provider, scope)
+      assert {:error, :destroyed} = get_key(provider, scope, 1)
+
+      File.chmod!(dir, 0o700)
+    end
+
+    test "a completed destroy records shredded_at alongside destroyed_at",
+         %{provider: provider, root: root, scope: scope} do
+      scope = scope.()
+      assert {:ok, _} = current_key(provider, scope)
+      assert :ok = destroy(provider, scope)
+
+      assert %{"destroyed_at" => _, "shredded_at" => _} =
+               tombstone_path(root, scope) |> File.read!() |> Jason.decode!()
+    end
+  end
+
+  describe "key file validation" do
+    # Finding 8(c). A truncated key file used to be handed straight to the cipher,
+    # which reports {:error, {:invalid_key_size, n}} — surfaced by the vault as
+    # AuthenticationFailed, i.e. "your data was tampered with" for a broken key store.
+    test "a key file of the wrong size is ProviderUnavailable",
+         %{provider: provider, root: root, scope: scope} do
+      scope = scope.()
+      assert {:ok, %{version: 1}} = current_key(provider, scope)
+
+      File.write!(Path.join(scope_path(root, scope), "v1.key"), :crypto.strong_rand_bytes(16))
+
+      assert {:error, %ProviderUnavailable{reason: {:invalid_key_size, _}}} =
+               current_key(provider, scope)
+
+      assert {:error, %ProviderUnavailable{reason: {:invalid_key_size, _}}} =
+               get_key(provider, scope, 1)
+    end
+  end
+
+  describe "get_key/2 version validation" do
+    # Finding 15. get_key/2 is public API, and "v#{version}.key" interpolated an
+    # unvalidated term into a path.
+    test "a traversing or non-positive version is :not_found, never a file read",
+         %{provider: provider, root: root, scope: scope} do
+      scope = scope.()
+      assert {:ok, _} = current_key(provider, scope)
+
+      # A file the traversal would otherwise reach.
+      secret = Path.join(root, "server.key")
+      File.write!(secret, :crypto.strong_rand_bytes(32))
+
+      for version <- ["../../server", "../server", 0, -1, :one, 1.0] do
+        assert {:error, :not_found} = get_key(provider, scope, version),
+               "expected :not_found for version #{inspect(version)}"
+      end
     end
   end
 

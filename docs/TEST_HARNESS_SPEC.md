@@ -90,9 +90,30 @@ File: `test/acceptance/rotation_test.exs`.
 
 ## Definition-of-Done checklist test
 
-File: `test/acceptance/definition_of_done_test.exs` — one test per numbered item in §32 of
-the plan, each with a comment naming the item. This is the artifact that answers "is it done"
-without re-reading the whole suite.
+File: `test/acceptance/definition_of_done_test.exs` — one test per numbered item below, each
+with a comment naming the item. This is the artifact that answers "is it done" without
+re-reading the whole suite.
+
+The list, verbatim from the original project plan (it was previously referenced here as
+"§32 of the plan" without being reproduced — that was an omission):
+
+     1. Configure AshVault on an Ash resource.
+     2. Create two tenants.
+     3. Store encrypted data for each.
+     4. Confirm DB does not contain plaintext.
+     5. Read values normally through Ash.
+     6. Ash field policies still work.
+     7. Cross-tenant ciphertext substitution fails.
+     8. Cross-field ciphertext substitution fails.
+     9. Rotate Tenant A key.
+    10. Old and new ciphertext both decrypt.
+    11. Destroy Tenant A keys.
+    12. Tenant A data becomes undecryptable.
+    13. Tenant B remains decryptable.
+    14. Restore old PostgreSQL backup.
+    15. Tenant A remains undecryptable.
+    16. Tenant B remains decryptable.
+    17. Existing plaintext columns can be safely backfilled.
 
 Items 7 and 8 (cross-tenant and cross-field ciphertext substitution) are expressed as direct
 SQL UPDATEs through `Postgrex` that move a ciphertext blob, followed by an `Ash.read` that
