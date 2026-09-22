@@ -36,6 +36,64 @@ cp -rf source dest          # NOT: cp -r source dest
 - `apt-get` - use `-y` flag
 - `brew` - use `HOMEBREW_NO_AUTO_UPDATE=1` env var
 
+## Branching
+
+**Never commit directly to `main`.** Branch for every task, including docs, chores and
+CI iteration, and open a PR. This applies even when the tree is green and the change
+looks trivial.
+
+## Build & Test
+
+The host has **no C toolchain** — no `cc`, `gcc` or `ld` — so anything with a NIF
+cannot link outside the dev shell. Run everything through it:
+
+```bash
+nix develop --command bash -c '<command>'      # default: native tooling, host BEAM
+nix develop .#full --command bash -c '<cmd>'   # pinned Elixir/OTP, differs from host
+```
+
+```bash
+mix test                                    # no services needed
+mix test --include postgres --include openbao
+cd ash_vault_rustler && mix test            # the Rust NIF package
+mix docs                                    # must stay at zero warnings
+```
+
+Services the tagged suites expect: PostgreSQL on `localhost:5432` (`postgres`/`postgres`)
+and OpenBao on `127.0.0.1:8200`.
+
+**Run the postgres suites alone.** `test/support/db.ex` truncates shared tables and the
+acceptance suite drops and recreates the database, so two concurrent runs corrupt each
+other — every failure looks like missing rows. Override the database per run with
+`ASHVAULT_TEST_DB`; it refuses any name not starting with `ash_vault_test`.
+
+## Architecture
+
+```
+Ash resource --> AshVault extension --> AshVault.Vault --> KeyProvider
+                 (DSL, transformers,    (scope, AAD,       (Memory, Local,
+                  change, calculation)   envelope, cipher)   OpenBao, OpenBaoTransit)
+```
+
+The property the whole library exists for: destroying a scope's keys makes its
+ciphertext permanently undecryptable, and **restoring a database backup cannot undo
+that**, because the keys were never in the database.
+
+## Conventions
+
+- **Tombstone reads fail closed.** A missing, unreadable or ambiguous tombstone is
+  `ProviderUnavailable` — never "not destroyed". Four fail-open reads shipped once and
+  silently resurrected erased tenants; do not add a fifth.
+- **Never conflate the error taxonomy.** `KeyDestroyed`, `KeyNotFound`,
+  `ProviderUnavailable` and `CiphertextIntegrityFailed` mean different things and demand
+  opposite operator responses. An outage must never look like erasure.
+- **No plaintext or key material in errors, logs or telemetry.** Redact at construction,
+  not at render — `inspect/1` and Ash's error aggregation read the struct directly.
+- **Watch for silent failures.** Every dangerous bug this project has had returned a
+  wrong-but-plausible result and raised nothing. Prefer an error over an empty result.
+- **Design docs** live in `documentation/internal/`; shipped guides in
+  `documentation/topics|tutorials|how-to`; ADRs in `documentation/adr/`.
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
 ## Beads Issue Tracker
 

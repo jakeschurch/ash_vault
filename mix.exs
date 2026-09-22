@@ -37,15 +37,15 @@ defmodule AshVault.MixProject do
         "documentation/how-to/writing-a-cipher.md",
         "documentation/how-to/writing-a-scope.md",
         "documentation/how-to/writing-a-rotation-policy.md",
-        "docs/adr/0001-no-cloak-vault.md",
-        "docs/adr/0002-distinguishable-crypto-errors.md",
+        "documentation/adr/0001-no-cloak-vault.md",
+        "documentation/adr/0002-distinguishable-crypto-errors.md",
         "README.md"
       ],
       groups_for_extras: [
         Tutorials: ~r"documentation/tutorials/",
         Topics: ~r"documentation/topics/",
         "How-to": ~r"documentation/how-to/",
-        "Design decisions": ~r"docs/adr/"
+        "Design decisions": ~r"documentation/adr/"
       ],
       groups_for_modules: [
         Extension: [

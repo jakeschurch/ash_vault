@@ -178,7 +178,7 @@ ciphertext.
 
 **Design decisions**
 
-* [ADR 0001 — AshVault does not build on `Cloak.Vault`](docs/adr/0001-no-cloak-vault.md)
+* [ADR 0001 — AshVault does not build on `Cloak.Vault`](documentation/adr/0001-no-cloak-vault.md)
 
 ## What it does not do
 

@@ -777,7 +777,7 @@ operating-system level.
 * [Crypto-erasure](crypto-erasure.md) — the operational checklist
 * [Rotation](rotation.md)
 * [Migrating from plaintext](migrating-from-plaintext.md)
-* `docs/adr/0002-distinguishable-crypto-errors.md` — why the taxonomy above is granular
+* `documentation/adr/0002-distinguishable-crypto-errors.md` — why the taxonomy above is granular
   rather than a single generic "decryption failed", and what a public API owes its users
   as a result
 * `AshVault.Errors`, `AshVault.Telemetry`, `AshVault.KeyProviders.Local`,
