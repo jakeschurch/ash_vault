@@ -82,6 +82,11 @@ jobs:
           RUSTLER_NIF_VERSION: ${{ matrix.nif }}
           CARGO_TERM_COLOR: always
           CARGO_INCREMENTAL: "0"
+          # musl links the CRT statically by default, and a statically-linked CRT
+          # suppresses the cdylib entirely — the build succeeds and simply produces
+          # no .so, which then fails in packaging rather than here. A NIF is loaded
+          # by the BEAM at runtime, so it has to be a shared object.
+          RUSTFLAGS: ${{ matrix.musl && '-C target-feature=-crt-static' || '' }}
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Package it the way rustler_precompiled expects
@@ -99,7 +104,11 @@ jobs:
           built="target/${{ matrix.target }}/release/libashvault_nif.so"
           # macOS produces a .dylib; the extension rustler_precompiled asks for is still .so.
           [ -f "$built" ] || built="target/${{ matrix.target }}/release/libashvault_nif.dylib"
-          test -f "$built"
+          if [ ! -f "$built" ]; then
+            echo "no shared object was produced for ${{ matrix.target }}; release dir holds:"
+            ls -la "target/${{ matrix.target }}/release/" || true
+            exit 1
+          fi
 
           mkdir -p "$GITHUB_WORKSPACE/artifacts"
           cp "$built" "$GITHUB_WORKSPACE/artifacts/${name}"
