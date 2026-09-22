@@ -27,3 +27,6 @@ erl_crash.dump
 .dolt/
 *.db
 .beads-credential-key
+
+# agent scratch
+.claude/agent-memory/
