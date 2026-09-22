@@ -5,20 +5,11 @@ defmodule Example.Application do
 
   @impl true
   def start(_type, _args) do
-    children = [Example.Repo] ++ key_provider_children()
+    # The vault answers for its own provider. OpenBao is stateless HTTP and contributes
+    # nothing here; Local is a GenServer serialising every mutation of the key directory
+    # and contributes itself. Neither is a `case` this application writes.
+    children = [Example.Repo] ++ Example.Vault.current().child_specs()
 
     Supervisor.start_link(children, strategy: :one_for_one, name: Example.Supervisor)
-  end
-
-  # The OpenBao provider is stateless (plain HTTP calls), so it needs no child. The
-  # Local provider is a GenServer that serializes every mutation of the key directory,
-  # so it has to be supervised — and it refuses to start on a root it did not see
-  # initialised, which is what stops an unmounted key volume from looking like a
-  # pristine, never-used key store. `mix example.setup` runs `init_root!/1`.
-  defp key_provider_children do
-    case Example.Vault.key_provider() do
-      AshVault.KeyProviders.Local -> [AshVault.KeyProviders.Local]
-      _ -> []
-    end
   end
 end

@@ -9,7 +9,12 @@ defmodule Example.Vault do
   `&Example.Vault.resolve/2` rather than naming a module directly.
 
   For a real application you would name one vault module and be done; the indirection
-  here exists only so this example can demonstrate both providers.
+  here exists only so this example can demonstrate both providers. It is the supported
+  pattern for the cases where you genuinely need two — see AshVault's
+  "Two vaults in one application" guide — and it carries one hazard worth repeating: a
+  resolver that changes between a row's write and its read produces
+  `AshVault.Errors.CiphertextIntegrityFailed`, which reads as tampering. Key it on
+  deployment-scoped config, as here, never on anything request-scoped.
   """
 
   @doc """

@@ -33,12 +33,21 @@ defmodule AshVault.Dsl do
       searchable?: [
         type: :boolean,
         default: false,
-        doc: "Also store a keyed HMAC lookup token. Post-v1; rejected by the verifier for now."
+        doc:
+          "Also store a deterministic `<name>_lookup` HMAC token, so the field can be " <>
+            "filtered on. Leaks equality within the scope — see `AshVault.Lookup`."
       ],
       unique?: [
         type: :boolean,
         default: false,
-        doc: "Add a unique identity on the lookup token. Requires `searchable?`. Post-v1."
+        doc: "Add a unique identity on the lookup token, per tenant. Requires `searchable?`."
+      ],
+      normalize: [
+        type: {:or, [{:in, [:none, :downcase, :downcase_trim]}, :mfa, {:fun, 1}]},
+        default: :none,
+        doc:
+          "How a searchable value is normalized before hashing (and before encrypting). " <>
+            "Changing it after rows exist invalidates every stored token."
       ],
       backfill_from: [
         type: :atom,

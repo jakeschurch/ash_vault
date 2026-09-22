@@ -63,7 +63,7 @@ defmodule AshVault.Cipher do
       #=> {:error, %AshVault.Errors.UnsupportedCipher{cipher_id: "nope"}}
 
   """
-  @spec fetch(atom() | binary()) :: {:ok, module()} | {:error, UnsupportedCipher.t()}
+  @spec fetch(atom() | binary()) :: {:ok, module()} | {:error, Exception.t()}
   def fetch(id) when is_atom(id) and not is_nil(id) do
     fetch(Atom.to_string(id))
   end

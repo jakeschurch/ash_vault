@@ -314,3 +314,69 @@ defmodule AshVault.Test.Support.LocalVaultForTests do
 
   use AshVault.Vault, key_provider: AshVault.KeyProviders.Local
 end
+
+defmodule AshVault.Test.Support.NoLookupProvider do
+  @moduledoc """
+  A provider with no `lookup_key/1`, for the compile-time `searchable?` check and the
+  runtime backstop behind it.
+  """
+
+  @behaviour AshVault.KeyProvider
+
+  @doc false
+  @impl AshVault.KeyProvider
+  def current_key(_scope),
+    do: {:ok, %{version: 1, key: <<0::256>>, created_at: DateTime.utc_now()}}
+
+  @doc false
+  @impl AshVault.KeyProvider
+  def get_key(_scope, _version), do: {:ok, <<0::256>>}
+
+  @doc false
+  @impl AshVault.KeyProvider
+  def rotate(_scope), do: {:ok, 2}
+
+  @doc false
+  @impl AshVault.KeyProvider
+  def destroy(_scope), do: :ok
+end
+
+defmodule AshVault.Test.Support.NoLookupVault do
+  @moduledoc "A vault whose provider cannot serve lookup keys."
+
+  use AshVault.Vault, key_provider: AshVault.Test.Support.NoLookupProvider
+end
+
+defmodule AshVault.Test.Support.CachedMemoryProvider do
+  @moduledoc "A `Cached` wrapper over a provider that DOES implement `lookup_key/1`."
+
+  use AshVault.KeyProviders.Cached, provider: AshVault.KeyProviders.Local
+end
+
+defmodule AshVault.Test.Support.CachedNoLookupProvider do
+  @moduledoc """
+  A `Cached` wrapper over a provider that does not implement `lookup_key/1`.
+
+  The wrapper delegates `lookup_key/1` unconditionally, so it exports the function
+  whatever it wraps — which is exactly why `AshVault.KeyProvider.supports_lookup?/1`
+  unwraps before asking.
+  """
+
+  use AshVault.KeyProviders.Cached, provider: AshVault.Test.Support.NoLookupProvider
+end
+
+defmodule AshVault.Test.Support.NoLookupVaultResolver do
+  @moduledoc "A `fun/2` vault resolver returning a vault whose provider has no lookup key."
+
+  @doc false
+  @spec resolve(module(), term()) :: module()
+  def resolve(_resource, _context), do: AshVault.Test.Support.NoLookupGlobalVault
+end
+
+defmodule AshVault.Test.Support.NoLookupGlobalVault do
+  @moduledoc "Globally scoped, and unable to serve lookup keys."
+
+  use AshVault.Vault,
+    key_provider: AshVault.Test.Support.NoLookupProvider,
+    scope: AshVault.Scopes.Global
+end

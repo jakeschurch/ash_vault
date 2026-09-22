@@ -75,11 +75,11 @@ defmodule Mix.Tasks.Example.Demo do
     where =
       case provider do
         AshVault.KeyProviders.OpenBao ->
-          cfg = Application.get_env(:ash_vault, AshVault.KeyProviders.OpenBao)
+          cfg = AshVault.KeyProvider.config(AshVault.KeyProviders.OpenBao)
           "OpenBao transit at #{cfg[:address]} (mount #{cfg[:transit_mount]})"
 
         AshVault.KeyProviders.Local ->
-          cfg = Application.get_env(:ash_vault, AshVault.KeyProviders.Local)
+          cfg = AshVault.KeyProvider.config(AshVault.KeyProviders.Local)
           "the filesystem, rooted at #{cfg[:root]}"
 
         other ->
@@ -332,7 +332,7 @@ defmodule Mix.Tasks.Example.Demo do
       "  retention policy would be holding. Keep it in mind for step 7."
     ])
 
-    {:ok, :ok} =
+    {:ok, %AshVault.Erasure{scope: erased_scope, destroyed_at: erased_at}} =
       Organization
       |> Ash.ActionInput.for_action(:destroy_keys, %{}, tenant: org_a, actor: @admin)
       |> Ash.run_action()
@@ -341,7 +341,8 @@ defmodule Mix.Tasks.Example.Demo do
     [[contact_count]] = query!("SELECT count(*) FROM contacts WHERE org_id = $1", [uuid(org_a)])
 
     say([
-      "  Organization.destroy_keys on org A → :ok",
+      "  Organization.destroy_keys on org A",
+      "    → %AshVault.Erasure{scope: #{erased_scope}, destroyed_at: #{erased_at}}",
       "    every key version destroyed at once, and the scope tombstoned so it can",
       "    never mint a fresh v1 and quietly look like a brand-new tenant.",
       "",

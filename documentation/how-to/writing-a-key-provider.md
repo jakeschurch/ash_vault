@@ -20,6 +20,8 @@ Read this whole page before writing one, then run the shared contract suite
 @callback rotate(scope()) :: {:ok, version()} | {:error, term()}
 @callback destroy(scope()) :: :ok | {:error, term()}
 @callback key_bytes() :: pos_integer()      # optional, defaults to 32
+@callback child_spec(term()) :: Supervisor.child_spec()   # optional, default: no child
+@callback setup() :: :ok | {:error, term()}               # optional, default: :ok
 ```
 
 Semantics every implementation must honour:
@@ -34,6 +36,8 @@ Semantics every implementation must honour:
   `:ok`.
 * Scopes are binaries. Reject anything else with an `ArgumentError`.
 * `key_bytes/0` is optional; `AshVault.KeyProvider.key_bytes/1` falls back to 32.
+* `child_spec/1` and `setup/0` are optional, and exist so a host application does not
+  have to `case` over provider modules to know what yours needs. See below.
 
 Error terms are mapped onto AshVault errors in exactly one place,
 `AshVault.Vault.Runtime`:
@@ -45,6 +49,45 @@ Error terms are mapped onto AshVault errors in exactly one place,
 | `{:error, anything_else}` | `AshVault.Errors.ProviderUnavailable` (retryable) |
 
 So the three-way distinction is entirely in your hands.
+
+## Starting up, and being set up
+
+Providers differ in what they need before they can serve a key, and a host application
+should not have to know which. Two optional callbacks carry that:
+
+* **`child_spec/1`** — define it if your provider owns a process. You get it for free from
+  `use GenServer` or `use Agent`; `AshVault.KeyProviders.Local` and
+  `AshVault.KeyProviders.Memory` do exactly that. Omit it if you are stateless, as
+  `AshVault.KeyProviders.OpenBao` is.
+* **`setup/0`** — define it if there is a one-shot, privileged operator step: creating a
+  key root, mounting a secrets engine, provisioning a policy. It must be **idempotent**,
+  and it must not be something a supervisor does: `setup/0` is for a deploy step, a
+  release command, or a `mix` task.
+
+A host then writes one line each, through the vault, which also knows about the
+`AshVault.KeyProviders.Cached` wrapper when one is in play:
+
+```elixir
+children = [MyApp.Repo] ++ MyApp.Vault.child_specs()
+:ok = MyApp.Vault.setup()
+```
+
+Both are optional: a provider that defines neither contributes no children and returns
+`:ok` from setup, so an existing third-party provider keeps working untouched.
+
+## Reading your configuration
+
+Read it through `AshVault.KeyProvider.config/1`, not `Application.get_env/3`:
+
+```elixir
+defp config, do: AshVault.KeyProvider.config(__MODULE__)
+```
+
+That resolves `config :ash_vault, MyProvider, ...` as a base and merges the host
+application's own `config :my_app, MyProvider, ...` over it, key by key. Hosts strongly
+prefer the latter — configuration under someone else's OTP app name surprises anyone
+running `Application.get_env(:my_app, ...)` — and going through the helper is what makes
+it available to your provider too.
 
 ## Failure modes that matter
 

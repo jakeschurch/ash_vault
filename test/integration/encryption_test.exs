@@ -285,7 +285,7 @@ defmodule AshVault.Integration.EncryptionTest do
     test "destroy_keys crypto-erases the scope" do
       create!(%{email: "a@b.c"}, @acme)
 
-      assert {:ok, :ok} =
+      assert {:ok, %AshVault.Erasure{scope: @acme, destroyed_at: %DateTime{}}} =
                AshVault.Test.Organization
                |> Ash.ActionInput.for_action(:destroy_keys, %{}, tenant: @acme)
                |> Ash.run_action()

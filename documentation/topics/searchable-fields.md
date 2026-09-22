@@ -1,148 +1,274 @@
 # Searchable fields
 
-> #### Not implemented in v1 {: .error}
->
-> `searchable?` and `unique?` exist in the DSL schema but are **rejected at compile time**.
-> This page documents the design so you can plan around it, and states the disclosure
-> tradeoff honestly so you can decide whether you want it at all.
-
-## What you can and cannot do today
-
-You cannot filter, sort, match or join on an encrypted field. The generated decrypt
-calculation is declared `filterable?: false, sortable?: false`, because randomized AEAD
-ciphertext supports neither: the same plaintext encrypted twice produces two completely
-different blobs (fresh 12-byte nonce every time), so `WHERE encrypted_email = $1` matches
-nothing and `ORDER BY encrypted_email` orders by noise.
-
-That is not a configuration AshVault withholds. It is what the encryption *is*.
-
-If you write this:
+You cannot sort, order or prefix-match an encrypted field. You *can* match it for
+**equality**, by opting a field into a second, deterministic column beside its ciphertext:
 
 ```elixir
 ash_vault do
   vault MyApp.Vault
-  encrypt :email, searchable?: true
+
+  encrypt :email, searchable?: true, unique?: true, normalize: :downcase_trim
 end
 ```
 
-the resource does not compile:
+That is a **deliberate disclosure**, not a free index. Read "The equality-leakage
+tradeoff" below before you turn it on, and decide per column.
+
+## Why the ciphertext itself is not searchable
+
+AES-GCM draws a fresh random nonce for every write, so the same plaintext encrypts to
+completely different bytes every time. `WHERE encrypted_email = $1` matches nothing, and a
+unique index on `encrypted_email` constrains nothing: two rows holding the same address
+look entirely unrelated to the database.
+
+That is not a configuration AshVault withholds. It is what the encryption *is* — and it is
+why the generated decrypt calculation is declared `filterable?: false, sortable?: false`.
+
+So a searchable field carries two columns:
 
 ```
-`searchable?` and `unique?` are not implemented in v1 (on :email). Remove them;
-lookup tokens are post-v1.
+plaintext
+  ├── AES-GCM → encrypted_email   (randomized, authenticated, unsearchable)
+  └── HMAC    → email_lookup      (deterministic, indexable, one-way)
 ```
 
-(raised as a `Spark.Error.DslError` at `[:ash_vault, :encrypt]`, from
-`AshVault.Transformers.SetupEncryption`). `unique?: true` gets the same message. They are
-rejected rather than silently ignored, so nobody ships believing they have a feature they
-do not have.
+You query and constrain on `email_lookup`, and decrypt `encrypted_email` only after
+finding the row.
 
-### What to do instead, today
+## The key that makes the token is not the key that decrypts
 
-* **Look up by an identifier you do not encrypt.** An email is often both a credential and
-  a lookup key; a `user_id`, an opaque login token, or a separate non-sensitive
-  `email_domain` column can carry the lookup while the value stays encrypted.
-* **Filter on something else and decrypt in the application.** `Ash.read` a bounded set by
-  tenant/date/status, load the field, and filter in Elixir. This is fine for tens or
-  hundreds of rows per request and terrible for millions.
-* **Keep a deliberately non-sensitive projection.** Last four digits of a card, a
-  domain, a coarse bucket. You are choosing exactly what to disclose, in the open,
-  which is a much easier thing to reason about than a token scheme.
-* **Reconsider whether the field needs to be searchable.** In practice a surprising number
-  of "we need to search on it" requirements are really "support needs to confirm a value
-  the customer just read out", which an equality check on a value you already have
-  satisfies — and which is what lookup tokens would give you.
+This is the part to get right, and the part with no second chance.
 
-## The design: per-scope HMAC lookup tokens
+The token key comes from `c:AshVault.KeyProvider.lookup_key/1`: a **separate,
+non-rotating, per-scope** secret. It is not the data encryption key and is not derived
+from it.
 
-The intended mechanism, when it lands, is a second column holding a keyed hash.
-
-For `encrypt :email, searchable?: true`, the transformer would add an `email_lookup`
-`:binary` attribute alongside `encrypted_email`, and the encrypt change would write both:
+Per-field separation comes from HKDF (RFC 5869), not from a separate provider key per
+field:
 
 ```
-email_lookup = HMAC-SHA256(lookup_key(scope), normalize(plaintext))
+lookup_key_for_field =
+  HKDF-SHA256(ikm:  provider_lookup_key(scope),
+              info: "ash_vault:lookup:v1|" <> inspect(resource) <> "|" <> field)
+
+email_lookup = HMAC-SHA256(lookup_key_for_field, normalize(plaintext))
 ```
 
-The lookup key is **derived from the scope's encryption key by HKDF with a distinct info
-string**, so it is never the encryption key itself:
+Binding the resource and the field means the same address in two columns, or in two
+resources, produces two unrelated tokens — the same separation the AEAD's additional
+authenticated data gives the ciphertext. Binding the scope is what the per-scope provider
+key already does.
 
+Three properties follow, and all three are enforced, not merely documented:
+
+* **`AshVault.rotate_key!/2` does not touch tokens.** Rotation mints a new data key
+  version; the lookup key is untouched, so every stored token stays valid and every query
+  keeps matching.
+
+  If the lookup key *did* rotate, every row written before the rotation would silently
+  stop matching its own value: no error, no log line, `unique?` quietly stops preventing
+  duplicates, and users cannot log in. The regression guard for this lives in
+  `test/ash_vault/lookup_rotation_test.exs`, and it asserts the provider hands back the
+  identical key binary across a rotation rather than inferring it from token equality.
+
+* **`AshVault.destroy_keys!/2` destroys the lookup key too**, gated by the same tombstone.
+  Crypto-erasure stays total: after erasure a lookup raises
+  `AshVault.Errors.KeyDestroyed` rather than returning zero rows, and the provider never
+  mints a fresh lookup secret for a destroyed scope. A surviving lookup key would let
+  anyone holding it keep confirming guesses about a subject whose data was "destroyed".
+
+* **A provider without `lookup_key/1` is a compile-time DSL error** naming the provider,
+  not a runtime surprise at the first login attempt.
+  `AshVault.KeyProviders.Memory`, `AshVault.KeyProviders.Local` and
+  `AshVault.KeyProviders.OpenBao` all implement it.
+
+### Rotating a lookup key is a backfill, not a rotation
+
+There is deliberately no `rotate_lookup_key` anywhere. Changing the lookup key
+invalidates every stored token, so it is a data migration:
+
+```bash
+mix ash_vault.backfill MyApp.Accounts.User email --tenant acme --lookup
 ```
-lookup_key(scope) = HKDF-Expand(scope_key, info: "ashvault:v1:lookup", length: 32)
+
+See [Migration](#migration) below.
+
+## Querying
+
+Never build a token by hand. One stray `String.downcase/1` and the query silently matches
+nothing. There are two supported paths.
+
+### `AshVault.Query.filter_by/4`
+
+```elixir
+MyApp.Accounts.User
+|> AshVault.Query.filter_by(:email, "Jake@Example.com", tenant: "acme")
+|> Ash.read!(tenant: "acme")
 ```
 
-That derivation is the load-bearing part. A separate key for lookup means:
+It returns an ordinary `Ash.Query`, so it composes:
 
-* a component that only needs to *search* (a lookup service, a read replica of the search
-  index) can hold the lookup key without being able to decrypt anything;
-* an HMAC key leak does not compromise confidentiality of the values, only equality;
-* and, critically, **destroying the scope's key destroys the lookup key too**, because the
-  lookup key is derived from it and stored nowhere. Crypto-erasure still works: the
-  tokens become unguessable-but-useless, and nothing can regenerate them.
+```elixir
+MyApp.Accounts.User
+|> Ash.Query.filter(active == true)
+|> AshVault.Query.filter_by(:email, "jake@example.com", tenant: "acme")
+```
 
-`unique?: true` would additionally add a unique identity on `(scope, email_lookup)`, which
-gives you database-enforced uniqueness on a value the database cannot read.
+### The generated `:by_<field>` read action
 
-### Why HMAC, and not deterministic encryption
+`searchable?: true` also generates a read action taking the plaintext as a
+`sensitive?: true` argument. That is the one to expose through a code interface — which
+AshVault does **not** write for you, because the interface belongs to your domain:
 
-Deterministic encryption — encrypting with a fixed nonce so equal plaintexts produce equal
-ciphertexts — is the obvious shortcut and is explicitly **not** the mechanism.
+```elixir
+# in your domain
+resource MyApp.Accounts.User do
+  define :get_user_by_email, action: :by_email, args: [:email], get?: true
+end
+
+MyApp.Accounts.get_user_by_email!("jake@example.com", tenant: "acme")
+```
+
+### A missing tenant is an error, never an empty result
+
+Both paths resolve the scope through the resource's configured `AshVault.Scope`, from the
+query's tenant, exactly as a write does. A tenant-scoped query with no tenant fails with
+`AshVault.Errors.MissingScope`.
+
+This is the single most important behaviour here. A lookup that quietly returned zero rows
+for a missing tenant would read as *"no such user"* — at a login form, at an
+"is this address taken?" check, at a dedupe pass — and it would look entirely healthy in
+review, in logs and in tests.
+
+The two paths report it differently, on purpose:
+
+* `filter_by/4` **raises**. It is a plain function with no query of its own to hang an
+  error on.
+* the generated read action adds the error to the query, so `Ash.read/2` returns
+  `{:error, _}` and `Ash.read!/2` raises — the same contract every other Ash error and
+  every other AshVault path honours. A preparation that raised would be the only place in
+  AshVault where an error escapes a non-bang Ash call as an exception.
+
+## Normalization
+
+`normalize:` decides what "equal" means: `:none` (the default), `:downcase`,
+`:downcase_trim`, or an MFA / 1-arity function returning a binary.
+
+The default is `:none` deliberately. Silent normalization changes equality semantics, and
+for an email field you should opt in knowingly.
+
+> #### Normalization is applied to the stored value too {: .warning}
+>
+> The token must be the hash of exactly the bytes that were encrypted, so the *normalized*
+> value is what gets encrypted. With `normalize: :downcase_trim`, writing
+> `" Jake@Example.COM "` stores — and later decrypts to — `"jake@example.com"`.
+>
+> This is deliberate. A token that did not match the value sitting beside it would be
+> worse: the row would be findable under one spelling and readable as another.
+
+> #### Changing `normalize:` after rows exist is a one-way door {: .error}
+>
+> Exactly like changing a password hash function — except worse, because AshVault
+> encrypts the normalized value. Existing rows keep both their old tokens *and* their old
+> spelling in the ciphertext, so they stop matching, and there is no way to bring them
+> back into agreement without re-encrypting them.
+>
+> `mix ash_vault.backfill --lookup` deliberately **refuses** to paper over this: on
+> finding a row whose ciphertext does not match the current normalization it aborts,
+> naming the row, rather than writing a token that would make the row findable under one
+> spelling and readable as another. Decide `normalize:` before the column has rows in it.
+
+Normalization operates on a binary. `searchable?: true` on a field whose type is not one
+of `:string`, `:ci_string`, `:binary` or `:uuid` is a compile-time DSL error unless you
+supply a custom `normalize:` MFA — AshVault will not `to_string/1` a struct for you.
+`inspect/1` output is a stable-looking string that would quietly become the searchable
+identity of the row, and two values differing only where `inspect/1` truncates would
+collide.
+
+## `unique?`
+
+`unique?: true` adds an `Ash.Resource.Identity` named `<field>_lookup_unique` on
+`[<field>_lookup]`, which gives you database-enforced uniqueness on a value the database
+cannot read.
+
+It requires `searchable?: true`, and says so at compile time if you forget: there is no
+token to constrain otherwise, and a unique index on the randomized ciphertext constrains
+nothing.
+
+Two details worth knowing:
+
+* **Uniqueness is per tenant.** The identity lists only `[<field>_lookup]`; Ash adds the
+  multitenancy attribute itself — to the generated unique index, and to the eager/pre-check
+  query — whenever the identity is not `all_tenants?`. Listing it in `keys` as well would
+  be redundant in the index and would wrongly change the identity's public contract, since
+  `keys` is what `Ash.get/3`-by-identity and upsert-by-identity require as inputs.
+* **`nil` never conflicts.** `nils_distinct?` defaults to true, which is also what a plain
+  Postgres unique index does: any number of rows may hold a nil value.
+
+## Migration
+
+`--lookup` covers two situations: an already-encrypted field that has just been given
+`searchable?: true`, and a deliberate re-keying of the provider's lookup secret. It does
+**not** cover a changed `normalize:` — see the warning above.
+
+To make an existing encrypted field searchable:
+
+1. **Expand** — an ordinary migration adds the `<field>_lookup` column and its index.
+2. **Deploy** the resource with `searchable?: true` (and `unique?: true` only *after* step
+   3, so the backfill is not fighting a constraint on half-populated data).
+3. **Backfill** — `mix ash_vault.backfill MyApp.User email --tenant acme --lookup`. It
+   reads, decrypts, normalizes, hashes, and writes **only** the token column; the
+   ciphertext is never rewritten.
+
+Like the ciphertext backfill it is resumable and idempotent with no state file: it selects
+only rows whose token `IS NULL` and whose ciphertext `IS NOT NULL`, so a second run is a
+no-op. `--verify` does not apply — an HMAC is one-way, so there is nothing to decrypt and
+compare — and is refused rather than silently ignored.
+
+## The equality-leakage tradeoff, stated plainly
+
+A lookup token column is a deliberate disclosure. Anyone with the database — including
+every historical backup — learns:
+
+* **which rows share a value, with no key at all.** Two rows with the same token hold the
+  same address. That is a deduplication oracle, a social graph and a re-identification
+  vector. It is also exactly what makes the index work; you cannot have one without the
+  other.
+* **the frequency distribution.** The most common token in a `country` column is the most
+  common country.
+* **confirmation of a guess, if they also hold the lookup key.** With the key an attacker
+  computes `HMAC(key, "alice@example.com")` and checks for its presence. They still cannot
+  *decrypt* anything — the lookup key is HKDF-separated from the data key, so holding the
+  ability to search is strictly weaker than holding the ability to read. But for a field
+  with a small or enumerable domain, "confirm a guess" is equivalent to "recover the
+  value" by brute force. HMAC is fast on purpose; it is not a password hash and does not
+  pretend to be.
+
+**Low-cardinality fields are a bad fit.** A `searchable?: true` boolean, a country code, a
+blood type, a gender — these publish an equality map of your whole table and are close to
+not encrypting the column at all. Say no to those.
+
+Per-scope keys keep the leakage inside one tenant: a token in tenant A and a token in
+tenant B are unrelated even for the same address, so a shared email never discloses a
+cross-customer relationship your customers did not agree to.
+
+### Why not deterministic encryption
+
+Encrypting with a fixed nonce so that equal plaintexts produce equal ciphertexts is the
+obvious shortcut, and it is explicitly not the mechanism.
 
 * It destroys the AEAD guarantee. A fixed nonce under GCM is catastrophic: two messages
   under the same key and nonce leak their XOR and the authentication subkey, allowing
   forgery.
-* It conflates two keys into one. The value that can be *searched* and the value that can
-  be *decrypted* would be the same ciphertext, so anything able to search can decrypt.
-* It makes the leak permanent and total: the stored value is simultaneously the index and
-  the secret.
-
-A separate HMAC token keeps the encrypted column randomized (and therefore properly
-authenticated) and confines the equality leak to a column that holds nothing else.
-
-### Normalization is part of the security boundary
-
-`normalize/1` has to be pinned down and versioned, because it decides what "equal" means.
-Case-folding an email so `A@B.com` matches `a@b.com` is convenient and also narrows the
-guessing space. Changing normalization later invalidates every token in the database —
-it is a data migration, not a tweak. Expect the eventual implementation to bind the
-normalization version into the HMAC info string for exactly that reason.
-
-## The equality-leakage tradeoff, stated plainly
-
-A lookup token column is a **deliberate disclosure**, not a neutral index. Anyone with the
-database — including every historical backup — learns:
-
-* **which rows share a value.** Two users with the same token have the same email. That is
-  a social graph, a deduplication oracle, and a re-identification vector, and it is visible
-  without any key at all.
-* **the frequency distribution.** The most common token in a `country` column is the
-  most common country. Low-entropy fields leak almost completely to frequency analysis:
-  a token on a `blood_type`, a `gender`, a `zip_code` or a boolean-ish field is close to
-  storing it in plaintext.
-* **confirmation of a guess, if they also hold the lookup key.** With the key, an attacker
-  computes `HMAC(key, "alice@example.com")` and checks for its presence. For a field with a
-  small or enumerable domain — phone numbers, national IDs with checksums, dates of birth —
-  "confirm a guess" is equivalent to "recover the value" by brute force. HMAC is fast on
-  purpose; it is not a password hash and does not pretend to be.
-
-Two constraints follow, and both are non-negotiable in the design:
-
-1. **Lookup keys must be per-scope**, so equality never leaks *across* tenants. A global
-   lookup key would let anyone with the database determine that a user of tenant A and a
-   user of tenant B share an email — a cross-customer disclosure your customers did not
-   agree to.
-2. **The lookup key must never be the encryption key**, so that holding the ability to
-   search is strictly weaker than holding the ability to read.
-
-The honest summary: lookup tokens buy you equality search at the cost of publishing the
-equality relation on that column, forever, into every backup you have ever taken. For a
-high-entropy field where you only need "does this exact value already exist", that is
-usually a good trade. For a low-cardinality field it is close to not encrypting at all.
-Decide per column, not per application.
+* It leaks the same equality relation anyway — so it buys nothing on that axis.
+* It is **reversible with the key**, where an HMAC is one-way. The value that can be
+  searched would also be the value that can be decrypted, so anything able to search could
+  read.
 
 ## Related
 
+* `AshVault.Lookup` — the derivation, and the HKDF implementation
+* `AshVault.Query` — `filter_by/4` and the generated read action
+* `c:AshVault.KeyProvider.lookup_key/1` — the provider contract
 * [Threat model](threat-model.md) — the residual-risk entry for lookup tokens
-* [Architecture](architecture.md) — why the ciphertext is randomized in the first place
-* [Crypto-erasure](crypto-erasure.md) — why deriving the lookup key from the scope key is
-  what keeps erasure total
+* [Crypto-erasure](crypto-erasure.md) — why destroying the lookup key is part of erasure

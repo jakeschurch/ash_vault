@@ -49,8 +49,56 @@ defmodule AshVault.Verifiers.VerifyVault do
          :ok <- verify_scope_agreement(dsl, module),
          :ok <- verify_no_duplicates(dsl, module),
          :ok <- verify_decrypt_by_default(dsl, module),
-         :ok <- verify_backfill_from(dsl, module) do
+         :ok <- verify_backfill_from(dsl, module),
+         :ok <- verify_searchable(dsl, module) do
       verify_key_lifecycle(dsl, module)
+    end
+  end
+
+  # A `searchable?: true` field needs a lookup key, and a provider is free not to have
+  # one — `c:AshVault.KeyProvider.lookup_key/1` is optional. Catching that here names the
+  # provider at compile time instead of failing on the first login attempt in production.
+  #
+  # `AshVault.KeyProvider.supports_lookup?/1` fails OPEN for a provider that is not
+  # compiled yet, matching `verify_vault/2`'s treatment of an uncompiled vault: a
+  # compile-order-dependent DSL error would be worse than the clean
+  # `AshVault.Errors.LookupUnsupported` the runtime raises in the same situation.
+  defp verify_searchable(dsl, module) do
+    searchable = AshVault.Info.searchable_fields(dsl)
+
+    with [_ | _] <- searchable,
+         vault when is_atom(vault) and not is_nil(vault) <- AshVault.Info.ash_vault_vault!(dsl),
+         {:module, ^vault} <- Code.ensure_compiled(vault),
+         true <- function_exported?(vault, :__ash_vault__, 1),
+         provider = vault.__ash_vault__(:key_provider),
+         false <- AshVault.KeyProvider.supports_lookup?(provider) do
+      error(
+        module,
+        [:ash_vault, :encrypt],
+        """
+        #{inspect(provider)} does not implement `AshVault.KeyProvider.lookup_key/1`, so \
+        #{inspect(Enum.map(searchable, & &1.name))} cannot be `searchable?: true`.
+
+        A lookup token is an HMAC under a **separate, non-rotating, per-scope** secret —
+        never the encryption key, and never derived from it. Deriving it from the key
+        `current_key/1` serves would make every stored token stop matching the moment the
+        scope is rotated, with nothing raised anywhere: existing rows become unfindable,
+        `unique?` stops preventing duplicates, and users cannot log in.
+
+        Implement the optional callback on #{inspect(provider)}:
+
+            @impl AshVault.KeyProvider
+            def lookup_key(scope) do
+              # minted once per scope; `rotate/1` never changes it,
+              # `destroy/1` erases it along with everything else
+            end
+
+        `AshVault.KeyProviders.Memory`, `AshVault.KeyProviders.Local` and
+        `AshVault.KeyProviders.OpenBao` all implement it.
+        """
+      )
+    else
+      _ok -> :ok
     end
   end
 

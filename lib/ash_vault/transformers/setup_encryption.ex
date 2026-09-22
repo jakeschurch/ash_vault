@@ -23,6 +23,18 @@ defmodule AshVault.Transformers.SetupEncryption do
        argument of the original type, prepend `AshVault.Changes.Encrypt`, and drop the
        attribute from `accept`
 
+  ## Per searchable field, additionally
+
+    5. add `<name>_lookup` as a `:binary` attribute — `public?: false`, `sensitive?: true`,
+       `allow_nil?: true`, `filterable?: true`, and out of the default select wherever the
+       data layer can select
+    6. for `unique?: true`, an identity named `<name>_lookup_unique` on `[<name>_lookup]`.
+       The multitenancy attribute is deliberately NOT listed: Ash adds it itself, both to
+       the generated unique index and to the eager/pre-check query, whenever
+       `all_tenants?` is false. See the comment on `add_lookup_identity/3`.
+    7. a `:by_<name>` read action taking the plaintext as a `sensitive?: true` argument,
+       backed by `AshVault.Preparations.FilterByLookup`
+
   ## Deviation from ash_cloak: `allow_nil?` on the backing attribute
 
   ash_cloak copies the original `attribute.allow_nil?` onto the ciphertext column. That is
@@ -36,6 +48,8 @@ defmodule AshVault.Transformers.SetupEncryption do
 
   alias Ash.Resource.Builder
   alias Spark.Dsl.Transformer
+
+  @searchable_types [Ash.Type.String, Ash.Type.CiString, Ash.Type.Binary, Ash.Type.UUID]
 
   @doc false
   @impl Spark.Dsl.Transformer
@@ -77,6 +91,7 @@ defmodule AshVault.Transformers.SetupEncryption do
         ]
         |> maybe_description(attribute)
       )
+      |> add_lookup(field, attribute)
       |> rewrite_actions(attribute)
       |> case do
         {:ok, dsl} -> {:cont, {:ok, dsl}}
@@ -126,16 +141,162 @@ defmodule AshVault.Transformers.SetupEncryption do
             "#{inspect(field.name)} already has an " <>
               "#{inspect(AshVault.encrypted_field_name(field.name))} sibling attribute"
 
-      field.searchable? or field.unique? ->
+      field.searchable? and
+          Ash.Resource.Info.attribute(dsl, AshVault.lookup_field_name(field.name)) ->
         raise Spark.Error.DslError,
           module: module,
           path: [:ash_vault, :encrypt],
           message:
-            "`searchable?` and `unique?` are not implemented in v1 " <>
-              "(on #{inspect(field.name)}). Remove them; lookup tokens are post-v1."
+            "#{inspect(field.name)} already has an " <>
+              "#{inspect(AshVault.lookup_field_name(field.name))} sibling attribute"
+
+      field.unique? and not field.searchable? ->
+        raise Spark.Error.DslError,
+          module: module,
+          path: [:ash_vault, :encrypt],
+          message: """
+          `unique?: true` on #{inspect(field.name)} requires `searchable?: true`.
+
+          Uniqueness is enforced on the lookup token, not on the ciphertext: AES-GCM
+          draws a fresh nonce per write, so two rows holding the same plaintext have
+          completely different `#{AshVault.encrypted_field_name(field.name)}` bytes and a
+          unique index on that column constrains nothing at all.
+
+              encrypt #{inspect(field.name)}, searchable?: true, unique?: true
+          """
+
+      field.searchable? and not searchable_type?(attribute.type) and
+          field.normalize in [:none, :downcase, :downcase_trim] ->
+        raise Spark.Error.DslError,
+          module: module,
+          path: [:ash_vault, :encrypt],
+          message: """
+          `searchable?: true` on #{inspect(field.name)} needs a `normalize:` that returns \
+          a binary, because #{inspect(attribute.type)} values are not binaries.
+
+          A lookup token is `HMAC-SHA256(key, normalized_plaintext)`, so the normalized
+          value has to be bytes. AshVault will not `to_string/1` a struct, a map or a
+          number for you: `inspect/1` output is a stable-looking string that would
+          quietly become the searchable identity of the row, and two values differing
+          only where `inspect/1` truncates would collide.
+
+          Either give it an explicit normalizer:
+
+              encrypt #{inspect(field.name)}, searchable?: true,
+                normalize: {MyApp.Normalize, :#{field.name}, []}
+
+          or drop `searchable?: true`. Types searchable without one: \
+          #{inspect(@searchable_types)}.
+          """
 
       true ->
         attribute
+    end
+  end
+
+  # `Ash.CiString` values are structs at runtime, not binaries, so `AshVault.Lookup`
+  # unwraps them explicitly. Allowing the type here without that clause there would be
+  # a compile-time promise the runtime breaks.
+  defp searchable_type?(type), do: Ash.Type.get_type(type) in @searchable_types
+
+  # -- searchable fields ------------------------------------------------------
+
+  defp add_lookup({:error, error}, _field, _attribute), do: {:error, error}
+
+  defp add_lookup({:ok, dsl}, %{searchable?: false}, _attribute), do: {:ok, dsl}
+
+  defp add_lookup({:ok, dsl}, field, attribute) do
+    lookup = AshVault.lookup_field_name(field.name)
+
+    dsl
+    |> Builder.add_attribute(lookup, :binary,
+      allow_nil?: true,
+      sensitive?: true,
+      public?: false,
+      filterable?: true,
+      # The token is only ever read by a filter. Leaving it out of the default select
+      # keeps a stable, per-scope fingerprint of the plaintext out of every
+      # `%Resource{}` struct that reaches a log line, a template or an APM trace.
+      #
+      # Only where the data layer can actually select, though:
+      # `Ash.Resource.Verifiers.VerifySelectedByDefault` *raises* for
+      # `select_by_default?: false` on one that cannot, because every attribute is
+      # always selected there and Ash refuses to let a resource claim otherwise.
+      # `Ash.DataLayer.Ets` is such a layer, so an unconditional option here would make
+      # searchable fields a compile error on every ETS-backed resource.
+      select_by_default?: not selectable?(dsl),
+      description: "Lookup token for #{attribute.name}"
+    )
+    |> add_lookup_identity(field, lookup)
+    |> add_lookup_action(field, attribute)
+  end
+
+  # `keys: [:email_lookup]` ONLY.
+  #
+  # SEARCHABLE_SPEC asks for the tenant attribute to be added to the identity's keys for
+  # an attribute-multitenant resource. Ash already does that itself, in both places it
+  # matters, whenever `all_tenants?` is false — which is the default:
+  #
+  #   * the migration generator prepends the multitenancy attribute to the unique index
+  #     columns (`deps/ash_postgres/lib/migration_generator/operation.ex:142-148`)
+  #   * eager/pre-check runs the uniqueness query with `changeset.tenant`
+  #     (`deps/ash/lib/ash/actions/create/create.ex:298-307`,
+  #     `deps/ash/lib/ash/changeset/changeset.ex:3288-3305`)
+  #
+  # Listing the tenant attribute here as well would be redundant in the index (`Enum.uniq`
+  # de-dupes it) and actively wrong in the identity's contract: `keys` is what
+  # `Ash.get/3` by identity and upsert-by-identity require as *inputs*, so it would make
+  # callers pass a tenant id they already pass as the tenant.
+  #
+  # `nils_distinct?` defaults to true (`deps/ash/lib/ash/resource/identity.ex:50-54`),
+  # which is what lets any number of rows hold a nil plaintext — matching Postgres, where
+  # NULLs never conflict in a unique index.
+  # `select_by_default?: false` means "not selected unless asked for", which a data layer
+  # that cannot select attributes cannot honour. Ash's own verifier treats claiming it
+  # anyway as a DSL error rather than a no-op.
+  defp selectable?(dsl) do
+    case Ash.DataLayer.data_layer(dsl) do
+      nil -> false
+      data_layer -> Ash.DataLayer.can?(data_layer, dsl, :select)
+    end
+  end
+
+  defp add_lookup_identity({:error, error}, _field, _lookup), do: {:error, error}
+
+  defp add_lookup_identity({:ok, dsl}, %{unique?: false}, _lookup), do: {:ok, dsl}
+
+  defp add_lookup_identity({:ok, dsl}, field, lookup) do
+    Builder.add_identity(dsl, :"#{lookup}_unique", [lookup],
+      description:
+        "Unique #{field.name} (per tenant), enforced on the lookup token rather than " <>
+          "on the randomized ciphertext."
+    )
+  end
+
+  defp add_lookup_action({:error, error}, _field, _attribute), do: {:error, error}
+
+  defp add_lookup_action({:ok, dsl}, field, attribute) do
+    name = AshVault.lookup_action_name(field.name)
+
+    if Ash.Resource.Info.action(dsl, name) do
+      {:ok, dsl}
+    else
+      with {:ok, argument} <-
+             Builder.build_action_argument(field.name, attribute.type,
+               allow_nil?: false,
+               constraints: attribute.constraints,
+               sensitive?: true,
+               description: "The plaintext #{field.name} to look up."
+             ),
+           {:ok, preparation} <-
+             Builder.build_preparation({AshVault.Preparations.FilterByLookup, field: field.name}) do
+        Builder.add_action(dsl, :read, name,
+          arguments: [argument],
+          preparations: [preparation],
+          description:
+            "Find rows whose #{field.name} equals the given plaintext, by its lookup token."
+        )
+      end
     end
   end
 
@@ -207,13 +368,13 @@ defmodule AshVault.Transformers.SetupEncryption do
       |> maybe_add_lifecycle_action(
         AshVault.Info.ash_vault_key_lifecycle_rotate(dsl),
         AshVault.Actions.RotateKey,
-        :integer,
+        [returns: :integer],
         "Rotate this scope's AshVault encryption key, returning the new key version."
       )
       |> maybe_add_lifecycle_action(
         AshVault.Info.ash_vault_key_lifecycle_destroy(dsl),
         AshVault.Actions.DestroyKeys,
-        :atom,
+        [returns: :struct, constraints: [instance_of: AshVault.Erasure]],
         "Crypto-erase this scope: destroy every AshVault key version for it."
       )
       |> normalize()
@@ -224,17 +385,18 @@ defmodule AshVault.Transformers.SetupEncryption do
 
   defp add_key_lifecycle_actions({:error, error}), do: {:error, error}
 
-  defp maybe_add_lifecycle_action(dsl, {:ok, name}, implementation, returns, description)
+  defp maybe_add_lifecycle_action(dsl, {:ok, name}, implementation, return_opts, description)
        when is_atom(name) and not is_nil(name) do
-    Builder.add_action(dsl, :action, name,
-      run: {implementation, []},
-      returns: returns,
-      allow_nil?: false,
-      description: description
+    Builder.add_action(
+      dsl,
+      :action,
+      name,
+      [run: {implementation, []}, allow_nil?: false, description: description] ++ return_opts
     )
   end
 
-  defp maybe_add_lifecycle_action(dsl, _name, _implementation, _returns, _description), do: dsl
+  defp maybe_add_lifecycle_action(dsl, _name, _implementation, _return_opts, _description),
+    do: dsl
 
   defp normalize({:ok, dsl}), do: {:ok, dsl}
   defp normalize({:error, error}), do: {:error, error}

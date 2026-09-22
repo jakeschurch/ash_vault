@@ -342,7 +342,7 @@ defmodule AshVault.Acceptance.DefinitionOfDoneTest do
     rotated = create!(%{email: "rotated@example.invalid"})
     assert {:ok, %{key_version: 2}} = AshVault.Envelope.decode(blob_of(rotated.id))
 
-    assert {:ok, :ok} =
+    assert {:ok, %AshVault.Erasure{scope: @acme, destroyed_at: %DateTime{}}} =
              Organization
              |> Ash.ActionInput.for_action(:destroy_keys, %{}, tenant: @acme)
              |> Ash.run_action()

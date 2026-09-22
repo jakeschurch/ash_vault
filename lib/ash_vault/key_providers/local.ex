@@ -16,6 +16,7 @@ defmodule AshVault.KeyProviders.Local do
           meta.json          # {"current": 2, "versions": {"1": "<iso8601>", ...}}
           v1.key             # raw key bytes, mode 0600
           v2.key
+          lookup.key         # the non-rotating searchable-field secret, mode 0600
         <scope_dir>.tombstone   # presence == scope destroyed
 
   `scope_dir` is `Base.url_encode64(scope, padding: false)` — total, reversible and
@@ -188,10 +189,29 @@ defmodule AshVault.KeyProviders.Local do
   @impl AshVault.KeyProvider
   @spec key_bytes() :: pos_integer()
   def key_bytes do
-    :ash_vault
-    |> Application.get_env(__MODULE__, [])
+    __MODULE__
+    |> AshVault.KeyProvider.config()
     |> Keyword.get(:key_bytes, @default_key_bytes)
   end
+
+  @doc """
+  Initialise the configured key root, if it is not initialised already.
+
+  The **operator** setup step: exactly `init_root!/1` on the `:root` from configuration,
+  so a host application that has already written that configuration does not have to dig
+  it back out to call `init_root!/1` by hand.
+
+      MyApp.Vault.setup()
+
+  Idempotent — `init_root!/1` is — but deliberately still explicit: it is the step that
+  creates the `.ash_vault_root` sentinel, and the sentinel's whole job is to be absent
+  when the key volume failed to mount. Running it automatically on boot would create it
+  on the underlying filesystem and hand back a pristine, empty key store. It belongs in
+  a deploy step, not in a supervision tree.
+  """
+  @impl AshVault.KeyProvider
+  @spec setup() :: :ok
+  def setup, do: init_root!(resolve_root!([]))
 
   @doc """
   Create and initialise a key root: the directory itself (mode `0700`) and the
@@ -280,6 +300,20 @@ defmodule AshVault.KeyProviders.Local do
   def destroy(scope), do: destroy(__MODULE__, scope)
 
   @doc """
+  Fetch the scope's stable lookup key, minting `lookup.key` on first use.
+
+  Written with the same crash-safe ordering as a versioned key, gated by the same
+  tombstone, and shredded by the same `destroy/1` — it ends in `.key`, so
+  `shred_directory/1` overwrites it before unlinking like any other key file.
+
+  It is deliberately absent from `meta.json`: it has no version, and `rotate/1` must
+  never touch it. See `c:AshVault.KeyProvider.lookup_key/1`.
+  """
+  @impl AshVault.KeyProvider
+  @spec lookup_key(AshVault.KeyProvider.scope()) :: {:ok, binary()} | {:error, term()}
+  def lookup_key(scope), do: lookup_key(__MODULE__, scope)
+
+  @doc """
   Same as `current_key/1`, against an explicitly named instance.
   """
   @spec current_key(GenServer.server(), AshVault.KeyProvider.scope()) ::
@@ -307,6 +341,13 @@ defmodule AshVault.KeyProviders.Local do
   @spec destroy(GenServer.server(), AshVault.KeyProvider.scope()) :: :ok | {:error, term()}
   def destroy(server, scope), do: call(server, {:destroy, validate_scope!(scope)})
 
+  @doc """
+  Same as `lookup_key/1`, against an explicitly named instance.
+  """
+  @spec lookup_key(GenServer.server(), AshVault.KeyProvider.scope()) ::
+          {:ok, binary()} | {:error, term()}
+  def lookup_key(server, scope), do: call(server, {:lookup_key, validate_scope!(scope)})
+
   defp call(server, message) do
     GenServer.call(server, message)
   catch
@@ -325,7 +366,7 @@ defmodule AshVault.KeyProviders.Local do
   end
 
   defp resolve_root!(opts) do
-    config = Application.get_env(:ash_vault, __MODULE__, [])
+    config = AshVault.KeyProvider.config(__MODULE__)
 
     case Keyword.get(opts, :root) || Keyword.get(config, :root) do
       root when is_binary(root) and root != "" ->
@@ -339,9 +380,9 @@ defmodule AshVault.KeyProviders.Local do
 
             {#{inspect(__MODULE__)}, root: "/var/lib/my_app/ash_vault_keys"}
 
-        or configure it:
+        or configure it, under your own application or under `:ash_vault`:
 
-            config :ash_vault, #{inspect(__MODULE__)},
+            config :my_app, #{inspect(__MODULE__)},
               root: "/var/lib/my_app/ash_vault_keys"
 
         That directory must live outside the database backup — see the moduledoc.
@@ -462,6 +503,10 @@ defmodule AshVault.KeyProviders.Local do
     {:reply, do_destroy(state, scope), state}
   end
 
+  def handle_call({:lookup_key, scope}, _from, state) do
+    {:reply, do_lookup_key(state, scope), state}
+  end
+
   # -- operations ------------------------------------------------------------
 
   defp do_current_key(state, scope) do
@@ -552,6 +597,38 @@ defmodule AshVault.KeyProviders.Local do
         {:error, _} = error ->
           error
       end
+    end
+  end
+
+  # Minted once, then read back verbatim forever. There is deliberately no path that
+  # rewrites an existing lookup.key: every token already in the database is an HMAC
+  # under these exact bytes.
+  defp do_lookup_key(state, scope) do
+    with :absent <- tombstone_state(state, scope) do
+      path = lookup_key_path(state, scope)
+
+      case File.read(path) do
+        {:ok, key} when byte_size(key) == 0 ->
+          {:error, unavailable({:corrupt_lookup_key, path})}
+
+        {:ok, key} ->
+          {:ok, key}
+
+        {:error, reason} when reason in [:enoent, :enotdir] ->
+          mint_lookup_key(state, scope, path)
+
+        {:error, reason} ->
+          {:error, unavailable({:key_read_failed, path, reason})}
+      end
+    end
+  end
+
+  defp mint_lookup_key(state, scope, path) do
+    key = :crypto.strong_rand_bytes(state.key_bytes)
+
+    with :ok <- ensure_dir(scope_path(state, scope)),
+         :ok <- atomic_write(path, key) do
+      {:ok, key}
     end
   end
 
@@ -824,6 +901,10 @@ defmodule AshVault.KeyProviders.Local do
 
   defp key_path(state, scope, version),
     do: Path.join(scope_path(state, scope), "v#{version}.key")
+
+  # `v<n>.key` for data keys, `lookup.key` for this one: the name spaces cannot collide,
+  # so `get_key/2` can never hand the lookup key to the cipher.
+  defp lookup_key_path(state, scope), do: Path.join(scope_path(state, scope), "lookup.key")
 
   defp unavailable(reason),
     do: ProviderUnavailable.exception(provider: __MODULE__, reason: reason)

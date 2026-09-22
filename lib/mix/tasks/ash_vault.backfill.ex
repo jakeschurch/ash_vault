@@ -26,6 +26,35 @@ defmodule Mix.Tasks.AshVault.Backfill do
       mix ash_vault.backfill MyApp.Accounts.User email --all-tenants MyApp.Accounts.list_tenant_ids/0
       mix ash_vault.backfill MyApp.Accounts.User email --tenant acme --dry-run
       mix ash_vault.backfill MyApp.Accounts.User email --tenant acme --verify
+      mix ash_vault.backfill MyApp.Accounts.User email --tenant acme --lookup
+
+  ## `--lookup`
+
+  Populates the deterministic `<field>_lookup` column of a `searchable?: true` field for
+  rows that already hold ciphertext — after adding `searchable?: true` to an existing
+  encrypted field, or after deliberately re-keying the provider's lookup secret.
+
+  It reads, decrypts, normalizes, hashes, and writes **only** the token column. The
+  ciphertext is never rewritten: a fresh nonce would churn a column this mode has no
+  business touching.
+
+  > #### It cannot repair a changed `normalize:` {: .warning}
+  >
+  > AshVault encrypts the *normalized* value, so the ciphertext and the token must agree
+  > about what the row holds. Changing `normalize:` on a populated column makes them
+  > disagree, and hashing the newly normalized value would leave those rows findable under
+  > one spelling and readable as another. The task detects that and aborts, naming the row,
+  > rather than writing the inconsistency. Reconciling the two requires re-encrypting, and
+  > by this point there is no plaintext column left to re-encrypt from.
+
+  Rotating a lookup key is this task, not `mix ash_vault.rotate`. `rotate` mints a new
+  data key version and deliberately leaves every token alone — if it moved them, every
+  existing row would silently stop being findable.
+
+  Like the ciphertext backfill it is resumable and idempotent with no state file: it
+  selects only rows whose token `IS NULL` and whose ciphertext `IS NOT NULL`, so a
+  second run is a no-op. `--verify` does not apply (an HMAC is one-way, so there is
+  nothing to decrypt and compare) and is refused.
 
   ## Options
 
@@ -36,6 +65,8 @@ defmodule Mix.Tasks.AshVault.Backfill do
       --domain MODULE      Ash domain (inferred from `:ash_domains` when omitted)
       --action NAME        update action to write with (default: the primary update
                            action; it must be `require_atomic? false`)
+      --lookup             populate `<field>_lookup` tokens for rows that already have
+                           ciphertext; reads and decrypts, writes only the token column
       --verify             decrypt a sample and compare to the plaintext column; write nothing
       --dry-run            report what would be done; write nothing
       --resume-from ID     start after this primary key
@@ -68,6 +99,7 @@ defmodule Mix.Tasks.AshVault.Backfill do
   alias AshVault.Mix.Shared
 
   @switches [
+    lookup: :boolean,
     from: :string,
     batch_size: :integer,
     tenant: :string,
@@ -99,10 +131,14 @@ defmodule Mix.Tasks.AshVault.Backfill do
     tenants = Shared.tenants!(opts)
 
     if !opts[:verify] and !opts[:dry_run] do
-      Shared.confirm!(
-        "Encrypt #{inspect(resource)}.#{field} for #{length(tenants)} tenant(s)?",
-        opts
-      )
+      what =
+        if opts[:lookup] do
+          "Populate #{inspect(resource)}.#{AshVault.lookup_field_name(field)} tokens"
+        else
+          "Encrypt #{inspect(resource)}.#{field}"
+        end
+
+      Shared.confirm!("#{what} for #{length(tenants)} tenant(s)?", opts)
     end
 
     Enum.each(tenants, &run_tenant(resource, field, &1, opts))
@@ -110,6 +146,7 @@ defmodule Mix.Tasks.AshVault.Backfill do
 
   defp run_tenant(resource, field, tenant, opts) do
     engine_opts = [
+      lookup?: !!opts[:lookup],
       from: opts[:from] && String.to_atom(opts[:from]),
       action: opts[:action] && String.to_atom(opts[:action]),
       tenant: tenant,
@@ -178,6 +215,7 @@ defmodule Mix.Tasks.AshVault.Backfill do
 
   defp resume_args(tenant, stats, opts) do
     [
+      if(opts[:lookup], do: [" ", "--lookup"], else: []),
       switch("--from", opts[:from]),
       switch("--action", opts[:action]),
       switch("--domain", opts[:domain]),
@@ -197,6 +235,8 @@ defmodule Mix.Tasks.AshVault.Backfill do
       resource: payload.resource,
       field: payload.field,
       source: payload.source,
+      target: payload.target,
+      lookup: payload.lookup?,
       tenant: payload.tenant,
       scope: payload.scope,
       vault: payload.vault,

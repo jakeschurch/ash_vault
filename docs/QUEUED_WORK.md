@@ -79,13 +79,32 @@ disclaimer, and two for the `runtime.ex` redactions), 425 with postgres and open
   raw key. See `documentation/topics/threat-model.md`.
 - **Searchable fields** (`searchable?`, `unique?`) — specified in
   `documentation/topics/searchable-fields.md`, rejected by the transformer today.
-- **Example-app API friction**, six items reported by the example build. The sharpest: a
-  missing OTP app start surfaces as `ProviderUnavailable{reason: {:transport, ArgumentError}}`,
-  indistinguishable from a genuine outage. Others: provider config living under the
-  `:ash_vault` OTP key rather than the host app's; `Local` needing both a supervised child and
-  an `init_root!/1` step while `OpenBao` needs `setup/0`, with no `child_spec/1` + `setup/0`
-  pair on the behaviour to unify them; the vault being compile-time so there is no runtime
-  provider switch; and `destroy_keys` returning `{:ok, :ok}` through `Ash.run_action/1`.
-- **Four pre-existing ex_doc autolink warnings** in `lib/` doc strings (`current_key/1` is a
-  callback not a function; `UnsupportedCipher.t()` and `Ash.Resource.record()` are undefined
-  types; `Ash.Helpers.non_executable_binary_to_term/2` is `@doc false` upstream).
+- **Example-app API friction**, six items reported by the example build. **DONE**, all six:
+
+    1. A missing OTP app start is reported as `{:not_started, :req}`, with a
+       `ProviderUnavailable` message that says it is not an outage, that the server was
+       never contacted, and what to add where. Detected positively
+       (`AshVault.KeyProviders.OpenBao.transport_status/0`), never by parsing an exception
+       message — those interpolate the request, whose headers carry the token.
+    2. Optional `child_spec/1` and `setup/0` callbacks on `AshVault.KeyProvider`, with
+       `MyApp.Vault.child_specs/0` and `MyApp.Vault.setup/0` as the host-facing one-liners.
+       Optional, so third-party providers are unaffected.
+    3. Provider config may live under the host's OTP app: `AshVault.KeyProvider.config/1`
+       merges `config :my_app, Provider, ...` over `config :ash_vault, Provider, ...`. The
+       vault records the application it is compiled into and registers it on load.
+    4. `destroy_keys` returns `%AshVault.Erasure{scope:, destroyed_at:}` instead of `:ok`
+       wrapped into `{:ok, :ok}`.
+    5. Compile-time vault resolution **kept** — it is what makes the key-size check
+       possible. The two-vault + `fun/2` resolver pattern is now the documented supported
+       answer: `documentation/topics/two-vaults.md`.
+    6. The four ex_doc autolink warnings are fixed; `mix docs` is at zero warnings.
+- **Four pre-existing ex_doc autolink warnings** in `lib/` doc strings — **DONE**, see
+  above.
+
+- **Telemetry's `:scope` metadata** — resolved: the lifecycle events keep the **raw**
+  scope, because the compliance record of an erasure has to be able to name the tenant it
+  erased and a fingerprint cannot. They also carry `:scope_fingerprint`, which is a
+  convenience for handlers forwarding outward and explicitly **not** a mitigation. The
+  operations guide warns that a handler forwarding this metadata to an external service is
+  forwarding tenant identifiers. Reasoning lives in `AshVault.Telemetry`'s moduledoc and in
+  `documentation/topics/operations.md`.

@@ -77,27 +77,40 @@ database backup job. See the AshVault.KeyProviders.Local moduledoc.
 Configure it and start it:
 
 ```elixir
-# config/runtime.exs
-config :ash_vault, AshVault.KeyProviders.Local,
+# config/runtime.exs — under your own OTP application, not AshVault's
+config :my_app, AshVault.KeyProviders.Local,
   root: System.get_env("ASH_VAULT_KEY_ROOT", "priv/ash_vault_keys")
 ```
 
 ```elixir
 # lib/my_app/application.ex
 def start(_type, _args) do
-  children = [
-    MyApp.Repo,
-    AshVault.KeyProviders.Local,
-    MyAppWeb.Endpoint
-  ]
+  children =
+    [MyApp.Repo] ++ MyApp.Vault.child_specs() ++ [MyAppWeb.Endpoint]
 
   Supervisor.start_link(children, strategy: :one_for_one, name: MyApp.Supervisor)
 end
 ```
 
-`AshVault.KeyProviders.Local` never creates its own key root; if the directory or its
-`.ash_vault_root` sentinel is missing it refuses to start, which is what stops an unmounted
-key volume from looking like a pristine, empty key store.
+`MyApp.Vault.child_specs/0` answers for whichever provider the vault was built with, so
+this line does not change when you move from `Local` to `OpenBao` — `Local` is a
+`GenServer` and contributes itself, `OpenBao` is stateless HTTP and contributes nothing.
+
+The provider also needs a one-time **operator** step, which is deliberately not something
+a supervisor does on every boot. One line again, for any provider:
+
+```elixir
+# a deploy step, a release command, or a `mix my_app.setup` task
+:ok = MyApp.Vault.setup()
+```
+
+For `AshVault.KeyProviders.Local` that creates the key root and its `.ash_vault_root`
+sentinel; for `AshVault.KeyProviders.OpenBao` it mounts the KV-v2 engine that holds
+tombstones; for `AshVault.KeyProviders.Memory` it does nothing and returns `:ok`.
+
+`AshVault.KeyProviders.Local` never creates its own key root as a side effect of starting;
+if the directory or its `.ash_vault_root` sentinel is missing it refuses to start, which is
+what stops an unmounted key volume from looking like a pristine, empty key store.
 
 ## 3. Define a vault
 

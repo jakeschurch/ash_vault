@@ -89,6 +89,73 @@ defmodule AshVault.KeyProviders.OpenBaoTest do
     end
   end
 
+  describe "lookup keys" do
+    test "live in their own transit key, are stable, and never rotate", %{scope: scope} do
+      scope = scope.()
+
+      assert {:ok, key} = OpenBao.lookup_key(scope)
+      assert byte_size(key) == 32
+      assert {:ok, ^key} = OpenBao.lookup_key(scope)
+
+      # The lookup key is its own transit key, suffixed, and separate from the data key.
+      assert OpenBao.lookup_key_name(scope) == OpenBao.key_name(scope) <> "_lookup"
+
+      assert %{status: 200} =
+               raw(:get, "/v1/#{@transit_mount}/keys/#{OpenBao.lookup_key_name(scope)}")
+
+      assert {:ok, %{version: 1, key: v1}} = OpenBao.current_key(scope)
+      refute key == v1
+
+      # Rotating the data key must leave the lookup key byte-identical. This is the
+      # provider-contract half of the rotation guard.
+      assert {:ok, 2} = OpenBao.rotate(scope)
+      assert {:ok, %{version: 2, key: v2}} = OpenBao.current_key(scope)
+
+      assert {:ok, ^key} = OpenBao.lookup_key(scope)
+      refute key == v2
+
+      # And the lookup transit key itself is still at version 1: nothing rotated it.
+      assert %{status: 200, body: body} =
+               raw(:get, "/v1/#{@transit_mount}/keys/#{OpenBao.lookup_key_name(scope)}")
+
+      assert body["data"]["latest_version"] == 1
+    end
+
+    test "are per scope", %{scope: scope} do
+      a = scope.()
+      b = scope.()
+
+      assert {:ok, key_a} = OpenBao.lookup_key(a)
+      assert {:ok, key_b} = OpenBao.lookup_key(b)
+      refute key_a == key_b
+    end
+
+    test "destroy/1 deletes the lookup transit key too, and the tombstone gates it",
+         %{scope: scope} do
+      scope = scope.()
+
+      assert {:ok, _key} = OpenBao.lookup_key(scope)
+      assert {:ok, _info} = OpenBao.current_key(scope)
+
+      assert :ok = OpenBao.destroy(scope)
+
+      assert %{status: 404} =
+               raw(:get, "/v1/#{@transit_mount}/keys/#{OpenBao.lookup_key_name(scope)}")
+
+      # Never a fresh secret: erasure has to erase the ability to confirm a guess about
+      # the subject, not just the ability to decrypt.
+      assert {:error, :destroyed} = OpenBao.lookup_key(scope)
+    end
+
+    test "destroy/1 works for a scope that only ever had a lookup key", %{scope: scope} do
+      scope = scope.()
+
+      assert {:ok, _key} = OpenBao.lookup_key(scope)
+      assert :ok = OpenBao.destroy(scope)
+      assert {:error, :destroyed} = OpenBao.lookup_key(scope)
+    end
+  end
+
   describe "destruction" do
     test "destroy then current_key is :destroyed, not a fresh v1", %{scope: scope} do
       scope = scope.()

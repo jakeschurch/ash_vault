@@ -70,7 +70,9 @@ defmodule AshVault.Backfill do
           resource: module(),
           field: atom(),
           encrypted_field: atom(),
-          source: atom(),
+          lookup_field: atom() | nil,
+          lookup?: boolean(),
+          source: atom() | nil,
           primary_key: atom(),
           tenant: term(),
           domain: module() | nil,
@@ -93,9 +95,12 @@ defmodule AshVault.Backfill do
   """
   @spec plan(module(), atom(), keyword()) :: {:ok, plan()} | {:error, Exception.t()}
   def plan(resource, field, opts \\ []) do
+    lookup? = !!opts[:lookup?]
+
     with :ok <- ensure_extension(resource),
          {:ok, encrypted} <- fetch_encrypted_field(resource, field),
-         {:ok, source} <- fetch_source(resource, field, encrypted, opts),
+         :ok <- ensure_searchable(resource, field, encrypted, lookup?, opts),
+         {:ok, source} <- fetch_source(resource, field, encrypted, opts, lookup?),
          {:ok, primary_key} <- fetch_primary_key(resource),
          {:ok, action} <- fetch_action(resource, opts),
          {:ok, vault, scope} <- resolve_vault(resource, field, opts[:tenant]) do
@@ -104,6 +109,8 @@ defmodule AshVault.Backfill do
          resource: resource,
          field: field,
          encrypted_field: AshVault.encrypted_field_name(field),
+         lookup_field: lookup? && AshVault.lookup_field_name(field),
+         lookup?: lookup?,
          source: source,
          primary_key: primary_key,
          tenant: opts[:tenant],
@@ -262,10 +269,49 @@ defmodule AshVault.Backfill do
     |> pending_query(last_pk)
     |> Ash.Query.sort([{plan.primary_key, :asc}])
     |> Ash.Query.limit(plan.batch_size)
-    |> Ash.Query.select([plan.primary_key, plan.source, plan.encrypted_field])
+    |> Ash.Query.select(select_fields(plan))
     |> Ash.read(read_opts(plan))
   rescue
     error -> {:error, translate_read_error(error, plan)}
+  end
+
+  defp select_fields(%{lookup?: true} = plan),
+    do: [plan.primary_key, plan.encrypted_field, plan.lookup_field]
+
+  defp select_fields(plan), do: [plan.primary_key, plan.source, plan.encrypted_field]
+
+  # Decrypt, normalize, hash. The value is never re-encrypted: a fresh nonce would
+  # rewrite a column this mode has no business touching, and the row would then decrypt
+  # to the same value through a ciphertext nobody asked for.
+  defp encrypt_batch(%{lookup?: true, dry_run?: false} = plan, records) do
+    %{type: type, constraints: constraints} =
+      Ash.Resource.Info.calculation(plan.resource, plan.field)
+
+    Enum.reduce_while(records, {:ok, %{}, 0}, fn record, {:ok, tokens, skipped} ->
+      blob = Map.fetch!(record, plan.encrypted_field)
+
+      with {:ok, value} <-
+             AshVault.decrypt_value(plan.vault, blob, read_context(plan), type, constraints),
+           {:ok, normalized} <- AshVault.Lookup.normalize_for(plan.resource, plan.field, value),
+           :ok <- check_normalization(plan, record, value, normalized),
+           {:ok, token} <-
+             AshVault.Lookup.token_for_normalized(
+               plan.resource,
+               plan.field,
+               normalized,
+               context(plan, record)
+             ) do
+        case token do
+          nil ->
+            {:cont, {:ok, tokens, skipped + 1}}
+
+          token ->
+            {:cont, {:ok, Map.put(tokens, Map.fetch!(record, plan.primary_key), token), skipped}}
+        end
+      else
+        {:error, error} -> {:halt, {:error, error}}
+      end
+    end)
   end
 
   defp encrypt_batch(%{dry_run?: true} = plan, records) do
@@ -323,7 +369,7 @@ defmodule AshVault.Backfill do
 
             Ash.Changeset.force_change_attribute(
               changeset,
-              plan.encrypted_field,
+              write_field(plan),
               Map.fetch!(blobs, pk)
             )
           end
@@ -338,6 +384,53 @@ defmodule AshVault.Backfill do
   rescue
     error -> {:error, error}
   end
+
+  # The stored ciphertext is written from the ALREADY-normalized value
+  # (`AshVault.write_attributes/4`), so for a correctly-populated column normalizing the
+  # decrypted value again is a no-op. When it is not, the ciphertext was written under a
+  # different `normalize:` than the one configured now — and hashing the newly normalized
+  # value would leave the row findable under one spelling and readable as another, which
+  # is the exact inconsistency the single-normalization write path exists to prevent.
+  #
+  # Refusing is the honest answer. Reconciling them means re-encrypting, which is not what
+  # `--lookup` does and not something AshVault offers: there is no plaintext column left
+  # to re-encrypt from.
+  defp check_normalization(plan, record, value, normalized) do
+    case AshVault.Lookup.normalize(value, :none) do
+      # Not comparable — a field with a custom normalizer over a non-binary type. Nothing
+      # to check, and guessing would be worse than not checking.
+      {:error, _reason} ->
+        :ok
+
+      {:ok, ^normalized} ->
+        :ok
+
+      {:ok, _stored} ->
+        {:error,
+         ArgumentError.exception(
+           message:
+             "#{inspect(plan.resource)}.#{plan.field} row " <>
+               "#{inspect(Map.fetch!(record, plan.primary_key))} was encrypted under a " <>
+               "different `normalize:` than the one configured now.\n\n" <>
+               """
+               AshVault encrypts the normalized value, so the ciphertext and the token
+               must agree about what the row holds. Hashing the newly normalized value
+               here would leave this row findable under one spelling and readable as
+               another.
+
+               `--lookup` cannot fix that: reconciling them requires re-encrypting, and
+               there is no plaintext column left to re-encrypt from. Either restore the
+               previous `normalize:` setting, or re-write the affected rows through an
+               ordinary update before back-filling.
+               """
+         )}
+    end
+  end
+
+  # The ONLY column a run touches: the ciphertext for an ordinary backfill, the lookup
+  # token for `--lookup`.
+  defp write_field(%{lookup?: true} = plan), do: plan.lookup_field
+  defp write_field(plan), do: plan.encrypted_field
 
   # -- verify -----------------------------------------------------------------
 
@@ -461,9 +554,22 @@ defmodule AshVault.Backfill do
   def pending_query(plan, last_pk \\ nil) do
     plan.resource
     |> Ash.Query.new()
-    |> Ash.Query.do_filter([{plan.encrypted_field, [is_nil: true]}])
     |> then(fn query ->
-      if plan.encrypt_nil? do
+      if plan.lookup? do
+        # Resumable and idempotent on exactly the same principle as the ciphertext
+        # backfill: a row whose token is written no longer matches. Rows with no
+        # ciphertext have no plaintext to hash and would match this filter forever, so
+        # they are excluded rather than skipped per batch.
+        Ash.Query.do_filter(query, [
+          {plan.lookup_field, [is_nil: true]},
+          {plan.encrypted_field, [is_nil: false]}
+        ])
+      else
+        Ash.Query.do_filter(query, [{plan.encrypted_field, [is_nil: true]}])
+      end
+    end)
+    |> then(fn query ->
+      if plan.lookup? or plan.encrypt_nil? do
         query
       else
         Ash.Query.do_filter(query, [{plan.source, [is_nil: false]}])
@@ -484,7 +590,7 @@ defmodule AshVault.Backfill do
   Build the write-path `%AshVault.Context{}` for a row, exactly as an ordinary create or
   update would.
   """
-  @spec context(plan(), Ash.Resource.record() | nil) :: AshVault.Context.t()
+  @spec context(plan(), struct() | nil) :: AshVault.Context.t()
   def context(plan, record \\ nil) do
     changeset =
       case record do
@@ -552,7 +658,12 @@ defmodule AshVault.Backfill do
     end
   end
 
-  defp fetch_source(resource, field, encrypted, opts) do
+  # In `--lookup` mode the source IS the ciphertext column: there is no plaintext column
+  # to read, and requiring `--from` would make the operator name one that may already have
+  # been dropped by the "contract" migration.
+  defp fetch_source(_resource, _field, _encrypted, _opts, true), do: {:ok, nil}
+
+  defp fetch_source(resource, field, encrypted, opts, false) do
     case opts[:from] || encrypted.backfill_from do
       nil ->
         {:error,
@@ -584,6 +695,35 @@ defmodule AshVault.Backfill do
           true ->
             {:ok, source}
         end
+    end
+  end
+
+  defp ensure_searchable(_resource, _field, _encrypted, false, _opts), do: :ok
+
+  defp ensure_searchable(resource, field, encrypted, true, opts) do
+    cond do
+      opts[:verify?] ->
+        {:error,
+         ArgumentError.exception(
+           message:
+             "`--lookup` and `--verify` cannot be combined. A lookup token is a one-way " <>
+               "HMAC, so there is nothing to decrypt and compare; re-running `--lookup` " <>
+               "is itself the check, because it is idempotent and only touches rows whose " <>
+               "#{AshVault.lookup_field_name(field)} is still NULL."
+         )}
+
+      not encrypted.searchable? ->
+        {:error,
+         ArgumentError.exception(
+           message:
+             "#{inspect(resource)}.#{field} is not `searchable?: true`, so it has no " <>
+               "#{inspect(AshVault.lookup_field_name(field))} column to back-fill. " <>
+               "Searchable fields: " <>
+               inspect(resource |> AshVault.Info.searchable_fields() |> Enum.map(& &1.name))
+         )}
+
+      true ->
+        :ok
     end
   end
 
@@ -690,7 +830,9 @@ defmodule AshVault.Backfill do
     %{
       resource: plan.resource,
       field: plan.field,
-      source: plan.source,
+      source: plan.source || plan.encrypted_field,
+      target: write_field(plan),
+      lookup?: plan.lookup?,
       tenant: plan.tenant,
       scope: plan.scope,
       vault: plan.vault,

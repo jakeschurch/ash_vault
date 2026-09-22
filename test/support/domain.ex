@@ -13,5 +13,10 @@ defmodule AshVault.Test.Domain do
     resource(AshVault.Test.EtsNote)
     resource(AshVault.Test.EtsTicket)
     resource(AshVault.Test.EtsDynamicVaultUser)
+    resource(AshVault.Test.EtsAccount)
+    resource(AshVault.Test.EtsContact)
+    resource(AshVault.Test.EtsSecretDoc)
+    resource(AshVault.Test.SearchUser)
+    resource(AshVault.Test.EtsNoLookupDoc)
   end
 end

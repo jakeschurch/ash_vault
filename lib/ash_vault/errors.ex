@@ -23,6 +23,11 @@ defmodule AshVault.Errors do
     * `AshVault.Errors.OpaqueKeyUnsupported` — the provider returned an opaque
       `AshVault.Key` handle and the cipher can only use raw bytes; a configuration
       fault, not retryable and not tampering
+    * `AshVault.Errors.LookupUnsupported` — a `searchable?: true` field needs a lookup
+      token and the key provider has no `lookup_key/1`; a configuration fault, and
+      normally caught at compile time by `AshVault.Verifiers.VerifyVault`
+    * `AshVault.Errors.LookupNormalizationFailed` — a searchable field's `normalize:`
+      strategy returned something that is not a binary
 
   A destroyed key must never surface as `AshVault.Errors.CiphertextIntegrityFailed`:
   destruction is checked before any decryption is attempted.
@@ -172,9 +177,36 @@ defmodule AshVault.Errors.ProviderUnavailable do
   Raised when the key provider could not be reached or failed for a transient reason.
 
   Unlike the other errors in this namespace, this one is generally retryable.
+
+  The one reason that is **not** retryable is `{:not_started, app}`: an OTP application
+  the provider needs is not running. That is a deployment fault in the *host*
+  application, the backend was never contacted, and no amount of retrying will start an
+  application. It is reported here, rather than as a bare transport failure, because the
+  two are otherwise indistinguishable — see `message/1`.
   """
 
   use Splode.Error, fields: [:provider, :reason], class: :invalid
+
+  def message(%{provider: provider, reason: {:not_started, app}}) do
+    """
+    Key provider #{inspect(provider)} cannot run: the #{inspect(app)} application is not started.
+
+    This is not an outage. No request was made and the backend was never contacted — it
+    may well be perfectly healthy. Retrying will not help; start the application.
+
+      * In an application, add it to `:extra_applications` in `mix.exs`, or depend on it
+        directly so it starts with your release:
+
+            def application do
+              [extra_applications: [:logger, #{inspect(app)}]]
+            end
+
+      * In a `mix` task, a script or a release command — which configure the application
+        but do not start it — start it yourself first:
+
+            {:ok, _apps} = Application.ensure_all_started(#{inspect(app)})
+    """
+  end
 
   def message(%{provider: provider, reason: reason}) do
     """

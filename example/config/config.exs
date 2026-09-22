@@ -24,16 +24,17 @@ config :example, Example.Repo,
   database: "ash_vault_example",
   pool_size: 10
 
-# NOTE (API wart): provider configuration is read from the `:ash_vault` application
-# key, not from the host application's. An app embedding AshVault therefore has to
-# write config under someone else's OTP app name.
-config :ash_vault, AshVault.KeyProviders.OpenBao,
+# Provider configuration lives under *this* application's OTP key, not AshVault's.
+# `Example.Vault.Bao` and `Example.Vault.Local` record `:example` as they are compiled
+# and register it when they load, which is what lets `AshVault.KeyProvider.config/1`
+# look here. `config :ash_vault, AshVault.KeyProviders.OpenBao, ...` also still works.
+config :example, AshVault.KeyProviders.OpenBao,
   address: System.get_env("BAO_ADDR", "http://127.0.0.1:8200"),
   token: System.get_env("BAO_TOKEN", "ashvault-root"),
   transit_mount: "transit",
   kv_mount: "ashvault"
 
-config :ash_vault, AshVault.KeyProviders.Local,
+config :example, AshVault.KeyProviders.Local,
   # Deliberately NOT under the project directory, and never inside a PostgreSQL
   # backup. If the key directory ends up in the same tarball as the database dump,
   # crypto-erasure is defeated and this library's central promise is void.

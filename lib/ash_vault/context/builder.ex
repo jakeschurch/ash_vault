@@ -79,6 +79,32 @@ defmodule AshVault.Context.Builder do
   end
 
   @doc """
+  Build a context for a lookup-token computation from a query.
+
+  `query.tenant` wins, for the same reason `changeset.tenant` wins on the write path: it
+  is authoritative and current, while a callback context's copy was snapshotted earlier.
+  That symmetry is what makes a lookup resolve the *same* scope the matching write did —
+  and therefore what makes a query with no tenant raise `AshVault.Errors.MissingScope`
+  exactly as the write would, instead of filtering on a token nobody stored and
+  returning zero rows.
+  """
+  @spec from_query(Ash.Query.t(), atom(), map()) :: Context.t()
+  def from_query(query, field, ash_context) do
+    source_context = source_context(ash_context, query.context || %{})
+
+    %Context{
+      resource: query.resource,
+      field: field,
+      ash_context: %{
+        tenant: query.tenant || Map.get(ash_context, :tenant) || private_tenant(source_context),
+        actor: Map.get(ash_context, :actor),
+        source_context: source_context,
+        phase: :read
+      }
+    }
+  end
+
+  @doc """
   Build a context for a generic lifecycle action from its input and callback context.
 
   `Ash.Resource.Actions.Implementation.Context` has no `:resource`, so the resource comes

@@ -47,8 +47,8 @@ defmodule AshVault.Telemetry do
   |---|---|
   | `[:ash_vault, :encrypt]` | `:resource`, `:field`, `:phase` |
   | `[:ash_vault, :decrypt]` | `:resource`, `:field`, `:phase`, `:vault` |
-  | `[:ash_vault, :key, :rotate]` | `:resource`, `:field`, `:phase`, `:vault`, `:scope`, `:key_version` |
-  | `[:ash_vault, :key, :destroy]` | `:resource`, `:field`, `:phase`, `:vault`, `:scope` |
+  | `[:ash_vault, :key, :rotate]` | `:resource`, `:field`, `:phase`, `:vault`, `:scope`, `:scope_fingerprint`, `:key_version` |
+  | `[:ash_vault, :key, :destroy]` | `:resource`, `:field`, `:phase`, `:vault`, `:scope`, `:scope_fingerprint` |
 
   `:phase` is `:write` or `:read`. `:key_version` is `nil` on rotate's `:start` and the
   newly minted version on its `:stop`. `:vault` is absent from `[:ash_vault, :encrypt]`
@@ -78,14 +78,44 @@ defmodule AshVault.Telemetry do
   compliance handler must watch `:stop`, not `:exception`** — watching only `:exception`
   would miss every crypto failure AshVault has a name for.
 
+  ## The lifecycle events carry the raw scope {: .warning}
+
+  `Logger` output in `AshVault.Vault.Runtime` reports a scope as
+  `AshVault.Scope.fingerprint/1` — a truncated SHA-256 — because a scope key is
+  frequently a tenant id and therefore frequently PII. The lifecycle telemetry events do
+  **not** do the same: `[:ash_vault, :key, :rotate]` and `[:ash_vault, :key, :destroy]`
+  put the raw `:scope` in their metadata.
+
+  That asymmetry is deliberate. `[:ash_vault, :key, :destroy]` exists to be the record
+  that an erasure request was executed, and the question an auditor asks of that record
+  a year later is *which tenant*. A fingerprint cannot answer it: the raw scope is not
+  recoverable from it, and reconstructing the mapping means keeping a second table of
+  tenant-to-fingerprint — which is the tenant ids again, in a place with no retention
+  policy. A compliance log that cannot name the subject of the erasure is not a
+  compliance log. A `Logger` line, by contrast, is read by whoever is on call this
+  afternoon, and the fingerprint is enough to tell one tenant's failures from another's.
+
+  The consequence is yours to handle: **a handler that forwards this metadata to an
+  external service is forwarding tenant identifiers.** That is the same exposure the
+  `Logger` change addressed, and telemetry metadata lands in third-party APMs verbatim
+  in most handlers anybody actually writes. Both events therefore also carry
+  `:scope_fingerprint`, so a handler that forwards outward has something to forward —
+  it is a convenience for handler authors, **not** a mitigation: the raw `:scope` is
+  still sitting in the same map, and a handler that copies the metadata wholesale sends
+  it. Forward `:scope_fingerprint` and drop `:scope` explicitly, or keep the handler's
+  output somewhere you already treat as holding tenant data.
+
   ## What is never in the metadata
 
   Not the plaintext. Not the ciphertext. Not key material. Not the actor struct, not the
   changeset, not the record, and not an `AshVault.Errors` struct — only the error's module
   name, because a `MissingScope` struct describes the tenant and a `ProviderUnavailable`
-  struct carries a provider-supplied reason. Telemetry metadata is copied verbatim into
-  APM by every handler anybody actually writes; the rule here is that there must be
-  nothing in it that would matter if it were.
+  struct carries a provider-supplied reason.
+
+  Telemetry metadata is copied verbatim into APM by every handler anybody actually
+  writes, so the rule is that there must be nothing in it that would matter if it were —
+  with exactly one deliberate exception, the lifecycle events' `:scope`, argued above.
+  Everything else in this list is absolute.
 
   There is a corresponding rule for you: **a handler must not put plaintext back in.**
   `AshVault.encrypt_value/4` is called with the plaintext in scope, but it is not passed

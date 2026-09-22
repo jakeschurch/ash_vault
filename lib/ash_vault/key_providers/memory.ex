@@ -43,9 +43,10 @@ defmodule AshVault.KeyProviders.Memory do
 
   ## Destruction semantics
 
-  `destroy/1` wipes the scope's key material and records a permanent tombstone. Both
-  `current_key/1` and `get_key/2` return `{:error, :destroyed}` afterwards, for the life
-  of the process. Destroying twice is idempotent.
+  `destroy/1` wipes the scope's key material — the versioned keys and the lookup key
+  alike — and records a permanent tombstone. `current_key/1`, `get_key/2` and
+  `lookup_key/1` all return `{:error, :destroyed}` afterwards, for the life of the
+  process. Destroying twice is idempotent.
 
   ## Scopes
 
@@ -84,8 +85,8 @@ defmodule AshVault.KeyProviders.Memory do
   @impl AshVault.KeyProvider
   @spec key_bytes() :: pos_integer()
   def key_bytes do
-    :ash_vault
-    |> Application.get_env(__MODULE__, [])
+    __MODULE__
+    |> AshVault.KeyProvider.config()
     |> Keyword.get(:key_bytes, @default_key_bytes)
   end
 
@@ -121,6 +122,16 @@ defmodule AshVault.KeyProviders.Memory do
   def destroy(scope), do: call(__MODULE__, {:destroy, validate_scope!(scope)})
 
   @doc """
+  Fetch the scope's stable lookup key, minting it on first use.
+
+  A second map, never touched by `rotate/1` and wiped by `destroy/1`. See
+  `c:AshVault.KeyProvider.lookup_key/1` for why it must not move.
+  """
+  @impl AshVault.KeyProvider
+  @spec lookup_key(AshVault.KeyProvider.scope()) :: {:ok, binary()} | {:error, term()}
+  def lookup_key(scope), do: call(__MODULE__, {:lookup_key, validate_scope!(scope)})
+
+  @doc """
   Same as `current_key/1`, against an explicitly named instance.
   """
   @spec current_key(GenServer.server(), AshVault.KeyProvider.scope()) ::
@@ -148,6 +159,13 @@ defmodule AshVault.KeyProviders.Memory do
   @spec destroy(GenServer.server(), AshVault.KeyProvider.scope()) :: :ok | {:error, term()}
   def destroy(server, scope), do: call(server, {:destroy, validate_scope!(scope)})
 
+  @doc """
+  Same as `lookup_key/1`, against an explicitly named instance.
+  """
+  @spec lookup_key(GenServer.server(), AshVault.KeyProvider.scope()) ::
+          {:ok, binary()} | {:error, term()}
+  def lookup_key(server, scope), do: call(server, {:lookup_key, validate_scope!(scope)})
+
   defp call(server, message) do
     GenServer.call(server, message)
   catch
@@ -171,6 +189,7 @@ defmodule AshVault.KeyProviders.Memory do
      %{
        keys: %{},
        current: %{},
+       lookup: %{},
        destroyed: MapSet.new(),
        key_bytes: Keyword.get(opts, :key_bytes, key_bytes())
      }}
@@ -218,11 +237,30 @@ defmodule AshVault.KeyProviders.Memory do
     end
   end
 
+  # `rotate/1` deliberately has no clause here: the lookup key is minted once and never
+  # moves. Rotating it would make every token already in the database stop matching,
+  # with nothing raised anywhere.
+  def handle_call({:lookup_key, scope}, _from, state) do
+    if destroyed?(state, scope) do
+      {:reply, {:error, :destroyed}, state}
+    else
+      case Map.fetch(state.lookup, scope) do
+        {:ok, key} ->
+          {:reply, {:ok, key}, state}
+
+        :error ->
+          key = :crypto.strong_rand_bytes(state.key_bytes)
+          {:reply, {:ok, key}, %{state | lookup: Map.put(state.lookup, scope, key)}}
+      end
+    end
+  end
+
   def handle_call({:destroy, scope}, _from, state) do
     state = %{
       state
       | keys: Map.delete(state.keys, scope),
         current: Map.delete(state.current, scope),
+        lookup: Map.delete(state.lookup, scope),
         destroyed: MapSet.put(state.destroyed, scope)
     }
 
@@ -234,7 +272,7 @@ defmodule AshVault.KeyProviders.Memory do
   @impl GenServer
   def format_status(status) do
     Map.update(status, :state, nil, fn
-      %{} = state -> %{state | keys: :redacted}
+      %{} = state -> %{state | keys: :redacted, lookup: :redacted}
       other -> other
     end)
   end

@@ -17,7 +17,7 @@ defmodule AshVault.Serializer do
     * a compressed external term (`<<131, 80, ...>>`) is refused outright with
       `AshVault.Errors.InvalidCiphertext`. AshVault never writes one, and `:safe` does
       not stop a decompression bomb
-    * decoding goes through `Ash.Helpers.non_executable_binary_to_term/2` with `:safe`,
+    * decoding goes through Ash's `non_executable_binary_to_term` helper with `:safe`,
       which blocks atom interning and funs/refs/ports
     * the decoded term is then cast with `Ash.Type.cast_from_embedded/3`
 

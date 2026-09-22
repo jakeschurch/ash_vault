@@ -155,6 +155,7 @@ defmodule AshVault.KeyProviders.OpenBao do
   `AshVault.Errors.ProviderUnavailable` and never provisions it, because an empty,
   freshly created tombstone store reports every erased scope as intact.
   """
+  @impl AshVault.KeyProvider
   @spec setup() :: :ok | {:error, Exception.t()}
   def setup, do: ensure_kv_mount()
 
@@ -225,9 +226,40 @@ defmodule AshVault.KeyProviders.OpenBao do
   end
 
   @doc """
+  Fetch the scope's stable lookup key from its own, separate transit key.
+
+  The lookup key lives at `<key_name>_lookup` — a second exportable transit key that is
+  **never rotated**, so version 1 is always the version exported. `destroy/1` deletes it
+  alongside the data key, and the same tombstone gates it.
+
+  `rotate/1` deliberately does not touch it. See `c:AshVault.KeyProvider.lookup_key/1`
+  for what rotating it would silently break.
+  """
+  @impl AshVault.KeyProvider
+  @spec lookup_key(AshVault.KeyProvider.scope()) :: {:ok, binary()} | {:error, term()}
+  def lookup_key(scope) do
+    name = lookup_key_name(scope)
+
+    with :absent <- check_tombstone(scope),
+         {:ok, _meta} <- meta_or_create(name) do
+      export(name, 1)
+    end
+  end
+
+  @doc """
+  The transit key name holding a scope's lookup key.
+
+      iex> AshVault.KeyProviders.OpenBao.lookup_key_name("tenant_42")
+      "ashvault_dGVuYW50XzQy_lookup"
+  """
+  @spec lookup_key_name(AshVault.KeyProvider.scope()) :: String.t()
+  def lookup_key_name(scope), do: key_name(scope) <> "_lookup"
+
+  @doc """
   Irreversibly destroy every key version for a scope and record a tombstone.
 
-  Returns `:ok` only when both the transit delete and the tombstone write succeeded.
+  Returns `:ok` only when the transit delete of both the data key and the lookup key,
+  and the tombstone write, all succeeded.
   """
   @impl AshVault.KeyProvider
   @spec destroy(AshVault.KeyProvider.scope()) :: :ok | {:error, term()}
@@ -236,7 +268,12 @@ defmodule AshVault.KeyProviders.OpenBao do
 
     case check_tombstone(scope) do
       :absent ->
-        with :ok <- delete_transit_key(name), do: write_tombstone(scope)
+        with :ok <- delete_transit_key(name),
+             # Erasure must be total. A surviving lookup key would let anyone holding it
+             # keep confirming guesses about a subject whose data was "destroyed".
+             :ok <- delete_transit_key(lookup_key_name(scope)) do
+          write_tombstone(scope)
+        end
 
       {:error, :destroyed} ->
         :ok
@@ -601,9 +638,15 @@ defmodule AshVault.KeyProviders.OpenBao do
   # headers hold the token. Everything becomes `ProviderUnavailable`, carrying only the
   # kind and reason.
   defp perform(options) do
-    case options |> Req.new() |> Req.request() do
-      {:ok, response} -> {:ok, response}
-      {:error, exception} -> {:error, unavailable(transport_reason(exception))}
+    case transport_status() do
+      :ready ->
+        case options |> Req.new() |> Req.request() do
+          {:ok, response} -> {:ok, response}
+          {:error, exception} -> {:error, unavailable(transport_reason(exception))}
+        end
+
+      {:not_started, app} ->
+        {:error, unavailable({:not_started, app})}
     end
   rescue
     exception -> {:error, unavailable(transport_reason(exception))}
@@ -612,10 +655,69 @@ defmodule AshVault.KeyProviders.OpenBao do
     :throw, _value -> {:error, unavailable({:transport, :throw})}
   end
 
+  @doc """
+  Whether the HTTP transport this provider needs is actually running.
+
+  A missing OTP application is **not** an outage, and reporting it as one is the single
+  most expensive confusion this module can cause. With `:req` unstarted, every call here
+  used to come back as
+
+      %ProviderUnavailable{reason: {:transport, ArgumentError}}
+
+  which is byte-for-byte what a genuinely unreachable OpenBao looks like — so an
+  operator pages whoever owns the secrets infrastructure, over a missing line in
+  `extra_applications`. `ArgumentError` is `Finch`'s registry lookup failing
+  (`unknown registry: Req.Finch`); no socket was ever opened and OpenBao was never
+  asked anything.
+
+  The check is positive and cheap: `Req`'s default pool is a supervisor registered under
+  the name `Req.Finch`, so a live pid there settles it in one `Process.whereis/1` with
+  no scan of the application controller. Only when that name is unregistered — which is
+  the broken case, and also the case for an application that has pointed `Req` at a pool
+  of its own — does it fall back to asking which applications are running.
+
+  Deliberately **not** done by matching on the exception's message: a `Req` step can
+  raise an `ArgumentError` for reasons that have nothing to do with a missing
+  application, and this module's rule is that an exception's message never travels into
+  an error struct, because several `Req`/`Finch` messages interpolate the request, whose
+  headers carry the token.
+
+  Public so the three-way distinction — running, `:req` missing, `:finch` missing — can
+  be asserted without stopping an application out from under the test suite.
+  """
+  @doc since: "0.1.0"
+  @spec transport_status() :: :ready | {:not_started, :req | :finch}
+  def transport_status do
+    cond do
+      is_pid(Process.whereis(Req.Finch)) -> :ready
+      # `:req` first, and it is the actionable one: starting `:req` starts `:finch`
+      # with it, so naming `:finch` to someone who is missing both sends them to fix
+      # the wrong dependency.
+      not started?(:req) -> {:not_started, :req}
+      not started?(:finch) -> {:not_started, :finch}
+      # `:req` is up and has been pointed at a pool that is not `Req.Finch`. Nothing to
+      # report: let the request run and fail on its own terms if it is going to.
+      true -> :ready
+    end
+  end
+
+  defp started?(app), do: List.keymember?(Application.started_applications(), app, 0)
+
   # Only the exception's *kind* and reason travel into the error struct — never the
   # request, whose headers carry the token, and never the exception's message, which for
   # several Req/Finch errors interpolates the request.
   defp transport_reason(%Req.TransportError{reason: reason}), do: {:transport, reason}
+
+  # The exception that a missing `:req`/`:finch` produces, caught here as well as in the
+  # preflight: an application can stop between the two, and a custom pool name makes the
+  # preflight deliberately permissive.
+  defp transport_reason(%ArgumentError{}) do
+    case transport_status() do
+      {:not_started, app} -> {:not_started, app}
+      :ready -> {:transport, ArgumentError}
+    end
+  end
+
   defp transport_reason(%{__struct__: module}), do: {:transport, module}
   defp transport_reason(_), do: :transport_error
 
@@ -661,7 +763,7 @@ defmodule AshVault.KeyProviders.OpenBao do
 
   # ── configuration ──────────────────────────────────────────────────────────────
 
-  defp config, do: Application.get_env(:ash_vault, __MODULE__, [])
+  defp config, do: AshVault.KeyProvider.config(__MODULE__)
 
   defp address, do: Keyword.get(config(), :address) || @default_address
 

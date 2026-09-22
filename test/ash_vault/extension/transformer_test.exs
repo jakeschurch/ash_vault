@@ -156,7 +156,11 @@ defmodule AshVault.Extension.TransformerTest do
 
       assert destroy.type == :action
       assert destroy.run == {AshVault.Actions.DestroyKeys, []}
-      assert destroy.returns == Ash.Type.Atom
+
+      # Deliberately not `Ash.Type.Atom` returning `:ok`, which `Ash.run_action/1`
+      # wrapped into the eyebrow-raising `{:ok, :ok}`.
+      assert destroy.returns == Ash.Type.Struct
+      assert destroy.constraints[:instance_of] == AshVault.Erasure
     end
 
     test "no lifecycle actions on a resource that is not the scope owner" do

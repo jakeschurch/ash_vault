@@ -174,6 +174,86 @@ defmodule AshVault.KeyProviders.LocalTest do
     end
   end
 
+  describe "lookup keys" do
+    test "are minted once and never move, across a rotation or a restart", %{
+      provider: {Local, name},
+      root: root
+    } do
+      scope = "lookup_scope"
+
+      assert {:ok, key} = Local.lookup_key(name, scope)
+      assert byte_size(key) == 32
+      assert {:ok, ^key} = Local.lookup_key(name, scope)
+
+      assert {:ok, %{version: 1}} = Local.current_key(name, scope)
+      assert {:ok, 2} = Local.rotate(name, scope)
+      assert {:ok, ^key} = Local.lookup_key(name, scope)
+
+      # Same bytes after a process restart: the secret is on disk, not in state.
+      restart(name, root)
+      assert {:ok, ^key} = Local.lookup_key(name, scope)
+    end
+
+    test "live in lookup.key, beside \u2014 and never inside \u2014 the versioned metadata", %{
+      provider: {Local, name},
+      root: root
+    } do
+      scope = "lookup_layout"
+      assert {:ok, _key} = Local.lookup_key(name, scope)
+      assert {:ok, _info} = Local.current_key(name, scope)
+
+      dir = Path.join(root, Local.scope_dir(scope))
+      assert File.regular?(Path.join(dir, "lookup.key"))
+
+      meta = dir |> Path.join("meta.json") |> File.read!() |> Jason.decode!()
+      refute meta["versions"] |> Map.keys() |> Enum.any?(&(&1 =~ "lookup"))
+    end
+
+    test "a scope holding ONLY a lookup key still mints version 1 normally", %{
+      provider: {Local, name}
+    } do
+      scope = "lookup_only"
+
+      assert {:ok, _key} = Local.lookup_key(name, scope)
+
+      # The scope directory now exists with no meta.json. `read_meta/2` must still read
+      # that as an absent scope rather than corruption.
+      assert {:ok, %{version: 1}} = Local.current_key(name, scope)
+    end
+
+    test "are separate from every data key version", %{provider: {Local, name}} do
+      scope = "lookup_separate"
+
+      assert {:ok, lookup} = Local.lookup_key(name, scope)
+      assert {:ok, %{key: v1}} = Local.current_key(name, scope)
+      assert {:ok, 2} = Local.rotate(name, scope)
+      assert {:ok, %{key: v2}} = Local.current_key(name, scope)
+
+      refute lookup == v1
+      refute lookup == v2
+    end
+
+    test "are per scope", %{provider: {Local, name}} do
+      assert {:ok, a} = Local.lookup_key(name, "lookup_a")
+      assert {:ok, b} = Local.lookup_key(name, "lookup_b")
+      refute a == b
+    end
+
+    test "are destroyed by destroy/1, shredded and tombstoned like any other key", %{
+      provider: {Local, name},
+      root: root
+    } do
+      scope = "lookup_destroyed"
+      assert {:ok, _key} = Local.lookup_key(name, scope)
+      assert :ok = Local.destroy(name, scope)
+
+      refute File.exists?(Path.join([root, Local.scope_dir(scope), "lookup.key"]))
+      # A fresh secret here would let anyone holding it keep confirming guesses about a
+      # subject whose data was "destroyed".
+      assert {:error, :destroyed} = Local.lookup_key(name, scope)
+    end
+  end
+
   describe "scope_dir/1" do
     test "is reversible and filesystem safe" do
       for scope <- ["acme", "a/b", "tenant with spaces", "ünïcode", <<0, 255, 128>>] do

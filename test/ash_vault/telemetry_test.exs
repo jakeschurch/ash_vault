@@ -305,6 +305,35 @@ defmodule AshVault.TelemetryTest do
       refute_leaks(metadata, secrets)
     end
 
+    test "carries the raw scope AND a fingerprint, and the two agree" do
+      create!()
+      clear!()
+
+      assert :ok = AshVault.destroy_keys!(Vault, @tenant, lifecycle_context())
+
+      {_, metadata} = only([:ash_vault, :key, :destroy, :stop])
+
+      # The raw scope stays, deliberately: a compliance record of an erasure has to be
+      # able to name the tenant it erased, and a fingerprint cannot. The fingerprint is
+      # there so a handler forwarding to an APM has something safe to forward — a
+      # convenience, not a mitigation. See `AshVault.Telemetry`.
+      assert metadata.scope == @tenant
+      assert metadata.scope_fingerprint == AshVault.Scope.fingerprint(@tenant)
+      assert metadata.scope_fingerprint =~ ~r/^sha256:[0-9a-f]{12}$/
+      refute metadata.scope_fingerprint =~ @tenant
+    end
+
+    test "rotate carries the fingerprint too" do
+      create!()
+      clear!()
+
+      assert {:ok, 2} = AshVault.rotate_key!(Vault, @tenant, lifecycle_context())
+
+      {_, metadata} = only([:ash_vault, :key, :rotate, :stop])
+      assert metadata.scope == @tenant
+      assert metadata.scope_fingerprint == AshVault.Scope.fingerprint(@tenant)
+    end
+
     test "a raise inside the span is an :exception, and there is no :stop" do
       create!()
       :ok = AshVault.destroy_keys!(Vault, @tenant)

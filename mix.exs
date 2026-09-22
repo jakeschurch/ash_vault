@@ -29,6 +29,7 @@ defmodule AshVault.MixProject do
         "documentation/topics/rotation.md",
         "documentation/topics/crypto-erasure.md",
         "documentation/topics/migrating-from-plaintext.md",
+        "documentation/topics/two-vaults.md",
         "documentation/topics/searchable-fields.md",
         "documentation/topics/threat-model.md",
         "documentation/topics/operations.md",

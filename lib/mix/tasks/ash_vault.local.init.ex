@@ -72,8 +72,14 @@ defmodule Mix.Tasks.AshVault.Local.Init do
   defp resolve_root!([root]) when is_binary(root) and root != "", do: root
 
   defp resolve_root!([]) do
-    :ash_vault
-    |> Application.get_env(Local, [])
+    # This task reads provider config without going through a vault, so nothing has
+    # registered the host application yet — a vault does that when it loads, and no vault
+    # is on this call path. Mix knows the project's application; register it here so
+    # `config :my_app, AshVault.KeyProviders.Local, root: ...` is found.
+    AshVault.KeyProvider.register_otp_app(Mix.Project.config()[:app])
+
+    Local
+    |> AshVault.KeyProvider.config()
     |> Keyword.get(:root)
     |> case do
       root when is_binary(root) and root != "" ->
@@ -85,9 +91,9 @@ defmodule Mix.Tasks.AshVault.Local.Init do
 
             mix ash_vault.local.init /var/lib/my_app/ash_vault_keys
 
-        or configure one:
+        or configure one, under your own application or under `:ash_vault`:
 
-            config :ash_vault, #{inspect(Local)}, root: "/var/lib/my_app/ash_vault_keys"
+            config :my_app, #{inspect(Local)}, root: "/var/lib/my_app/ash_vault_keys"
         """)
     end
   end

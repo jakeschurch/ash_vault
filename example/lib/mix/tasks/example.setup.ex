@@ -14,12 +14,15 @@ defmodule Mix.Tasks.Example.Setup do
        `encrypted_phone` `bytea`. AshVault removes the plaintext attribute from the
        resource, so no data layer can write a plaintext column.
 
-    2. With `ASHVAULT_PROVIDER=local`, the key root is initialised. The provider
+    2. The key provider's operator setup step runs — `Example.Vault.current().setup()`,
+       one line for either provider, because the vault knows which one it has.
+
+       With `ASHVAULT_PROVIDER=local` that initialises the key root. The provider
        refuses to start on a directory it did not see initialised — that is what
        stops an unmounted key volume from looking like a pristine, never-used key
        store, which would silently mint fresh keys and orphan every existing row.
 
-    3. With OpenBao, the KV-v2 mount that holds tombstones is created. The provider
+       With OpenBao it creates the KV-v2 mount that holds tombstones. The provider
        deliberately never creates it on a read: a missing mount answers 404, exactly
        like "no tombstone here", so auto-provisioning it on read would be fail-open —
        a freshly created empty mount makes every erased tenant look intact again.
@@ -54,32 +57,25 @@ defmodule Mix.Tasks.Example.Setup do
   end
 
   defp prepare_key_provider! do
-    case Example.Vault.key_provider() do
-      AshVault.KeyProviders.Local ->
-        root = Keyword.fetch!(Application.get_env(:ash_vault, AshVault.KeyProviders.Local), :root)
-        AshVault.KeyProviders.Local.init_root!(root)
-        Mix.shell().info("initialised Local key root at #{root} (mode 0700)")
+    # The OpenBao provider speaks HTTP through `req`, whose Finch pool has to be running.
+    # A Mix task only configures the application; it does not start it. Forgetting this
+    # is no longer mistakable for an outage — AshVault reports `{:not_started, :req}`
+    # and says what to do — but there is nothing to report if we just start it.
+    {:ok, _apps} = Application.ensure_all_started(:req)
 
-      AshVault.KeyProviders.OpenBao ->
-        # The provider speaks HTTP through `req`, whose Finch pool has to be running.
-        # A Mix task only configures the app; it does not start it.
-        {:ok, _apps} = Application.ensure_all_started(:req)
+    # One line, whichever provider is configured: `setup/0` initialises the Local key
+    # root, mounts OpenBao's KV-v2 tombstone engine, and is `:ok` for a provider that
+    # needs neither.
+    case Example.Vault.current().setup() do
+      :ok ->
+        Mix.shell().info("key provider ready: #{inspect(Example.Vault.key_provider())}")
 
-        case AshVault.KeyProviders.OpenBao.setup() do
-          :ok ->
-            Mix.shell().info("OpenBao KV-v2 tombstone mount is ready")
+      {:error, error} ->
+        Mix.raise("""
+        could not prepare #{inspect(Example.Vault.key_provider())}:
 
-          other ->
-            Mix.raise("""
-            could not prepare OpenBao: #{inspect(other)}
-
-            Is the dev server up?
-              curl -s http://127.0.0.1:8200/v1/sys/health
-            """)
-        end
-
-      other ->
-        Mix.shell().info("no setup needed for #{inspect(other)}")
+        #{Exception.message(error)}
+        """)
     end
   end
 

@@ -51,6 +51,26 @@ defmodule AshVault.Test.Db do
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS search_users (
+      id uuid PRIMARY KEY,
+      org_id uuid NOT NULL,
+      encrypted_email bytea,
+      email_lookup bytea
+    )
+    """,
+    # `unique?: true` on a searchable field. The tenant column is part of the index
+    # because Ash puts it there itself for an attribute-multitenant resource whenever the
+    # identity is not `all_tenants?`
+    # (deps/ash_postgres/lib/migration_generator/operation.ex:142-148) — the identity
+    # AshVault generates lists only `[:email_lookup]`.
+    #
+    # Postgres already ignores NULLs in a unique index, which is the same thing
+    # `nils_distinct?: true` means to Ash: any number of rows may hold a nil email.
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS search_users_email_lookup_unique_index
+      ON search_users (org_id, email_lookup)
+    """,
+    """
     CREATE TABLE IF NOT EXISTS acceptance_users (
       id uuid PRIMARY KEY,
       org_id uuid NOT NULL,
@@ -101,7 +121,7 @@ defmodule AshVault.Test.Db do
   @spec reset!() :: :ok
   def reset! do
     AshVault.Test.Repo.query!(
-      "TRUNCATE users, contacts, legacy_users, organizations, acceptance_users"
+      "TRUNCATE users, contacts, legacy_users, organizations, acceptance_users, search_users"
     )
 
     :ok

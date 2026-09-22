@@ -60,6 +60,36 @@ defmodule AshVault.Info do
   end
 
   @doc """
+  Every searchable field of a resource, as `%AshVault.Encrypted{}` structs.
+  """
+  @spec searchable_fields(module() | Spark.Dsl.t()) :: [Encrypted.t()]
+  def searchable_fields(resource_or_dsl) do
+    resource_or_dsl |> encrypted_fields() |> Enum.filter(& &1.searchable?)
+  end
+
+  @doc """
+  Whether one field of a resource is searchable.
+  """
+  @spec searchable?(module() | Spark.Dsl.t(), atom()) :: boolean()
+  def searchable?(resource_or_dsl, name) do
+    match?(%Encrypted{searchable?: true}, encrypted_field(resource_or_dsl, name))
+  end
+
+  @doc """
+  The `normalize:` strategy configured for a field, defaulting to `:none`.
+  """
+  @spec normalize(module() | Spark.Dsl.t(), atom() | Encrypted.t()) ::
+          AshVault.Lookup.normalize()
+  def normalize(_resource_or_dsl, %Encrypted{normalize: normalize}), do: normalize
+
+  def normalize(resource_or_dsl, name) when is_atom(name) do
+    case encrypted_field(resource_or_dsl, name) do
+      nil -> :none
+      field -> field.normalize
+    end
+  end
+
+  @doc """
   Whether `nil` is encrypted for a field, resolving the per-field override against the
   section-level default.
   """

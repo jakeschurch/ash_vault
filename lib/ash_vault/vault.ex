@@ -21,6 +21,9 @@ defmodule AshVault.Vault do
     * `:scope` — an `AshVault.Scope`, defaults to `AshVault.Scopes.AshTenant`
     * `:rotation_policy` — an `AshVault.RotationPolicy`, defaults to
       `AshVault.RotationPolicies.Manual`
+    * `:otp_app` — the OTP application whose config key this vault's key provider may be
+      configured under. Defaults to the application the vault module is compiled into,
+      which is almost always what you want; see below.
     * `:cache` — wrap the key provider in `AshVault.KeyProviders.Cached`. **Defaults to
       `false`** and should stay that way unless you mean it; see below.
 
@@ -66,6 +69,55 @@ defmodule AshVault.Vault do
   Caching `AshVault.KeyProviders.Memory` is refused with a warning — it is already an
   in-memory map, so a cache in front of it is a second copy and a second eviction path
   for no benefit.
+
+  ## Starting and setting up the key provider
+
+  Providers differ in what they need before they can serve a key —
+  `AshVault.KeyProviders.Local` wants a supervised process *and* an initialised key
+  root, `AshVault.KeyProviders.OpenBao` wants no process and a mounted KV engine,
+  `AshVault.KeyProviders.Memory` wants a process and nothing else — and a host
+  application should not have to know which. The vault does, so it answers for its
+  provider:
+
+      # lib/my_app/application.ex
+      children = [MyApp.Repo] ++ MyApp.Vault.child_specs()
+
+      # a deploy step, a release command, or `mix my_app.setup`
+      :ok = MyApp.Vault.setup()
+
+  `child_specs/0` includes the generated `CachedKeyProvider` when `cache:` is set, and
+  the provider underneath it when that one is supervised too, innermost first.
+  `setup/0` returns `:ok` for a provider that needs none. Neither is a `case` you write.
+
+  Both rest on optional `AshVault.KeyProvider` callbacks — `c:AshVault.KeyProvider.child_spec/1`
+  and `c:AshVault.KeyProvider.setup/0` — so a third-party provider that defines neither
+  keeps working unchanged and simply contributes nothing.
+
+  ## Where provider configuration lives
+
+  Key provider configuration is per provider **module**, and may be written under your
+  own OTP application:
+
+      config :my_app, AshVault.KeyProviders.OpenBao, address: "http://127.0.0.1:8200"
+
+  `use AshVault.Vault` records the OTP application this vault module is compiled into
+  and registers it when the module loads, which is what lets
+  `AshVault.KeyProvider.config/1` find that key. Pass `otp_app:` to name a different
+  one. The original form, `config :ash_vault, AshVault.KeyProviders.OpenBao, ...`, still
+  works and is the base the host application's config is merged over.
+
+  ## One vault per application
+
+  A vault is resolved at compile time, deliberately: it is what makes
+  `verify_key_sizes!/2` possible at all, and it keeps the four provider call sites in
+  `AshVault.Vault.Runtime` to a plain module call. There is no runtime provider switch,
+  and one vault per application is the shape this is built for.
+
+  When you genuinely need two — demonstrating two providers, or migrating between
+  them — define two vault modules and resolve between them with the `fun/2` vault form
+  the DSL already accepts. See
+  [Two vaults in one application](two-vaults.md) for the worked pattern and the one
+  hazard it carries.
   """
 
   @doc "Encrypt a plaintext for a context, returning an encoded envelope."
@@ -84,6 +136,12 @@ defmodule AshVault.Vault do
   @callback __ash_vault__(:key_provider | :cipher | :envelope | :scope | :rotation_policy) ::
               module()
 
+  @doc "The child specifications this vault's key provider needs supervised."
+  @callback child_specs() :: [module()]
+
+  @doc "Run the operator setup step this vault's key provider needs, if it has one."
+  @callback setup() :: :ok | {:error, term()}
+
   @doc """
   Compile-time guard: the key provider's key size must match the cipher's.
 
@@ -97,8 +155,9 @@ defmodule AshVault.Vault do
   The check is deliberately conservative. It fires only when it can positively
   determine a mismatch: both modules must already be compiled and both must export
   `key_bytes/0`. A provider whose size depends on runtime configuration —
-  `AshVault.KeyProviders.OpenBao` reads `:key_type` from `Application.get_env/3`, which
-  operators set in `runtime.exs` — cannot be settled at compile time, and a provider
+  `AshVault.KeyProviders.OpenBao` reads `:key_type` through
+  `AshVault.KeyProvider.config/1`, which operators set in `runtime.exs` — cannot be
+  settled at compile time, and a provider
   module may not even be compiled yet when the vault macro expands. Anything
   unresolvable passes here; `AshVault.Vault.Runtime` raises
   `AshVault.Errors.KeySizeMismatch` at the point of use, which is what actually carries
@@ -257,6 +316,24 @@ defmodule AshVault.Vault do
     module
   end
 
+  @doc """
+  The OTP application a vault module is being compiled into.
+
+  Used as the default for the `:otp_app` option, so that
+  `config :my_app, AshVault.KeyProviders.OpenBao, ...` works with no further ceremony.
+  Returns `nil` outside a Mix build — in which case only
+  `config :ash_vault, AshVault.KeyProviders.OpenBao, ...` and an explicit
+  `config :ash_vault, otp_app: :my_app` are consulted.
+  """
+  @spec compiling_otp_app() :: atom() | nil
+  def compiling_otp_app do
+    if Code.ensure_loaded?(Mix.Project) and function_exported?(Mix.Project, :config, 0) do
+      Mix.Project.config()[:app]
+    end
+  rescue
+    _error -> nil
+  end
+
   @doc false
   defmacro __using__(opts) do
     quote bind_quoted: [opts: opts] do
@@ -320,6 +397,43 @@ defmodule AshVault.Vault do
       @impl AshVault.Vault
       @spec destroy!(term()) :: :ok
       def destroy!(scope), do: AshVault.Vault.Runtime.destroy!(scope, @ash_vault_opts)
+
+      @ash_vault_otp_app opts[:otp_app] || AshVault.Vault.compiling_otp_app()
+
+      # A provider config read is only ever reached by way of a vault, and reaching a
+      # vault loads it — so registering here is enough for `AshVault.KeyProvider.config/1`
+      # to know which application key to look under, with no boot-order requirement on
+      # the host.
+      @on_load :__ash_vault_register_otp_app__
+
+      @doc false
+      @spec __ash_vault_register_otp_app__() :: :ok
+      def __ash_vault_register_otp_app__ do
+        AshVault.KeyProvider.register_otp_app(@ash_vault_otp_app)
+      rescue
+        _error -> :ok
+      end
+
+      @doc """
+      The child specifications this vault's key provider needs supervised.
+
+          children = [MyApp.Repo] ++ #{inspect(__MODULE__)}.child_specs()
+
+      Empty for a provider that owns no process.
+      """
+      @impl AshVault.Vault
+      @spec child_specs() :: [module()]
+      def child_specs, do: AshVault.KeyProvider.children(__MODULE__)
+
+      @doc """
+      Run the operator setup step this vault's key provider needs.
+
+      `:ok` for a provider that needs none, so this is safe to call unconditionally from
+      a deploy step.
+      """
+      @impl AshVault.Vault
+      @spec setup() :: :ok | {:error, term()}
+      def setup, do: AshVault.KeyProvider.setup(__MODULE__)
 
       @doc "Introspect this vault's compile-time configuration."
       @impl AshVault.Vault

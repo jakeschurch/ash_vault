@@ -31,7 +31,10 @@ defmodule AshVault do
   ## Limitations
 
     * The decrypt calculation is `filterable?: false, sortable?: false` — randomized AEAD
-      ciphertext supports neither. Searchable fields (lookup tokens) are post-v1.
+      ciphertext supports neither. For **equality** searching, `encrypt :email,
+      searchable?: true` adds a deterministic `email_lookup` HMAC column beside the
+      ciphertext; see `AshVault.Lookup` and `AshVault.Query`. Ordering and prefix
+      matching remain impossible, by construction.
     * Encrypted attributes on *embedded* resources require ash >= 3.26, which is when
       `Ash.Type.Binary` started handling its own base64 encoding.
   """
@@ -57,13 +60,30 @@ defmodule AshVault do
 
   Existing values keep decrypting with their original key version; new writes use the
   new one.
+
+  > #### Rotation does not touch lookup tokens {: .info}
+  >
+  > A searchable field's `<field>_lookup` token is an HMAC under the provider's
+  > **lookup key**, which is a separate, non-rotating, per-scope secret
+  > (`c:AshVault.KeyProvider.lookup_key/1`). Rotating the data key leaves every stored
+  > token valid and every query still matching, which is the whole point: if rotation
+  > moved the tokens, existing rows would silently stop being findable and `unique?`
+  > would silently stop preventing duplicates.
+  >
+  > Changing a lookup key is therefore a **backfill**, not a rotation —
+  > `mix ash_vault.backfill --lookup` — and there is deliberately no API for it here.
   """
   @spec rotate_key!(module(), term(), AshVault.Context.t() | nil) :: {:ok, non_neg_integer()}
   def rotate_key!(vault, scope, context \\ nil) do
     metadata =
       context
       |> AshVault.Telemetry.context_metadata()
-      |> Map.merge(%{vault: vault, scope: scope, key_version: nil})
+      |> Map.merge(%{
+        vault: vault,
+        scope: scope,
+        scope_fingerprint: scope_fingerprint(scope),
+        key_version: nil
+      })
 
     :telemetry.span([:ash_vault, :key, :rotate], metadata, fn ->
       result = vault.rotate!(scope)
@@ -78,6 +98,12 @@ defmodule AshVault do
   defp key_version({:ok, version}) when is_integer(version), do: version
   defp key_version(_other), do: nil
 
+  # `AshVault.Scope.fingerprint/1` is deliberately not total. A lifecycle call can be made
+  # with a scope the vault has not normalised yet (a mix task, a direct call), and a
+  # telemetry span must never be the thing that raises.
+  defp scope_fingerprint(scope) when is_binary(scope), do: AshVault.Scope.fingerprint(scope)
+  defp scope_fingerprint(_scope), do: nil
+
   @doc """
   Crypto-erase `scope` in `vault`: destroy every key version and tombstone the scope.
 
@@ -89,7 +115,11 @@ defmodule AshVault do
     metadata =
       context
       |> AshVault.Telemetry.context_metadata()
-      |> Map.merge(%{vault: vault, scope: scope})
+      |> Map.merge(%{
+        vault: vault,
+        scope: scope,
+        scope_fingerprint: scope_fingerprint(scope)
+      })
 
     :telemetry.span([:ash_vault, :key, :destroy], metadata, fn ->
       result = vault.destroy!(scope)
@@ -107,6 +137,20 @@ defmodule AshVault do
   def encrypted_field_name(field) when is_atom(field), do: :"encrypted_#{field}"
 
   @doc """
+  The name of the deterministic lookup-token attribute for a searchable field.
+
+  As with `encrypted_field_name/1`, this is the single place the naming scheme lives.
+  """
+  @spec lookup_field_name(atom()) :: atom()
+  def lookup_field_name(field) when is_atom(field), do: :"#{field}_lookup"
+
+  @doc """
+  The name of the generated read action that finds rows by a searchable field's value.
+  """
+  @spec lookup_action_name(atom()) :: atom()
+  def lookup_action_name(field) when is_atom(field), do: :"by_#{field}"
+
+  @doc """
   Encrypt `value` and write it to the backing attribute of `field`, scrubbing the
   plaintext from the changeset.
 
@@ -117,10 +161,12 @@ defmodule AshVault do
   @spec encrypt_and_set(Ash.Changeset.t(), atom(), term(), AshVault.Context.t()) ::
           Ash.Changeset.t()
   def encrypt_and_set(changeset, field, value, %AshVault.Context{} = context) do
-    case encrypt_value(changeset.resource, field, value, context) do
-      {:ok, blob} ->
-        changeset
-        |> Ash.Changeset.force_change_attribute(encrypted_field_name(field), blob)
+    case write_attributes(changeset.resource, field, value, context) do
+      {:ok, attributes} ->
+        attributes
+        |> Enum.reduce(changeset, fn {name, value}, changeset ->
+          Ash.Changeset.force_change_attribute(changeset, name, value)
+        end)
         |> scrub_plaintext(field)
 
       {:error, error} ->
@@ -129,6 +175,48 @@ defmodule AshVault do
         |> Ash.Changeset.add_error(error)
     end
   end
+
+  @doc """
+  Every backing attribute a write of `field` must set: the ciphertext, plus the lookup
+  token when the field is `searchable?`.
+
+  Normalization happens **once**, here, and the same normalized value is both encrypted
+  and hashed. Normalizing twice would be wrong for a custom `normalize:` MFA that is not
+  idempotent, and encrypting the raw value while hashing the normalized one would make
+  the stored plaintext and the stored token disagree about what the row holds.
+
+  One consequence worth knowing: with `normalize: :downcase_trim`, writing
+  `" Jake@Example.COM "` stores — and later decrypts to — `"jake@example.com"`. The
+  normalization is lossy on the encrypted column too. That is deliberate; a token that
+  did not match the value it sits beside would be worse.
+  """
+  @spec write_attributes(module(), atom(), term(), AshVault.Context.t()) ::
+          {:ok, %{atom() => binary() | nil}} | {:error, Exception.t()}
+  def write_attributes(resource, field, value, %AshVault.Context{} = context) do
+    searchable? = AshVault.Info.searchable?(resource, field)
+
+    with {:ok, value} <- maybe_normalize(resource, field, value, searchable?),
+         {:ok, blob} <- encrypt_value(resource, field, value, context),
+         {:ok, token} <- maybe_token(resource, field, value, context, searchable?) do
+      attributes = %{encrypted_field_name(field) => blob}
+
+      if searchable? do
+        {:ok, Map.put(attributes, lookup_field_name(field), token)}
+      else
+        {:ok, attributes}
+      end
+    end
+  end
+
+  defp maybe_normalize(_resource, _field, value, false), do: {:ok, value}
+
+  defp maybe_normalize(resource, field, value, true),
+    do: AshVault.Lookup.normalize_for(resource, field, value)
+
+  defp maybe_token(_resource, _field, _value, _context, false), do: {:ok, nil}
+
+  defp maybe_token(resource, field, value, context, true),
+    do: AshVault.Lookup.token_for_normalized(resource, field, value, context)
 
   @doc """
   Encrypt one value for a field of a resource, returning the bytes to store.

@@ -69,6 +69,40 @@ defmodule AshVault.Extension.VerifierTest do
     end
   end
 
+  describe "searchable fields" do
+    test "a provider with no lookup_key/1 is rejected, naming the provider" do
+      error =
+        assert_verifier_error(
+          Verify.NoLookupKey,
+          "    vault AshVault.Test.Support.NoLookupVault\n" <>
+            "    encrypt :email, searchable?: true",
+          "does not implement `AshVault.KeyProvider.lookup_key/1`"
+        )
+
+      message = Exception.message(error)
+      assert message =~ "AshVault.Test.Support.NoLookupProvider"
+      assert message =~ "[:email]"
+      # The message must say WHY the key is separate, not just that it is missing.
+      assert message =~ "never the encryption key"
+    end
+
+    test "a provider that implements it is accepted" do
+      assert :ok =
+               verify(
+                 Verify.WithLookupKey,
+                 "    vault AshVault.Test.Vault\n    encrypt :email, searchable?: true"
+               )
+    end
+
+    test "a non-searchable field on a provider with no lookup_key/1 is fine" do
+      assert :ok =
+               verify(
+                 Verify.NoLookupKeyUnsearchable,
+                 "    vault AshVault.Test.Support.NoLookupVault\n    encrypt :email"
+               )
+    end
+  end
+
   describe "scope agreement" do
     test "a :global resource pointed at a tenant-scoped vault is rejected" do
       assert_verifier_error(
@@ -156,18 +190,66 @@ defmodule AshVault.Extension.VerifierTest do
       end)
     end
 
-    test "searchable? is not implemented in v1" do
-      assert_dsl_error("not implemented in v1", fn ->
-        define!(
-          Verify.Searchable,
-          "    vault AshVault.Test.Vault\n    encrypt :email, searchable?: true"
-        )
+    test "`unique?` without `searchable?`" do
+      assert_dsl_error("requires `searchable?: true`", fn ->
+        define!(Verify.Unique, "    vault AshVault.Test.Vault\n    encrypt :email, unique?: true")
       end)
     end
 
-    test "unique? is not implemented in v1" do
-      assert_dsl_error("not implemented in v1", fn ->
-        define!(Verify.Unique, "    vault AshVault.Test.Vault\n    encrypt :email, unique?: true")
+    test "a non-binary searchable field with no custom normalizer" do
+      assert_dsl_error("needs a `normalize:` that returns a binary", fn ->
+        Code.eval_string("""
+        defmodule Verify.SearchableNonBinary do
+          use Ash.Resource,
+            domain: AshVault.Test.Domain,
+            data_layer: Ash.DataLayer.Ets,
+            extensions: [AshVault]
+
+          ash_vault do
+            vault AshVault.Test.Vault
+            encrypt :age, searchable?: true
+          end
+
+          attributes do
+            uuid_primary_key :id
+            attribute :age, :integer, public?: true
+          end
+
+          actions do
+            default_accept :*
+            defaults [:read, :destroy, create: :*, update: :*]
+          end
+        end
+        """)
+      end)
+    end
+
+    test "an existing <field>_lookup sibling attribute" do
+      assert_dsl_error("email_lookup sibling attribute", fn ->
+        Code.eval_string("""
+        defmodule Verify.LookupSibling do
+          use Ash.Resource,
+            domain: AshVault.Test.Domain,
+            data_layer: Ash.DataLayer.Ets,
+            extensions: [AshVault]
+
+          ash_vault do
+            vault AshVault.Test.Vault
+            encrypt :email, searchable?: true
+          end
+
+          attributes do
+            uuid_primary_key :id
+            attribute :email, :string, public?: true
+            attribute :email_lookup, :binary, public?: true
+          end
+
+          actions do
+            default_accept :*
+            defaults [:read, :destroy, create: :*, update: :*]
+          end
+        end
+        """)
       end)
     end
 

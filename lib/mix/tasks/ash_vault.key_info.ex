@@ -7,7 +7,7 @@ defmodule Mix.Tasks.AshVault.KeyInfo do
   still fetchable, and whether the scope has been crypto-erased.
 
   This task is read-only in the strongest sense: it **never mints key material**.
-  `AshVault.KeyProvider.current_key/1` mints version 1 on first use, so an unused scope is
+  `c:AshVault.KeyProvider.current_key/1` mints version 1 on first use, so an unused scope is
   detected with `get_key/2` first and reported as `not_minted` without creating anything.
 
   ## Usage

@@ -157,12 +157,16 @@ filter checks or simple checks". A denied field arrives at the decrypt calculati
 `%Ash.ForbiddenField{}` and is passed through untouched — not decrypted, and not turned
 into an error.
 
-### Searching, sorting and filtering on encrypted values
+### Sorting, ordering and prefix-matching encrypted values
 
 The decrypt calculation is `filterable?: false, sortable?: false`, because randomized AEAD
-ciphertext supports neither. This is not a limitation AshVault can configure away; see
-[Searchable fields](searchable-fields.md) for the design that would address it, and its own
-disclosure tradeoff.
+ciphertext supports neither. This is not a limitation AshVault can configure away.
+
+**Equality** matching is available, as an opt-in, through lookup tokens
+(`encrypt :email, searchable?: true`) — at the cost of publishing the equality relation on
+that column. See [Searchable fields](searchable-fields.md), and the residual-risk entry
+below. Ordering and prefix matching remain impossible by construction, for every field,
+searchable or not.
 
 ## Residual risks worth writing down
 
@@ -272,13 +276,56 @@ before** `AshVault.destroy_keys!/2` returns — otherwise erasure is a lie for t
 the TTL. `AshVault.Vault.Runtime.destroy!/2` carries a commented call site marking where
 that eviction goes.
 
-### Lookup tokens (post-v1)
+### Lookup tokens leak equality within a scope, by construction
 
-Searchable fields, when they land, will leak equality within a scope by construction. That
-is the point of them, and it is a real disclosure: an attacker with the database learns
-which rows share a value, and can confirm a guessed value if they also hold the lookup
-key. Lookup keys must be per-scope so equality never leaks across tenants. See
-[Searchable fields](searchable-fields.md).
+`encrypt :email, searchable?: true` stores a second, deterministic column:
+`email_lookup = HMAC-SHA256(k, normalize(plaintext))`. It is opt-in per field, and turning
+it on is a **deliberate disclosure**, not a neutral index.
+
+What it gives away, and to whom:
+
+* **Which rows share a value — to anyone with the database, with no key at all.** Two rows
+  with the same token hold the same value. That is a deduplication oracle, a social graph
+  and a re-identification vector, and it is visible in every historical backup you have
+  ever taken. It is also precisely what makes the index work: you cannot have equality
+  search without publishing the equality relation.
+* **The frequency distribution**, to the same audience. The most common token in a
+  `country` column is the most common country.
+* **Confirmation of a guess, to an attacker who also holds the lookup key.** They compute
+  `HMAC(k, "alice@example.com")` and look for it. They cannot *decrypt*: the lookup key is
+  HKDF-separated from the data key, so the ability to search is strictly weaker than the
+  ability to read, and a component that only needs to search can hold one without the
+  other. But for a field with a small or enumerable domain — phone numbers, national IDs
+  with checksums, dates of birth — "confirm a guess" is equivalent to "recover the value"
+  by brute force. HMAC is fast on purpose; it is not a password hash and does not pretend
+  to be.
+
+**Low-cardinality fields are a bad fit and should be refused at design time.** A
+`searchable?: true` boolean, a country code, a blood type, a gender or a coarse status is
+an equality map of your whole table, and is close to not encrypting the column at all.
+
+Two properties bound the damage, and both are enforced rather than merely intended:
+
+1. **Lookup keys are per scope.** Equality never leaks *across* tenants: the same address
+   in tenant A and tenant B produces two unrelated tokens, so a shared value never
+   discloses a cross-customer relationship your customers did not agree to.
+2. **The lookup key is never the encryption key, and never derived from it.** It comes
+   from a separate provider callback (`c:AshVault.KeyProvider.lookup_key/1`), is **not**
+   changed by `AshVault.rotate_key!/2`, and **is** destroyed by
+   `AshVault.destroy_keys!/2` under the same tombstone — so crypto-erasure remains total,
+   and a destroyed subject cannot have guesses confirmed about them afterwards.
+
+The second property is also the failure mode worth naming: a lookup key derived from the
+rotating data key would make every stored token stop matching the moment a scope rotated —
+silently, with no error anywhere, with `unique?` quietly no longer preventing duplicates,
+and with users unable to log in. `test/ash_vault/lookup_rotation_test.exs` is the
+regression guard.
+
+This is also why deterministic *encryption* is not the mechanism: it leaks the same
+equality, destroys the AEAD guarantee (a fixed GCM nonce leaks the XOR of two messages and
+the authentication subkey), and is reversible with the key, where an HMAC is one-way.
+
+See [Searchable fields](searchable-fields.md).
 
 ### Length leakage
 

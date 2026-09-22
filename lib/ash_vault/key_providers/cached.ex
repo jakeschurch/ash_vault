@@ -461,6 +461,24 @@ defmodule AshVault.KeyProviders.Cached do
   @spec key_bytes(opts()) :: pos_integer()
   def key_bytes(opts), do: AshVault.KeyProvider.key_bytes(opts.provider)
 
+  @doc """
+  Fetch the wrapped provider's lookup key, **uncached**.
+
+  A lookup key never rotates, so caching it would save a round trip on a value the
+  wrapped provider can already keep as long as it likes — and would add a second thing
+  `destroy/1` has to evict before erasure is true. Passing straight through removes that
+  question entirely.
+
+  Returns `{:error, :lookup_unsupported}` when the wrapped provider has no
+  `c:AshVault.KeyProvider.lookup_key/1`, which is also what
+  `AshVault.KeyProvider.supports_lookup?/1` reports for this wrapper: it unwraps to the
+  provider underneath rather than believing this delegation.
+  """
+  @spec lookup_key(AshVault.KeyProvider.scope(), opts()) :: {:ok, binary()} | {:error, term()}
+  def lookup_key(scope, opts) do
+    AshVault.KeyProvider.lookup_key(opts.provider, validate_scope!(scope))
+  end
+
   defp fetch(scope, slot, opts), do: opts.backend.fetch(opts.cache_name, scope, slot)
 
   defp put(scope, slot, entry, ttl, generation, opts) do
@@ -541,6 +559,7 @@ defmodule AshVault.KeyProviders.Cached do
         do: AshVault.KeyProviders.Cached.start_link(@ash_vault_cached_opts)
 
       @doc false
+      @impl AshVault.KeyProvider
       @spec child_spec(term()) :: Supervisor.child_spec()
       def child_spec(_opts \\ []),
         do: AshVault.KeyProviders.Cached.child_spec_for(@ash_vault_cached_opts)
@@ -576,6 +595,12 @@ defmodule AshVault.KeyProviders.Cached do
       @impl AshVault.KeyProvider
       @spec key_bytes() :: pos_integer()
       def key_bytes, do: AshVault.KeyProviders.Cached.key_bytes(@ash_vault_cached_opts)
+
+      @doc "The wrapped provider's lookup key, passed straight through uncached."
+      @impl AshVault.KeyProvider
+      @spec lookup_key(AshVault.KeyProvider.scope()) :: {:ok, binary()} | {:error, term()}
+      def lookup_key(scope),
+        do: AshVault.KeyProviders.Cached.lookup_key(scope, @ash_vault_cached_opts)
 
       @doc """
       Synchronously evict a scope from this cache on every connected node.

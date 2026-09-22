@@ -334,3 +334,198 @@ defmodule AshVault.Test.EtsDynamicVaultUser do
     defaults [:read, :destroy, create: :*, update: :*]
   end
 end
+
+defmodule AshVault.Test.EtsAccount do
+  @moduledoc """
+  Searchable encrypted fields over ETS: one normalized field, one not, one plain
+  encrypted field beside them.
+  """
+
+  use Ash.Resource,
+    domain: AshVault.Test.Domain,
+    data_layer: Ash.DataLayer.Ets,
+    extensions: [AshVault]
+
+  ash_vault do
+    vault AshVault.Test.Vault
+    scope :tenant
+
+    encrypt :email, searchable?: true, normalize: :downcase_trim
+    encrypt :handle, searchable?: true
+    encrypt :note
+  end
+
+  ets do
+    private? true
+  end
+
+  multitenancy do
+    strategy :attribute
+    attribute :org_id
+  end
+
+  attributes do
+    uuid_primary_key :id
+    attribute :org_id, :string, allow_nil?: false, public?: true
+    attribute :email, :string, public?: true
+    attribute :handle, :string, public?: true
+    attribute :note, :string, public?: true
+  end
+
+  actions do
+    default_accept :*
+    defaults [:read, :destroy, create: :*, update: :*]
+  end
+end
+
+defmodule AshVault.Test.EtsContact do
+  @moduledoc """
+  A second searchable resource with a field of the same name, so a token proves it is
+  bound to its resource and not just to its field name.
+  """
+
+  use Ash.Resource,
+    domain: AshVault.Test.Domain,
+    data_layer: Ash.DataLayer.Ets,
+    extensions: [AshVault]
+
+  ash_vault do
+    vault AshVault.Test.Vault
+    scope :tenant
+
+    encrypt :email, searchable?: true, normalize: :downcase_trim
+  end
+
+  ets do
+    private? true
+  end
+
+  multitenancy do
+    strategy :attribute
+    attribute :org_id
+  end
+
+  attributes do
+    uuid_primary_key :id
+    attribute :org_id, :string, allow_nil?: false, public?: true
+    attribute :email, :string, public?: true
+  end
+
+  actions do
+    default_accept :*
+    defaults [:read, :destroy, create: :*, update: :*]
+  end
+end
+
+defmodule AshVault.Test.EtsSecretDoc do
+  @moduledoc """
+  Tenant-scoped searchable encryption on a resource that is *not* multitenant in Ash.
+
+  Ash rejects a tenant-less query on a multitenant resource before any preparation runs,
+  so this is the only place the "a lookup with no tenant must not return an empty
+  result" guarantee can actually be observed.
+  """
+
+  use Ash.Resource,
+    domain: AshVault.Test.Domain,
+    data_layer: Ash.DataLayer.Ets,
+    extensions: [AshVault]
+
+  ash_vault do
+    vault AshVault.Test.Vault
+    scope :tenant
+
+    encrypt :label, searchable?: true
+  end
+
+  ets do
+    private? true
+  end
+
+  attributes do
+    uuid_primary_key :id
+    attribute :label, :string, public?: true
+  end
+
+  actions do
+    default_accept :*
+    defaults [:read, :destroy, create: :*, update: :*]
+  end
+end
+
+defmodule AshVault.Test.SearchUser do
+  @moduledoc """
+  The Postgres-backed searchable resource: `unique?` enforcement, the real unique index,
+  and the `EXPLAIN` assertion that a lookup actually uses it.
+  """
+
+  use Ash.Resource,
+    domain: AshVault.Test.Domain,
+    data_layer: AshPostgres.DataLayer,
+    extensions: [AshVault]
+
+  ash_vault do
+    vault AshVault.Test.Vault
+    scope :tenant
+
+    encrypt :email, searchable?: true, unique?: true, normalize: :downcase_trim
+  end
+
+  postgres do
+    table "search_users"
+    repo AshVault.Test.Repo
+  end
+
+  multitenancy do
+    strategy :attribute
+    attribute :org_id
+  end
+
+  attributes do
+    uuid_primary_key :id
+    attribute :org_id, :uuid, allow_nil?: false, public?: true
+    attribute :email, :string, public?: true
+  end
+
+  actions do
+    default_accept :*
+    defaults [:read, :destroy, create: :*, update: :*]
+  end
+end
+
+defmodule AshVault.Test.EtsNoLookupDoc do
+  @moduledoc """
+  A searchable field on a resource whose vault is a `fun/2`, so the verifier cannot see
+  the key provider at compile time.
+
+  This is the one shape that reaches `AshVault.Errors.LookupUnsupported` at runtime, and
+  it exists to prove that backstop is a clean, permanent configuration error rather than a
+  retryable `ProviderUnavailable` or an `UndefinedFunctionError` out of a hook.
+  """
+
+  use Ash.Resource,
+    domain: AshVault.Test.Domain,
+    data_layer: Ash.DataLayer.Ets,
+    extensions: [AshVault]
+
+  ash_vault do
+    vault &AshVault.Test.Support.NoLookupVaultResolver.resolve/2
+    scope :global
+
+    encrypt :label, searchable?: true
+  end
+
+  ets do
+    private? true
+  end
+
+  attributes do
+    uuid_primary_key :id
+    attribute :label, :string, public?: true
+  end
+
+  actions do
+    default_accept :*
+    defaults [:read, :destroy, create: :*, update: :*]
+  end
+end

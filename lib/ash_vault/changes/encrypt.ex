@@ -52,10 +52,11 @@ defmodule AshVault.Changes.Encrypt do
       {:ok, value} ->
         ctx = build_context(changeset, field, context)
 
-        case AshVault.encrypt_value(changeset.resource, field, value, ctx) do
-          {:ok, blob} ->
-            {:atomic, AshVault.scrub_plaintext(changeset, field),
-             %{AshVault.encrypted_field_name(field) => blob}}
+        case AshVault.write_attributes(changeset.resource, field, value, ctx) do
+          # The lookup token rides along in the same map: it is one more literal
+          # attribute, computed in the BEAM exactly as the ciphertext is.
+          {:ok, attributes} ->
+            {:atomic, AshVault.scrub_plaintext(changeset, field), attributes}
 
           {:error, error} ->
             {:error, error}

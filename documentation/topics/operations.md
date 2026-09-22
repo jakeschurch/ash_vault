@@ -65,12 +65,15 @@ Then:
 
 ```elixir
 # config/runtime.exs
-config :ash_vault, AshVault.KeyProviders.Local,
+config :my_app, AshVault.KeyProviders.Local,
   root: "/var/lib/my_app/ash_vault_keys",
   key_bytes: 32
 
 # lib/my_app/application.ex
-children = [MyApp.Repo, AshVault.KeyProviders.Local]
+children = [MyApp.Repo] ++ MyApp.Vault.child_specs()
+
+# a deploy step — `init_root!/1` on the configured root, idempotent
+:ok = MyApp.Vault.setup()
 ```
 
 The provider **never creates its own key root**, and refuses to start without the
@@ -139,7 +142,7 @@ Starting anyway.
 
 ```elixir
 # config/runtime.exs
-config :ash_vault, AshVault.KeyProviders.OpenBao,
+config :my_app, AshVault.KeyProviders.OpenBao,
   address: System.fetch_env!("BAO_ADDR"),
   token: {:system, "BAO_TOKEN"},
   transit_mount: "transit",
@@ -155,8 +158,20 @@ provider is stateless — there is nothing to add to your supervision tree.
 One-time operator setup, which mounts the KV-v2 engine that holds tombstones:
 
 ```elixir
-:ok = AshVault.KeyProviders.OpenBao.setup()
+:ok = MyApp.Vault.setup()     # or AshVault.KeyProviders.OpenBao.setup()
 ```
+
+> #### A `mix` task does not start your application {: .warning}
+>
+> `OpenBao` speaks HTTP through `req`, whose `Finch` pool is started by the `:req`
+> application. A `mix` task with `@requirements ["app.config"]` configures the
+> application without starting it, and a release command may not have started it either.
+>
+> Call `Application.ensure_all_started(:req)` first. If you forget, AshVault says so
+> precisely — `%AshVault.Errors.ProviderUnavailable{reason: {:not_started, :req}}`, whose
+> message states that this is **not** an outage, that the server was never contacted, and
+> what to add where. It is deliberately not reported as a transport failure, which is
+> what an unreachable server looks like.
 
 or equivalently, outside the app:
 
@@ -531,8 +546,8 @@ metadata key. The short version:
 |---|---|---|
 | `[:ash_vault, :encrypt]` | one field of one record, on write | `:resource`, `:field` |
 | `[:ash_vault, :decrypt]` | one field of one record, on read | `:resource`, `:field`, `:vault` |
-| `[:ash_vault, :key, :rotate]` | a scope's key is rotated | `:scope`, `:key_version` |
-| `[:ash_vault, :key, :destroy]` | **a scope is crypto-erased** | `:scope` |
+| `[:ash_vault, :key, :rotate]` | a scope's key is rotated | `:scope`, `:scope_fingerprint`, `:key_version` |
+| `[:ash_vault, :key, :destroy]` | **a scope is crypto-erased** | `:scope`, `:scope_fingerprint` |
 
 Each prefix is a `:telemetry.span/3`, so it has `:start`, `:stop` and `:exception` under
 it. Every event also carries `:actor_type` and `:actor_id`, and every `:stop` carries
@@ -620,9 +635,31 @@ entry = Map.merge(entry, %{
 
 (and set them there once, in a plug, rather than threading them through Ash).
 
+### The key-lifecycle events carry the raw tenant id
+
 `metadata[:scope]` is the scope key — under the default `AshVault.Scopes.AshTenant` that
 is the tenant id. It is not secret, but it is frequently a customer identifier, so the
 audit table inherits whatever access controls your other customer data has.
+
+> #### A handler that forwards this metadata onward is forwarding tenant identifiers {: .warning}
+>
+> `Logger` output from AshVault reports a scope as `AshVault.Scope.fingerprint/1`, a
+> truncated SHA-256, precisely because a tenant id is frequently PII. The
+> `[:ash_vault, :key, :rotate]` and `[:ash_vault, :key, :destroy]` telemetry events
+> deliberately do **not**: they carry the raw `:scope`, because the compliance record of
+> an erasure has to be able to name the tenant it erased, and a fingerprint cannot.
+>
+> Telemetry metadata is copied verbatim into third-party APMs by most handlers anybody
+> actually writes. **If you forward these events to an external service — an APM, a
+> log shipper, an error reporter — you are sending it your tenant ids.** Both events
+> also carry `:scope_fingerprint` so that a handler which must report outward has
+> something safe to report, but it is a convenience, not a mitigation: the raw `:scope`
+> is still in the same map, and a handler that copies the metadata wholesale sends it.
+>
+> Either drop `:scope` explicitly in the handler and forward `:scope_fingerprint`, or
+> treat the destination as a place that holds customer data. An internal audit table,
+> which is what the worked handler above writes to, is the case where the raw scope is
+> the point.
 
 Two notes on what you will *not* find in these events, both deliberate and both explained
 in `AshVault.Telemetry`: the encrypt and decrypt events carry no `:scope` (resolving it
