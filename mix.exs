@@ -10,7 +10,101 @@ defmodule AshVault.MixProject do
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
       consolidate_protocols: Mix.env() != :test,
-      deps: deps()
+      deps: deps(),
+      name: "AshVault",
+      description:
+        "Per-tenant encrypted attributes for Ash resources, with cryptographic erasure.",
+      source_url: "https://github.com/jakeschurch/ash_vault",
+      docs: docs()
+    ]
+  end
+
+  defp docs do
+    [
+      main: "getting-started",
+      extras: [
+        "documentation/tutorials/getting-started.md",
+        "documentation/topics/architecture.md",
+        "documentation/topics/tenant-scoped-encryption.md",
+        "documentation/topics/rotation.md",
+        "documentation/topics/crypto-erasure.md",
+        "documentation/topics/migrating-from-plaintext.md",
+        "documentation/topics/searchable-fields.md",
+        "documentation/topics/threat-model.md",
+        "documentation/topics/operations.md",
+        "documentation/how-to/writing-a-key-provider.md",
+        "documentation/how-to/writing-a-cipher.md",
+        "documentation/how-to/writing-a-scope.md",
+        "documentation/how-to/writing-a-rotation-policy.md",
+        "docs/adr/0001-no-cloak-vault.md",
+        "README.md"
+      ],
+      groups_for_extras: [
+        Tutorials: ~r"documentation/tutorials/",
+        Topics: ~r"documentation/topics/",
+        "How-to": ~r"documentation/how-to/",
+        "Design decisions": ~r"docs/adr/"
+      ],
+      groups_for_modules: [
+        Extension: [
+          AshVault,
+          AshVault.Dsl,
+          AshVault.Info,
+          AshVault.Encrypted,
+          AshVault.Serializer
+        ],
+        "Extension internals": [
+          AshVault.Changes.Encrypt,
+          AshVault.Calculations.Decrypt,
+          AshVault.Actions.RotateKey,
+          AshVault.Actions.DestroyKeys,
+          AshVault.Context.Builder,
+          AshVault.Transformers.ExpandAttributes,
+          AshVault.Transformers.SetupEncryption,
+          AshVault.Verifiers.VerifyVault
+        ],
+        "Crypto core": [
+          AshVault.Vault,
+          AshVault.Vault.Runtime,
+          AshVault.Context,
+          AshVault.Cipher,
+          AshVault.Ciphers.AES.GCM,
+          AshVault.Envelope,
+          AshVault.Envelope.V1
+        ],
+        "Key providers": [
+          AshVault.KeyProvider,
+          AshVault.KeyProviders.Memory,
+          AshVault.KeyProviders.Local,
+          AshVault.KeyProviders.OpenBao
+        ],
+        Scopes: [
+          AshVault.Scope,
+          AshVault.Scopes.AshTenant,
+          AshVault.Scopes.Global
+        ],
+        Rotation: [
+          AshVault.RotationPolicy,
+          AshVault.RotationPolicies.Manual
+        ],
+        Migration: [
+          AshVault.Backfill
+        ],
+        Errors: [
+          AshVault.Errors,
+          AshVault.Errors.AuthenticationFailed,
+          AshVault.Errors.InvalidCiphertext,
+          AshVault.Errors.InvalidScope,
+          AshVault.Errors.KeyDestroyed,
+          AshVault.Errors.KeyNotFound,
+          AshVault.Errors.KeySizeMismatch,
+          AshVault.Errors.MissingScope,
+          AshVault.Errors.ProviderUnavailable,
+          AshVault.Errors.SerializationFailed,
+          AshVault.Errors.UnsupportedCipher,
+          AshVault.Errors.UnsupportedEnvelope
+        ]
+      ]
     ]
   end
 

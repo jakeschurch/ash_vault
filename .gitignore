@@ -13,3 +13,4 @@ ash_vault-*.tar
 # are root-anchored, so they do not cover the subdirectory.
 /example/_build/
 /example/deps/
+doc/
