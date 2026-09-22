@@ -19,3 +19,6 @@ doc/
 .direnv/
 result
 result-*
+
+# BEAM crash dumps can contain key material — never commit one.
+erl_crash.dump

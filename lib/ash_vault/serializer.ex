@@ -112,6 +112,22 @@ defmodule AshVault.Serializer do
   defp decode_term(payload) do
     {:ok, Ash.Helpers.non_executable_binary_to_term(payload, [:safe])}
   rescue
-    error -> {:error, InvalidCiphertext.exception(reason: {:binary_to_term, error})}
+    error -> {:error, InvalidCiphertext.exception(reason: {:binary_to_term, classify(error)})}
   end
+
+  # The rescued exception is NOT safe to store. `Ash.Helpers.non_executable_binary_to_term/2`
+  # raises `ArgumentError` whose message interpolates `inspect(other)` for a fun, pid,
+  # port or reference (`deps/ash/lib/ash/helpers.ex:625`), and that `inspect(other)` is a
+  # term reconstructed from bytes AshVault just decrypted. `InvalidCiphertext.message/1`
+  # runs `inspect(reason)`, so keeping the struct would print it. Classify instead: the
+  # two outcomes are the only diagnostic an operator can act on.
+  defp classify(%ArgumentError{message: message}) do
+    if is_binary(message) and String.contains?(message, "not safe for deserialization") do
+      :unsafe_term
+    else
+      :malformed_term
+    end
+  end
+
+  defp classify(error), do: {:raised, error.__struct__}
 end

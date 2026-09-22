@@ -466,17 +466,172 @@ name it is how this happens. See [Writing a cipher](../how-to/writing-a-cipher.m
 ### `AshVault.Errors.SerializationFailed` — the value does not fit the type
 
 ```
-Could not serialize MyApp.Accounts.User.email (type Ash.Type.String) for encryption.
+Could not serialize MyApp.Accounts.User.email (type MyApp.Types.Email) for encryption.
 
-{:error, [message: "must be a string"]}
+{:dump_to_embedded, {:error, [message: {:redacted, :binary}, value: {:redacted, :binary}]}}
+
+The reason above is redacted: `{:redacted, _}` stands where a type-controlled value
+was dropped, because that value is the plaintext this error exists to protect.
 ```
 
 **Meaning:** `Ash.Type.dump_to_embedded/3` (or `cast_from_embedded/3` on the way back)
 rejected the value. Not a crypto problem at all.
 
-**Do:** fix the value or the type. On the *read* side this can also mean the stored term
-no longer matches the current type — a type change on an existing encrypted column is a
-data migration.
+**Why it is redacted:** the reason is the type's own return value, and the `Ash.Type`
+contract lets a type return `{:error, message: ..., value: value}` — where `value` is the
+plaintext AshVault was about to encrypt. A custom type that does so would put plaintext
+into an `Ash.Error` that gets logged, rendered and shipped to APM, so
+`AshVault.Errors.SerializationFailed` rewrites `:reason` at construction: the shape and
+the keys survive, and every leaf that is not an atom or an integer becomes
+`{:redacted, kind}`. Built-in Ash types return `:error` or `{:error, index: 0}` and are
+therefore unaffected — what you see above only happens with a custom type.
+
+**Do:** fix the value or the type. The error still names the resource, the field and the
+**type module**, which is where the real message lives — run that type's
+`dump_to_embedded/2` against a value you are allowed to look at. On the *read* side this
+can also mean the stored term no longer matches the current type; a type change on an
+existing encrypted column is a data migration.
+
+## Telemetry and the compliance audit log
+
+AshVault emits `:telemetry` events around every encrypt, every decrypt, and every key
+rotation and erasure. There is no `on_decrypt` callback: an audit log, a metric, a trace
+span and a debug log all want the same fact, and a callback can only serve one of them.
+
+`AshVault.Telemetry` is the reference for the event names, the measurements and every
+metadata key. The short version:
+
+| Prefix | Emitted around | Notable metadata |
+|---|---|---|
+| `[:ash_vault, :encrypt]` | one field of one record, on write | `:resource`, `:field` |
+| `[:ash_vault, :decrypt]` | one field of one record, on read | `:resource`, `:field`, `:vault` |
+| `[:ash_vault, :key, :rotate]` | a scope's key is rotated | `:scope`, `:key_version` |
+| `[:ash_vault, :key, :destroy]` | **a scope is crypto-erased** | `:scope` |
+
+Each prefix is a `:telemetry.span/3`, so it has `:start`, `:stop` and `:exception` under
+it. Every event also carries `:actor_type` and `:actor_id`, and every `:stop` carries
+`:result` (`:ok` or `:error`) plus, on failure, `:error` — the error **module**.
+
+Three things to internalise before you write a handler:
+
+* **Watch `:stop`, not `:exception`.** `AshVault.decrypt_value/5` rescues and returns its
+  errors, so a read of a crypto-erased tenant is a `:stop` with
+  `result: :error, error: AshVault.Errors.KeyDestroyed`. A handler attached only to
+  `:exception` sees none of it.
+* **`[:ash_vault, :key, :destroy]` is the compliance-critical one.** It is the record that
+  an erasure request was actually executed, and the only one whose *absence* is a finding.
+* **Nothing in the metadata is a secret, and it is your job to keep it that way.** There is
+  no plaintext, no ciphertext, no key material and no actor struct in these events — only
+  an `:actor_id`. Do not add any in your handler. (The single exception is the
+  `:exception` event, where `:telemetry.span/3`'s own contract puts the raised error struct
+  in `:reason`; see `AshVault.Telemetry`.)
+
+### A worked handler
+
+Attach once, at application start, after the repo is up:
+
+```elixir
+defmodule MyApp.VaultAudit do
+  @moduledoc "Writes an immutable audit row for every AshVault key-lifecycle and decrypt event."
+
+  require Logger
+
+  @events [
+    [:ash_vault, :decrypt, :stop],
+    [:ash_vault, :key, :rotate, :stop],
+    [:ash_vault, :key, :destroy, :stop],
+    [:ash_vault, :key, :destroy, :exception]
+  ]
+
+  def attach do
+    :telemetry.attach_many("my-app-vault-audit", @events, &__MODULE__.handle/4, nil)
+  end
+
+  # Telemetry handlers run in the caller's process. Keep this cheap and total: a raise
+  # here detaches the handler for the life of the node, and silently stops your audit log.
+  def handle(event, measurements, metadata, _config) do
+    entry = %{
+      # UTC, always. An audit row in server-local time is not an audit row.
+      occurred_at: DateTime.utc_now(),
+      event: Enum.join(event, "."),
+      # Who.
+      actor_type: inspect(metadata[:actor_type]),
+      actor_id: to_string(metadata[:actor_id] || "system"),
+      # What.
+      resource: inspect(metadata[:resource]),
+      field: to_string(metadata[:field] || ""),
+      scope: metadata[:scope],
+      key_version: metadata[:key_version],
+      # Outcome.
+      result: metadata[:result] || :exception,
+      error: inspect(metadata[:error]),
+      duration_us: System.convert_time_unit(measurements[:duration] || 0, :native, :microsecond)
+    }
+
+    MyApp.Repo.insert_all("vault_audit_log", [entry])
+  rescue
+    error ->
+      # Never let the audit log take down the operation it is auditing — but never let it
+      # fail silently either.
+      Logger.error("vault audit write failed: #{Exception.message(error)}")
+  end
+end
+```
+
+Request-scoped facts an audit regime often also asks for — the client IP, a request id, a
+stated purpose for the access — are not in the metadata, because AshVault is not in the
+request and cannot invent them. Telemetry handlers run **in the calling process**, so read
+them from where your web layer already put them:
+
+```elixir
+metadata = Logger.metadata()
+
+entry = Map.merge(entry, %{
+  request_id: metadata[:request_id],
+  remote_ip: metadata[:remote_ip]
+})
+```
+
+(and set them there once, in a plug, rather than threading them through Ash).
+
+`metadata[:scope]` is the scope key — under the default `AshVault.Scopes.AshTenant` that
+is the tenant id. It is not secret, but it is frequently a customer identifier, so the
+audit table inherits whatever access controls your other customer data has.
+
+Two notes on what you will *not* find in these events, both deliberate and both explained
+in `AshVault.Telemetry`: the encrypt and decrypt events carry no `:scope` (resolving it
+would run your `AshVault.Scope` module a second time per operation, and it is allowed to
+have side effects and to raise), and no `:key_version` (it is inside the envelope). If your
+audit requirement needs the tenant on every field read, correlate on Ash's own
+`[:ash, :*]` spans, which carry it, or use a scope module you know is pure and read the
+tenant from your request context.
+
+### Volume
+
+`[:ash_vault, :decrypt]` fires once per encrypted field per record. A list endpoint
+returning 100 users with 3 encrypted fields emits 300 spans. Auditing every decrypt is what
+some regimes ask for, and it is also how you fill a disk. Decide explicitly: many
+deployments log the key-lifecycle events in full and sample or aggregate the decrypts.
+
+### Retention
+
+Retention is a decision you make with your own counsel; AshVault has no opinion and this
+is not legal advice. The figures ash_cloak's
+[security considerations](https://deepwiki.com/ash-project/ash_cloak/6.2-security-considerations)
+cite, reproduced here as the starting point for that conversation rather than as a
+requirement from us:
+
+| Regime | Figure ash_cloak cites |
+|---|---|
+| HIPAA | 6 years |
+| PCI-DSS | 1 year, with 3 months immediately available |
+| GDPR | the duration of processing |
+
+Whatever you choose, note the interaction with crypto-erasure that is specific to this
+library: **the audit log survives the erasure it records.** That is the point of it — you
+must be able to demonstrate that a deletion happened — but it means the audit table is one
+more place a destroyed subject's identifiers live on. Keep identifiers in it, not data, and
+make sure its retention window is one you can defend to the same subject.
 
 ## Monitoring
 
@@ -491,9 +646,48 @@ At minimum, alert differently on these three, because the correct human response
 `KeySizeMismatch` and `InvalidScope` should fail your deploy, not your pager — they are
 configuration faults that will affect every operation uniformly.
 
+
+## Crash dumps and core dumps
+
+A BEAM crash dump is a complete picture of process memory at the moment of the crash. If a
+node dies while any key material is resident — which is every moment between fetching a key
+and finishing the operation, and the whole cache lifetime if caching is on — that material can
+land in `erl_crash.dump` as an ordinary file on disk, outside every protection this library
+provides. The same is true of an OS core dump.
+
+This is not hypothetical. Developing AshVault produced an 11 MB `erl_crash.dump` in the
+project root from a crashed test run, containing references to the key provider modules.
+
+In production:
+
+```sh
+# Do not write BEAM crash dumps at all.
+export ERL_CRASH_DUMP_SECONDS=0
+
+# Do not write OS core dumps for the beam process.
+ulimit -c 0
+```
+
+Under systemd, also set `LimitCORE=0` on the unit, and check that no container runtime or
+supervisor has re-enabled either.
+
+If you must keep crash dumps for debugging, treat them with exactly the care you give the key
+store: restricted directory, short retention, never shipped to a log aggregator or an APM, and
+never committed. Add `erl_crash.dump` to `.gitignore` in any application that depends on
+AshVault.
+
+The same reasoning applies to swap. Key material can be paged to disk and survive there long
+after the process ends. The Rust key cache `mlock`s its buffers to prevent this; the
+pure-Elixir cache and the BEAM heap generally cannot. Encrypted swap is the answer at the
+operating-system level.
+
 ## Related
 
 * [Crypto-erasure](crypto-erasure.md) — the operational checklist
 * [Rotation](rotation.md)
 * [Migrating from plaintext](migrating-from-plaintext.md)
-* `AshVault.Errors`, `AshVault.KeyProviders.Local`, `AshVault.KeyProviders.OpenBao`
+* `docs/adr/0002-distinguishable-crypto-errors.md` — why the taxonomy above is granular
+  rather than a single generic "decryption failed", and what a public API owes its users
+  as a result
+* `AshVault.Errors`, `AshVault.Telemetry`, `AshVault.KeyProviders.Local`,
+  `AshVault.KeyProviders.OpenBao`

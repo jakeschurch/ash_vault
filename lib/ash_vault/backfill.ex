@@ -428,8 +428,12 @@ defmodule AshVault.Backfill do
           {:ok, ^expected} ->
             :ok
 
-          {:ok, actual} ->
-            {:mismatch, %{primary_key: pk, reason: :value_mismatch, actual: actual}}
+          # The decrypted value is deliberately NOT carried in the mismatch: `:value_mismatch`
+          # already says what went wrong, and `mismatches` is returned to the caller inside
+          # `stats`, where one `Logger.error(inspect(stats))` would dump the plaintext of
+          # every mismatched row. Nothing consumed it.
+          {:ok, _actual} ->
+            {:mismatch, %{primary_key: pk, reason: :value_mismatch}}
 
           {:error, error} ->
             {:mismatch, %{primary_key: pk, reason: :decrypt_failed, error: error}}

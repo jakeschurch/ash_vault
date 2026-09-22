@@ -19,7 +19,7 @@ defmodule AshVault.Actions.RotateKey do
     vault = AshVault.Info.vault!(input.resource, ctx.ash_context)
     scope = AshVault.Info.scope_module(input.resource).resolve!(ctx)
 
-    AshVault.rotate_key!(vault, scope)
+    AshVault.rotate_key!(vault, scope, ctx)
   rescue
     error in [
       AshVault.Errors.MissingScope,

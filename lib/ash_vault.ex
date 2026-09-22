@@ -58,8 +58,25 @@ defmodule AshVault do
   Existing values keep decrypting with their original key version; new writes use the
   new one.
   """
-  @spec rotate_key!(module(), term()) :: {:ok, non_neg_integer()}
-  def rotate_key!(vault, scope), do: vault.rotate!(scope)
+  @spec rotate_key!(module(), term(), AshVault.Context.t() | nil) :: {:ok, non_neg_integer()}
+  def rotate_key!(vault, scope, context \\ nil) do
+    metadata =
+      context
+      |> AshVault.Telemetry.context_metadata()
+      |> Map.merge(%{vault: vault, scope: scope, key_version: nil})
+
+    :telemetry.span([:ash_vault, :key, :rotate], metadata, fn ->
+      result = vault.rotate!(scope)
+
+      {result,
+       metadata
+       |> Map.merge(AshVault.Telemetry.result_metadata(result))
+       |> Map.put(:key_version, key_version(result))}
+    end)
+  end
+
+  defp key_version({:ok, version}) when is_integer(version), do: version
+  defp key_version(_other), do: nil
 
   @doc """
   Crypto-erase `scope` in `vault`: destroy every key version and tombstone the scope.
@@ -67,8 +84,18 @@ defmodule AshVault do
   This is irreversible. Every value encrypted under `scope` becomes permanently
   unrecoverable, and later reads raise `AshVault.Errors.KeyDestroyed`.
   """
-  @spec destroy_keys!(module(), term()) :: :ok
-  def destroy_keys!(vault, scope), do: vault.destroy!(scope)
+  @spec destroy_keys!(module(), term(), AshVault.Context.t() | nil) :: :ok
+  def destroy_keys!(vault, scope, context \\ nil) do
+    metadata =
+      context
+      |> AshVault.Telemetry.context_metadata()
+      |> Map.merge(%{vault: vault, scope: scope})
+
+    :telemetry.span([:ash_vault, :key, :destroy], metadata, fn ->
+      result = vault.destroy!(scope)
+      {result, Map.merge(metadata, AshVault.Telemetry.result_metadata(result))}
+    end)
+  end
 
   @doc """
   The name of the backing ciphertext attribute for an encrypted field.
@@ -112,6 +139,18 @@ defmodule AshVault do
   @spec encrypt_value(module(), atom(), term(), AshVault.Context.t()) ::
           {:ok, binary() | nil} | {:error, Exception.t()}
   def encrypt_value(resource, field, value, %AshVault.Context{} = context) do
+    metadata =
+      context
+      |> AshVault.Telemetry.context_metadata()
+      |> Map.merge(%{resource: resource, field: field})
+
+    :telemetry.span([:ash_vault, :encrypt], metadata, fn ->
+      result = do_encrypt_value(resource, field, value, context)
+      {result, Map.merge(metadata, AshVault.Telemetry.result_metadata(result))}
+    end)
+  end
+
+  defp do_encrypt_value(resource, field, value, context) do
     if is_nil(value) and not AshVault.Info.encrypt_nil?(resource, field) do
       {:ok, nil}
     else
@@ -146,6 +185,18 @@ defmodule AshVault do
   @spec decrypt_value(module(), binary(), AshVault.Context.t(), Ash.Type.t(), keyword()) ::
           {:ok, term()} | {:error, Exception.t()}
   def decrypt_value(vault, blob, %AshVault.Context{} = context, type, constraints) do
+    metadata =
+      context
+      |> AshVault.Telemetry.context_metadata()
+      |> Map.put(:vault, vault)
+
+    :telemetry.span([:ash_vault, :decrypt], metadata, fn ->
+      result = do_decrypt_value(vault, blob, context, type, constraints)
+      {result, Map.merge(metadata, AshVault.Telemetry.result_metadata(result))}
+    end)
+  end
+
+  defp do_decrypt_value(vault, blob, context, type, constraints) do
     plaintext = vault.decrypt!(blob, context)
 
     AshVault.Serializer.deserialize(

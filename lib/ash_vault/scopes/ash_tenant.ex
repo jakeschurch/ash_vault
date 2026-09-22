@@ -21,6 +21,10 @@ defmodule AshVault.Scopes.AshTenant do
       a stable key, and telling the operator to "pass a tenant" would send them hunting
       something that is not missing
 
+  That "what was received" is a **description**, never the tenant itself: see
+  `describe_tenant/1`. A tenant is routinely a loaded record full of customer PII, and
+  the error it fails with ends up in logs and APM.
+
   Stringification (rather than `:erlang.term_to_binary/1`) keeps scope keys readable and
   stable across processes, releases and OTP upgrades.
 
@@ -79,9 +83,43 @@ defmodule AshVault.Scopes.AshTenant do
             field: context && context.field,
             scope_module: __MODULE__,
             reason: :unsupported_tenant_shape,
-            tenant: inspect(tenant, limit: 5, printable_limit: 128, structs: false)
+            tenant: describe_tenant(tenant)
           )
   end
+
+  @doc """
+  Describe a tenant term for an operator-facing error, without reproducing its contents.
+
+  `MissingScope`'s `:tenant` field is rendered into `Exception.message/1` and travels
+  wherever Ash sends the error — logs, Sentry, an APM trace. A tenant is very often a
+  whole loaded record (`%MyApp.Organization{name: ..., billing_email: ...}`), so
+  `inspect/2` here would push customer PII into every one of those places to answer a
+  question that only needs the *shape*: what did we get, and why could we not reduce it
+  to a key?
+
+  Structs are therefore named, not printed, and the description says explicitly whether
+  an `:id` was present-but-nil or absent altogether — which is the whole diagnosis.
+  """
+  @spec describe_tenant(term()) :: binary()
+  def describe_tenant(%struct{} = tenant) do
+    if Map.has_key?(tenant, :id) do
+      "a %#{inspect(struct)}{} whose :id is nil"
+    else
+      "a %#{inspect(struct)}{}, which has no :id field"
+    end
+  end
+
+  def describe_tenant(tenant) when is_map(tenant) do
+    "a map with keys #{inspect(tenant |> Map.keys() |> Enum.filter(&is_atom/1) |> Enum.sort())}"
+  end
+
+  def describe_tenant(tenant) when is_list(tenant), do: "a list of #{length(tenant)} element(s)"
+  def describe_tenant(tenant) when is_tuple(tenant), do: "a #{tuple_size(tenant)}-tuple"
+  def describe_tenant(tenant) when is_float(tenant), do: "a float"
+  def describe_tenant(tenant) when is_pid(tenant), do: "a pid"
+  def describe_tenant(tenant) when is_reference(tenant), do: "a reference"
+  def describe_tenant(tenant) when is_function(tenant), do: "a function"
+  def describe_tenant(_tenant), do: "a term of an unsupported type"
 
   defp tenant(%Context{ash_context: ash_context})
        when is_map(ash_context) do

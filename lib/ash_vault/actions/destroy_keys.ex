@@ -21,7 +21,7 @@ defmodule AshVault.Actions.DestroyKeys do
     vault = AshVault.Info.vault!(input.resource, ctx.ash_context)
     scope = AshVault.Info.scope_module(input.resource).resolve!(ctx)
 
-    {:ok, AshVault.destroy_keys!(vault, scope)}
+    {:ok, AshVault.destroy_keys!(vault, scope, ctx)}
   rescue
     error in [
       AshVault.Errors.MissingScope,

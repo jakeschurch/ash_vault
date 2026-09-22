@@ -84,7 +84,10 @@ defmodule AshVault.Scopes.AshTenantTest do
       refute message =~ "Pass a tenant when executing the Ash action"
 
       assert message =~ "of a shape"
-      assert message =~ "{:weird, :shape}"
+      assert message =~ "a 2-tuple"
+      # The shape, never the contents: a tenant is routinely a loaded record full of
+      # customer PII, and this error ends up in logs and APM.
+      refute message =~ "weird"
       assert message =~ "this is not a missing-tenant error"
       assert message =~ "to_scope_key/2"
       assert message =~ "AshVault.Scopes.AshTenant"

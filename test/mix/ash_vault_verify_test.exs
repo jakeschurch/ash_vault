@@ -102,6 +102,39 @@ defmodule Mix.Tasks.AshVault.VerifyTest do
     assert Exception.message(error) =~ id
   end
 
+  # `stats.mismatches` is handed back to the caller of `AshVault.Backfill.run/3`, so one
+  # `Logger.error(inspect(stats))` in a deployment script would dump the plaintext of every
+  # mismatched row. The mismatch detail therefore records that the values differ, never
+  # what they were.
+  test "a value mismatch records that it happened, not the plaintext", %{org: org} do
+    backfill(org)
+
+    # Rewrite the source column so the (correct) ciphertext no longer matches it.
+    Repo.query!(
+      "UPDATE legacy_users SET legacy_email = 'rewritten@example.com' WHERE org_id::text = $1",
+      [org]
+    )
+
+    assert {:error, error, stats} =
+             AshVault.Backfill.run(AshVault.Test.LegacyUser, :email,
+               tenant: org,
+               verify?: true,
+               sample: 0
+             )
+
+    assert stats.mismatches != []
+
+    for mismatch <- stats.mismatches do
+      assert mismatch.reason == :value_mismatch
+      refute Map.has_key?(mismatch, :actual)
+    end
+
+    rendered = Exception.message(error) <> inspect(stats, limit: :infinity)
+
+    refute rendered =~ "rewritten@example.com"
+    refute rendered =~ "@example.com"
+  end
+
   test "writes nothing", %{org: org} do
     backfill(org)
 

@@ -79,6 +79,14 @@ like erasure; erasure never looks like an outage or like tampering; a configurat
 is never reported as either. This matters when someone has to decide whether to page or to
 close a ticket. See [Operations](operations.md) for the full taxonomy.
 
+This is a **deliberate divergence** from `ash_cloak`, which recommends a generic
+"decryption failed" so the error itself discloses nothing. The trade, the small disclosure
+it accepts (erasure is observable to someone who can already read the ciphertext), why
+AES-GCM means it is not a padding oracle, and the boundary responsibility it puts on any
+public API built on AshVault are all written up in
+`docs/adr/0002-distinguishable-crypto-errors.md`. Read it before exposing these errors to
+an end user.
+
 ### 9. Unstable identifiers silently relocating key material
 
 Scope keys are binaries derived by stringification, never
@@ -205,6 +213,50 @@ offers no way to open a directory for `:file.sync/1` (`:file.open/2` on a direct
 property — a key file durably written before the metadata that names it — does not depend
 on it.
 
+### AshVault's own telemetry, and what a handler can put back in
+
+`AshVault.Telemetry` emits spans around every encrypt, decrypt, rotation and erasure. Their
+metadata is held to the rule that nothing in it would matter if an APM recorded it
+verbatim, because an APM will: no plaintext, no ciphertext, no key material, no actor
+struct — only an `:actor_id`, a resource, a field, and for the key-lifecycle events a
+scope. There is a test that deep-walks the emitted metadata and asserts none of the
+forbidden values appear anywhere in it.
+
+Two residuals:
+
+* **The `:exception` event carries the raised error struct** in `:reason`, because that is
+  `:telemetry.span/3`'s contract, not AshVault's choice. Those structs hold no plaintext,
+  but they do hold a scope (a tenant id) and a provider-supplied reason. Treat an
+  `:exception` handler as an exception reporter.
+* **Your handler runs with your data in scope.** Nothing stops a handler enriching an
+  audit row with the record it was called about. Do not.
+
+The scope on the key-lifecycle events is a tenant identifier: not a secret, frequently
+customer PII. An audit log built from these events survives the erasure it records — which
+is the point of it — so it is one more place a destroyed subject's identifiers live on.
+See [Operations](operations.md#telemetry-and-the-compliance-audit-log).
+
+### Error messages are held to the same rule as ciphertext
+
+Two error paths carry values that AshVault does not control, and both are redacted at
+construction rather than at render time, because `inspect/1` on the struct reaches logs
+just as readily as `Exception.message/1` does:
+
+* `AshVault.Errors.SerializationFailed` carries the raw return of `Ash.Type.dump_to_embedded/3`
+  or `cast_from_embedded/3`. Built-in Ash types return `:error` or `{:error, index: 0}`, but
+  the `Ash.Type` contract permits `{:error, message: ..., value: value}` — where `value` is
+  the plaintext. The shape and the keys survive; every leaf that is not an atom or an
+  integer becomes `{:redacted, kind}`, `:message` included, since a type is free to
+  interpolate the value into its message and truncating a short secret still yields the
+  secret.
+* `AshVault.Errors.MissingScope` describes the tenant it could not reduce to a scope key
+  (`AshVault.Scopes.AshTenant.describe_tenant/1`) rather than inspecting it. A tenant is
+  routinely a loaded record full of customer PII, and this error is raised precisely when
+  something is already going wrong and being logged.
+
+This closes the path AshVault controls. It does not close the general one — see *Plaintext
+that escapes through other doors*, above.
+
 ### Key backups versus erasure
 
 There is no free answer here. Retained copies of the key store can resurrect a destroyed
@@ -252,5 +304,8 @@ first, under the old module name, or keep the old name as the encrypted field's 
 
 * [Crypto-erasure](crypto-erasure.md) — the guarantee, in detail, with the checklist
 * [Operations](operations.md) — the error taxonomy and how to respond to each
+* `AshVault.Telemetry` — the audit events, and the rules on their metadata
 * `docs/adr/0001-no-cloak-vault.md` — why AshVault does not build on `Cloak.Vault`, and
   why a fixed AAD makes ciphertext freely relocatable
+* `docs/adr/0002-distinguishable-crypto-errors.md` — why §8 above diverges from
+  `ash_cloak`'s generic-error advice, and what that costs

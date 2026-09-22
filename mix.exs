@@ -37,6 +37,7 @@ defmodule AshVault.MixProject do
         "documentation/how-to/writing-a-scope.md",
         "documentation/how-to/writing-a-rotation-policy.md",
         "docs/adr/0001-no-cloak-vault.md",
+        "docs/adr/0002-distinguishable-crypto-errors.md",
         "README.md"
       ],
       groups_for_extras: [
@@ -51,7 +52,8 @@ defmodule AshVault.MixProject do
           AshVault.Dsl,
           AshVault.Info,
           AshVault.Encrypted,
-          AshVault.Serializer
+          AshVault.Serializer,
+          AshVault.Telemetry
         ],
         "Extension internals": [
           AshVault.Changes.Encrypt,
@@ -137,6 +139,7 @@ defmodule AshVault.MixProject do
       {:ash_cloak, "~> 0.1", only: [:dev, :test]},
       {:cloak, "~> 1.1", only: [:dev, :test]},
       {:req, "~> 0.5"},
+      {:telemetry, "~> 1.0"},
       {:ex_doc, ">= 0.0.0", only: :dev, runtime: false}
     ]
   end
