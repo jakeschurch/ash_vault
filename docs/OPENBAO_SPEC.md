@@ -102,3 +102,54 @@ identical contract), plus:
 - destroy then `current_key` returns `:destroyed` (not a fresh v1)
 - destroy is idempotent
 - wrong token -> `ProviderUnavailable`, never `:destroyed`
+
+
+---
+
+## Corrections from the live implementation (authoritative over the table above)
+
+Verified against openbao 2.6.2 while building the provider.
+
+### Status codes: several failures are 400, not 404
+
+| Probe | Actual |
+|---|---|
+| `GET /v1/transit/export/encryption-key/<k>/<above latest>` | `400 "version does not exist or cannot be found"` |
+| same, below `min_decryption_version` | `400 "version for export is below minimum decryption version"` |
+| `DELETE /v1/transit/keys/<absent>` | `400 "could not delete key; not found"` |
+| `POST /v1/transit/keys/<absent>/config` | `400 "no existing key named ... could be found"` |
+| `POST /v1/transit/keys/<absent>/rotate` | `400 "key not found"` |
+| `POST /v1/sys/mounts/<existing>` | `400 "path is already in use"` — the mount call is **not** idempotent; idempotency must be synthesized client-side |
+
+### Two 404 flavours that decide whether erasure holds
+
+- **Missing KV mount** returns `404 "no handler for route ... route entry not found."` — status-identical
+  to "no tombstone here". If read naively, a missing mount reads as *not destroyed* and an erased tenant
+  comes back to life. The provider therefore mounts KV and retries once; if the route is still missing it
+  returns `ProviderUnavailable` and **never** concludes "no tombstone". Tombstone reads fail closed.
+- **Soft-deleted tombstone** returns `404` with a body carrying `metadata` / `deletion_time` and
+  `data: null`. It existed, so it counts as **destroyed**.
+
+### `key_name/1` — the spec's dash replacement was a security bug
+
+This document originally specified:
+
+    Base.url_encode64(scope, padding: false) |> String.replace("-", "_")
+
+That is **not injective**. `Base.url_encode64("ab>") == "YWI-"` and `Base.url_encode64("ab?") == "YWI_"`
+both collapse to `ashvault_YWI_` — two different tenants sharing one transit key, so destroying one
+tenant would crypto-erase the other. Transit accepts `-` in key names directly (verified: creating
+`ashvault_aB-c.d_e` returns 200). The implemented, correct form is:
+
+    "ashvault_" <> Base.url_encode64(scope, padding: false)
+
+The tombstone path likewise uses `tombstones/<key_name(scope)>`, not the raw scope — a scope containing
+`/` would otherwise silently reshape the KV hierarchy.
+
+### Other confirmations
+
+- Export returns **standard** base64 (`+` and `/`), so decode with `Base.decode64/1`, not `url_decode64`.
+- Creating a key that already exists is idempotent: returns the existing metadata, does not re-mint.
+- Wrong token yields `403 permission denied` on every endpoint — always `ProviderUnavailable`, never `:destroyed`.
+- `rotate/1` on a scope with no key returns `{:ok, 1}` (the create mints v1), matching the Memory provider.
+- Extra config keys beyond those listed above: `:receive_timeout` (default 5s), `:max_retries` (default 2).

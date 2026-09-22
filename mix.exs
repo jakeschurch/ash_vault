@@ -8,6 +8,7 @@ defmodule AshVault.MixProject do
       elixir: "~> 1.17",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
+      aliases: aliases(),
       consolidate_protocols: Mix.env() != :test,
       deps: deps()
     ]
@@ -20,6 +21,14 @@ defmodule AshVault.MixProject do
     ]
   end
 
+  defp aliases do
+    [
+      "test.all": ["test --include postgres --include openbao"],
+      "test.ci": ["test"],
+      "spark.formatter": "spark.formatter --extensions AshVault"
+    ]
+  end
+
   defp elixirc_paths(:test), do: ["lib", "test/support"]
   defp elixirc_paths(_), do: ["lib"]
 
@@ -29,6 +38,8 @@ defmodule AshVault.MixProject do
       {:spark, "~> 2.0"},
       {:jason, "~> 1.4"},
       {:ash_postgres, "~> 2.0", only: [:dev, :test]},
+      {:simple_sat, "~> 0.1", only: [:dev, :test]},
+      {:sourceror, "~> 1.0", only: [:dev, :test]},
       {:ash_cloak, "~> 0.1", only: [:dev, :test]},
       {:cloak, "~> 1.1", only: [:dev, :test]},
       {:req, "~> 0.5"},
