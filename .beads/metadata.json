@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "ashvault",
+  "project_id": "cd951798-cfa2-446f-b0dd-8f4ed17f2522"
+}

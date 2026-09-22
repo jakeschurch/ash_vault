@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# vim: set ft=sh
+
+COMMIT_MSG_FILE=$1
+COMMIT_SOURCE=$2
+_SHA1=$3
+
+remove_default_message_block() {
+  perl -i.bak -ne 'print unless(m/^. Please enter the commit message/..m/^#$/)' "$COMMIT_MSG_FILE"
+}
+
+extract_story_prefix() {
+  git symbolic-ref --short HEAD | grep -Eo 'sc-[0-9]+'
+}
+
+insert_refs_block() {
+  local prefix="$1"
+  awk -v prefix="$prefix" '
+    BEGIN { inserted=0 }
+    {
+      if (!inserted && $0 !~ /^#/ && $0 !~ /^\s*$/) {
+        print
+        print "\nRefs:\n- " prefix
+        inserted=1
+        next
+      }
+      print
+    }
+    END {
+      if (!inserted) print "Refs:\n- " prefix
+    }
+  ' "$COMMIT_MSG_FILE" >"${COMMIT_MSG_FILE}.tmp" && mv "${COMMIT_MSG_FILE}.tmp" "$COMMIT_MSG_FILE"
+}
+
+add_signed_off_by() {
+  local SOB
+  SOB=$(git var GIT_COMMITTER_IDENT | sed -n 's/^\(.*>\).*$/Signed-off-by: \1/p')
+  git interpret-trailers --in-place --trailer "$SOB" "$COMMIT_MSG_FILE"
+}
+
+ensure_blank_line_top() {
+  if test "$COMMIT_SOURCE" = ""; then
+    perl -i.bak -pe 'print "\n" if !$first_line++' "$COMMIT_MSG_FILE"
+    rm -f "$COMMIT_MSG_FILE.bak"
+  fi
+}
+
+is_first_commit_on_branch() {
+  # Returns 0 if this is the first unique commit on this branch after branching from main/master
+  local base_branch merge_base unique_count
+  base_branch=$(git branch --list main master | head -n1 | awk '{print $1}')
+  [ "$base_branch" = "" ] && base_branch=main
+
+  merge_base=$(git merge-base HEAD "$base_branch" 2>/dev/null)
+  unique_count=$(git rev-list --count "$merge_base"..HEAD)
+
+  [ "$unique_count" -eq 0 ]
+}
+
+extract_human_title_from_branch() {
+  local branch
+  branch="$(git symbolic-ref --short HEAD)"
+  echo "$branch" | awk -F/ '{print $NF}' | tr '-' ' '
+}
+
+insert_after_first_line() {
+  local message="$1"
+  awk -v msg="$message" '
+    c == 0 && $0 !~ /^\s*$/ { print; print msg; c = 1; next }
+    { print }
+  ' "$COMMIT_MSG_FILE" >"${COMMIT_MSG_FILE}.tmp" && mv "${COMMIT_MSG_FILE}.tmp" "$COMMIT_MSG_FILE"
+}
+
+insert_at_top() {
+  local message="$1"
+  {
+    echo "$message"
+    cat "$COMMIT_MSG_FILE"
+  } >"${COMMIT_MSG_FILE}.tmp" && mv "${COMMIT_MSG_FILE}.tmp" "$COMMIT_MSG_FILE"
+}
+
+main() {
+  remove_default_message_block
+  ensure_blank_line_top
+
+  if is_first_commit_on_branch && [ "$COMMIT_SOURCE" != "message" ]; then
+    insert_at_top "$(extract_human_title_from_branch)"
+  fi
+
+  STORY_PREFIX="$(extract_story_prefix)"
+  if [[ -n "$STORY_PREFIX" ]] && ! head -n 10 "$COMMIT_MSG_FILE" | grep -q "$STORY_PREFIX"; then
+    insert_after_first_line "\nRefs:\n- $STORY_PREFIX"
+  fi
+
+  add_signed_off_by
+}
+
+main "$@"
+
+# --- BEGIN BEADS INTEGRATION v1.0.3 ---
+# This section is managed by beads. Do not remove these markers.
+if command -v bd >/dev/null 2>&1; then
+  export BD_GIT_HOOK=1
+  _bd_timeout=${BEADS_HOOK_TIMEOUT:-300}
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$_bd_timeout" bd hooks run prepare-commit-msg "$@"
+    _bd_exit=$?
+    if [ $_bd_exit -eq 124 ]; then
+      echo >&2 "beads: hook 'prepare-commit-msg' timed out after ${_bd_timeout}s — continuing without beads"
+      _bd_exit=0
+    fi
+  else
+    bd hooks run prepare-commit-msg "$@"
+    _bd_exit=$?
+  fi
+  if [ $_bd_exit -eq 3 ]; then
+    echo >&2 "beads: database not initialized — skipping hook 'prepare-commit-msg'"
+    _bd_exit=0
+  fi
+  if [ $_bd_exit -ne 0 ]; then exit $_bd_exit; fi
+fi
+# --- END BEADS INTEGRATION v1.0.3 ---
