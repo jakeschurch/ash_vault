@@ -116,7 +116,7 @@ defmodule AshVault.KeyProviders.Local do
   material *and* no tombstone. The next `current_key/1` would see an absent scope and
   mint a fresh version 1; existing rows carry `key_version: 1`, so `get_key/2` would
   hand back the **new** v1 key and the caller would get
-  `AshVault.Errors.AuthenticationFailed` — erasure wearing the costume of tampering.
+  `AshVault.Errors.CiphertextIntegrityFailed` — erasure wearing the costume of tampering.
   Tombstone-first fails safe: the worst case is a scope marked destroyed whose key
   files linger, and the provider refuses to serve them anyway.
 
@@ -495,7 +495,7 @@ defmodule AshVault.KeyProviders.Local do
 
   # A key file of the wrong length is a corrupt or truncated key store, not a key. Handed
   # to the cipher it becomes `{:error, {:invalid_key_size, n}}`, which the vault would
-  # report as `AshVault.Errors.AuthenticationFailed` — "your data was tampered with" for
+  # report as `AshVault.Errors.CiphertextIntegrityFailed` — "your data was tampered with" for
   # what is in fact a broken key file.
   defp validate_key_size(%{key_bytes: expected}, key, _scope, _version)
        when byte_size(key) == expected,

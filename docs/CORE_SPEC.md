@@ -42,7 +42,7 @@ Modules (all under `AshVault.Errors.`), with fields:
 | `KeyNotFound` | `:scope, :key_version` | `:invalid` | provider has no such key, and no tombstone |
 | `KeyDestroyed` | `:scope, :key_version` | `:invalid` | key deliberately destroyed (crypto-erasure) |
 | `ProviderUnavailable` | `:provider, :reason` | `:invalid` | transport/backend failure — retryable |
-| `AuthenticationFailed` | `:resource, :field, :key_version` | `:invalid` | AEAD tag mismatch: tampering, wrong AAD, wrong key |
+| `CiphertextIntegrityFailed` | `:resource, :field, :key_version` | `:invalid` | AEAD tag mismatch: tampering, wrong AAD, wrong key |
 | `UnsupportedEnvelope` | `:version` | `:invalid` | envelope version this build cannot parse |
 | `UnsupportedCipher` | `:cipher_id` | `:invalid` | cipher id not in registry |
 | `InvalidCiphertext` | `:reason` | `:invalid` | malformed/truncated/not-an-envelope bytes |
@@ -56,7 +56,7 @@ This resource uses tenant-scoped encryption.
 Pass a tenant when executing the Ash action or configure another AshVault scope.
 ```
 
-Rule: **never** let `{:error, :destroyed}` surface as `AuthenticationFailed`. Destroyed is checked before decrypt.
+Rule: **never** let `{:error, :destroyed}` surface as `CiphertextIntegrityFailed`. Destroyed is checked before decrypt.
 
 ## 2. `AshVault.Context`
 
@@ -260,7 +260,7 @@ opts map — keep generated code to one-line delegations (easier to debug, less 
 3. `scope = scope_mod.resolve!(ctx)`
 4. `provider.get_key(scope, env.key_version)`; `{:error, :destroyed}` -> raise `KeyDestroyed`; `{:error, :not_found}` -> raise `KeyNotFound`; other -> `ProviderUnavailable`
 5. `aad = build_aad(scope, ctx)`
-6. `cipher_mod.decrypt(payload, key, aad)`; error -> raise `AuthenticationFailed` with resource/field/key_version
+6. `cipher_mod.decrypt(payload, key, aad)`; error -> raise `CiphertextIntegrityFailed` with resource/field/key_version
 
 ### AAD — BINDING
 
@@ -291,7 +291,7 @@ def destroy_keys!(vault, scope), do: vault.destroy!(scope)
 - cipher: roundtrip; AAD mismatch fails; flipped ciphertext byte fails; flipped tag byte fails; wrong key fails; 1000 encryptions produce 1000 distinct nonces; bad key size rejected; empty plaintext roundtrips.
 - envelope: roundtrip incl. empty ciphertext and large (1MB) ciphertext; decode rejects `""`, `"AV"`, truncated-at-every-prefix-length (property-ish loop) without raising; unknown version byte -> UnsupportedEnvelope; non-AV magic -> InvalidCiphertext; key_version 0 and 2^32-1 roundtrip.
 - provider (Memory): first `current_key` mints v1; rotate -> v2 and v1 still fetchable; get_key unknown version -> :not_found; destroy -> current_key and get_key both :destroyed; destroy twice is idempotent; destroyed scope never re-mints.
-- vault: roundtrip through a test vault; cross-scope decrypt raises AuthenticationFailed; cross-field decrypt raises AuthenticationFailed; cross-resource decrypt raises AuthenticationFailed; decrypt after destroy raises KeyDestroyed (NOT AuthenticationFailed); rotation — encrypt with v1, rotate, old blob still decrypts, new blob carries key_version 2 (assert by decoding the envelope); missing tenant raises MissingScope with the documented message.
+- vault: roundtrip through a test vault; cross-scope decrypt raises CiphertextIntegrityFailed; cross-field decrypt raises CiphertextIntegrityFailed; cross-resource decrypt raises CiphertextIntegrityFailed; decrypt after destroy raises KeyDestroyed (NOT CiphertextIntegrityFailed); rotation — encrypt with v1, rotate, old blob still decrypts, new blob carries key_version 2 (assert by decoding the envelope); missing tenant raises MissingScope with the documented message.
 
 Use `async: true` everywhere except tests sharing the named Memory provider; for those,
 start a uniquely-named Memory provider per test with `start_supervised!`.

@@ -117,7 +117,7 @@ a new key while the old ones are unreadable.
 
 **The AAD.** The scope key is bound into every ciphertext's authentication tag. If it
 changes, every existing row of that tenant fails with
-`AshVault.Errors.AuthenticationFailed` — erasure wearing the costume of tampering.
+`AshVault.Errors.CiphertextIntegrityFailed` — erasure wearing the costume of tampering.
 
 `:erlang.term_to_binary/1` output is explicitly not guaranteed stable across OTP releases,
 so an OTP upgrade would do both at once. AshVault enforces the binary half in exactly one

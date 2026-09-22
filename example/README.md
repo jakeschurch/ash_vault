@@ -148,7 +148,7 @@ Both providers require a one-time operator step, which `mix example.setup` perfo
 | 3 | Through Ash the same rows read back as plaintext. `decrypt_by_default` means no explicit `load`. |
 | 4 | A field policy denies `User.email` to a non-admin actor — it arrives as `%Ash.ForbiddenField{}`, and the decrypt calculation passes it through instead of decrypting it. A separate action policy refuses `rotate_key` to that actor: key lifecycle is as guarded as you make it. |
 | 5 | **Rotation.** `rotate_key` mints v2; new writes carry key version 2 while existing rows still carry 1, decoded from the stored bytes, byte-identical to before. Org B, a different scope, is untouched. |
-| 6 | **Crypto-erasure.** One `destroy_keys` on `Organization` and both `User` and `Contact` reads for that tenant return `AshVault.Errors.KeyDestroyed` — never `AuthenticationFailed`, because erasure must not look like tampering. The rows are all still in PostgreSQL. Org B is unaffected. |
+| 6 | **Crypto-erasure.** One `destroy_keys` on `Organization` and both `User` and `Contact` reads for that tenant return `AshVault.Errors.KeyDestroyed` — never `CiphertextIntegrityFailed`, because erasure must not look like tampering. The rows are all still in PostgreSQL. Org B is unaffected. |
 | 7 | **The point.** A `pg_dump` taken *before* the erasure is restored into a freshly created database. Every byte of the ciphertext comes back, bit for bit — and it is still undecryptable, because the key was never in the dump. |
 
 Step 6 also asserts the negative on the dump itself: no plaintext in any encoding, and

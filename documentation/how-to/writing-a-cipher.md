@@ -38,7 +38,7 @@ Rules:
 * **Error vocabulary.** Return `{:error, {:invalid_key_size, n}}` for a wrong-size key and
   `{:error, :auth_failed}` (or any other term) for a verification failure. The first is
   mapped to `AshVault.Errors.KeySizeMismatch` — a configuration fault, not retryable and
-  not tampering; everything else becomes `AshVault.Errors.AuthenticationFailed`. Getting
+  not tampering; everything else becomes `AshVault.Errors.CiphertextIntegrityFailed`. Getting
   this backwards tells an operator their data was tampered with when they made a typo in
   `config/runtime.exs`.
 
@@ -86,7 +86,7 @@ end
 ```
 
 A `FunctionClauseError` or an `ErlangError` escaping the cipher is an unhelpful 500 where
-an `AuthenticationFailed` belonged.
+a `CiphertextIntegrityFailed` belonged.
 
 ### Add a total fallback clause
 

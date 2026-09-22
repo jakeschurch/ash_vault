@@ -261,6 +261,39 @@ defmodule AshVault.Test.Support.NonBinaryScopeVault do
     scope: AshVault.Test.Support.NonBinaryScope
 end
 
+defmodule AshVault.Test.Support.PiiTenant do
+  @moduledoc """
+  A tenant-shaped struct carrying PII, for proving that errors describe it rather than
+  print it. A real tenant record looks exactly like this.
+  """
+
+  defstruct [:id, :name, :billing_email]
+end
+
+defmodule AshVault.Test.Support.StructScope do
+  @moduledoc "A scope implementation that returns a loaded tenant record, not a binary."
+
+  @behaviour AshVault.Scope
+
+  @doc false
+  @impl AshVault.Scope
+  def resolve!(_context) do
+    %AshVault.Test.Support.PiiTenant{
+      id: "org_1a2b3c",
+      name: "Acme Holdings",
+      billing_email: "cfo@acme.example"
+    }
+  end
+end
+
+defmodule AshVault.Test.Support.StructScopeVault do
+  @moduledoc "Vault whose custom scope returns a PII-bearing struct instead of a binary."
+
+  use AshVault.Vault,
+    key_provider: AshVault.KeyProviders.Memory,
+    scope: AshVault.Test.Support.StructScope
+end
+
 defmodule AshVault.Test.Support.FixedKeyVault do
   @moduledoc """
   A vault whose provider hands out the SAME key for every scope, with manual rotation.

@@ -47,7 +47,7 @@ than silently decrypting into the wrong field.
 ### 6. Tampered ciphertext
 
 AES-256-GCM authenticates the ciphertext. Any modified byte — in the ciphertext, the nonce,
-or the tag — fails with `AshVault.Errors.AuthenticationFailed`. AshVault never returns
+or the tag — fails with `AshVault.Errors.CiphertextIntegrityFailed`. AshVault never returns
 partially-decrypted or unauthenticated data.
 
 ### 7. Key rotation without re-encryption
@@ -57,7 +57,7 @@ what new writes use without touching, or endangering, existing rows.
 
 ### 8. Operational distinguishability
 
-`KeyDestroyed`, `KeyNotFound`, `ProviderUnavailable`, and `AuthenticationFailed` are distinct
+`KeyDestroyed`, `KeyNotFound`, `ProviderUnavailable`, and `CiphertextIntegrityFailed` are distinct
 errors. A provider outage never looks like erasure; erasure never looks like an outage or like
 tampering. This matters when someone has to decide whether to page or to close a ticket.
 

@@ -54,7 +54,7 @@ than silently decrypting into the wrong field.
 ### 6. Tampered ciphertext
 
 AES-256-GCM authenticates the ciphertext. Any modified byte — in the ciphertext, the
-nonce, or the tag — fails with `AshVault.Errors.AuthenticationFailed`. AshVault never
+nonce, or the tag — fails with `AshVault.Errors.CiphertextIntegrityFailed`. AshVault never
 returns partially-decrypted or unauthenticated data.
 
 This includes a **truncated tag**, which is a real attack and not an edge case: OTP's
@@ -73,7 +73,7 @@ what new writes use without touching, or endangering, existing rows.
 
 ### 8. Operational distinguishability
 
-`KeyDestroyed`, `KeyNotFound`, `ProviderUnavailable`, `AuthenticationFailed`,
+`KeyDestroyed`, `KeyNotFound`, `ProviderUnavailable`, `CiphertextIntegrityFailed`,
 `KeySizeMismatch` and `InvalidScope` are distinct errors. A provider outage never looks
 like erasure; erasure never looks like an outage or like tampering; a configuration typo
 is never reported as either. This matters when someone has to decide whether to page or to
@@ -296,7 +296,7 @@ you need row-level erasure, the scope must be row-level — that is what the plu
 
 The AAD contains `inspect(resource)`. Renaming `MyApp.User` to `MyApp.Accounts.User`
 changes the AAD, and every existing row of that resource then fails with
-`AuthenticationFailed`. This is a deliberate tradeoff — binding the resource is what stops
+`CiphertextIntegrityFailed`. This is a deliberate tradeoff — binding the resource is what stops
 cross-resource relocation — but it means a module rename is a data migration. Re-encrypt
 first, under the old module name, or keep the old name as the encrypted field's home.
 

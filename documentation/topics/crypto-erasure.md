@@ -35,7 +35,7 @@ returns:
 2. **Reads fail with a specific, distinguishable error.**
    `AshVault.Errors.KeyDestroyed`, from `Ash.read/2`, as a clean error value — not a
    raised exception, not a 500, and specifically **not**
-   `AshVault.Errors.AuthenticationFailed`. Destruction is checked *before* any decryption
+   `AshVault.Errors.CiphertextIntegrityFailed`. Destruction is checked *before* any decryption
    is attempted, so erasure never looks like tampering.
 3. **The scope cannot come back.** This is the tombstone's job, and it is the difference
    between crypto-erasure and silent data loss. See below.
@@ -106,7 +106,7 @@ erased subject. What follows is worse than not erasing at all:
 * the subject looks brand new and starts writing rows under the new key,
 * every pre-existing row carries `key_version: 1`, so `get_key(scope, 1)` returns the
   **new** v1 key,
-* the tag check fails, and the operator is told `AshVault.Errors.AuthenticationFailed` —
+* the tag check fails, and the operator is told `AshVault.Errors.CiphertextIntegrityFailed` —
   *your data was tampered with* — for an erasure the system performed on itself,
 * and nothing anywhere records that a destroy was ever attempted.
 
@@ -276,7 +276,7 @@ Before you rely on this in production:
 - [ ] **For `OpenBao`:** the KV mount exists (`AshVault.KeyProviders.OpenBao.setup/0`), the
       app's token has transit *and* the `transit/export` capability, and nothing else does.
 - [ ] **Your monitoring distinguishes `KeyDestroyed` from `ProviderUnavailable` from
-      `AuthenticationFailed`.** They mean close the ticket, page someone, and investigate
+      `CiphertextIntegrityFailed`.** They mean close the ticket, page someone, and investigate
       an attack, respectively. See [Operations](operations.md).
 - [ ] **You have inventoried every path plaintext takes out of the application** — logs,
       warehouse, CDC, integrations, caches, search — and either stopped them or included

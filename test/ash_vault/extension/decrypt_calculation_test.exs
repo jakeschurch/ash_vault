@@ -3,7 +3,7 @@ defmodule AshVault.Extension.DecryptCalculationTest do
   use ExUnit.Case, async: false
 
   alias AshVault.Calculations.Decrypt
-  alias AshVault.Errors.AuthenticationFailed
+  alias AshVault.Errors.CiphertextIntegrityFailed
   alias AshVault.Errors.InvalidCiphertext
   alias AshVault.Errors.KeyDestroyed
   alias AshVault.KeyProviders.Memory
@@ -133,7 +133,7 @@ defmodule AshVault.Extension.DecryptCalculationTest do
                Ash.read(EtsUser, tenant: "doomed", load: [:email])
 
       assert Enum.any?(errors, &match?(%KeyDestroyed{scope: "doomed"}, &1))
-      refute Enum.any?(errors, &match?(%AuthenticationFailed{}, &1))
+      refute Enum.any?(errors, &match?(%CiphertextIntegrityFailed{}, &1))
     end
 
     test "one tenant cannot read another's rows" do

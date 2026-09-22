@@ -101,7 +101,7 @@ rejected.
 If the tombstone write fails after the shred (ENOSPC, EACCES, read-only remount) — or the process
 crashes between the two — the scope has no keys AND no tombstone. The next `current_key/1` mints
 a fresh **v1**. Existing rows carry `key_version: 1`, so `get_key/2` returns the NEW v1 key, the
-tag check fails, and the caller gets **`AuthenticationFailed`** — violating the core spec's
+tag check fails, and the caller gets **`CiphertextIntegrityFailed`** — violating the core spec's
 hardest rule that erasure must never look like tampering.
 
 **This was my spec's fault** — docs/LOCAL_PROVIDER_SPEC.md mandated that order and has now been
@@ -125,7 +125,7 @@ the NEXT `current_key/1` does **not** return `{:ok, %{version: 1}}`.
 bytes the file holds, no length check).
 
 - Decrypt: `{:error, {:invalid_key_size, n}}` is caught by the generic `{:error, _}` clause →
-  raises **`AuthenticationFailed`**. A config typo is reported as "your data was tampered with".
+  raises **`CiphertextIntegrityFailed`**. A config typo is reported as "your data was tampered with".
 - Encrypt: raises `ProviderUnavailable` naming the CIPHER as the "provider", for an error its own
   moduledoc calls retryable. Operators retry a permanent misconfiguration forever.
 

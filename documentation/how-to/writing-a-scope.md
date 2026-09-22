@@ -254,7 +254,7 @@ a *restatement* rather than an inference.
 * a shape you do not accept raises `MissingScope` with `reason: :unsupported_tenant_shape`
   and *not* the missing-subject message;
 * an end-to-end vault roundtrip through a vault configured with your scope, plus a
-  cross-scope decrypt that fails with `AshVault.Errors.AuthenticationFailed`. Use a
+  cross-scope decrypt that fails with `AshVault.Errors.CiphertextIntegrityFailed`. Use a
   fixed-key provider for that last one (see `AshVault.Test.Support.FixedKeyVault`) — with
   per-scope keys the failure could be the key differing rather than the AAD binding, and
   the test would not prove what it claims.

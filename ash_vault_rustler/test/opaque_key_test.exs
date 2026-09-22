@@ -160,7 +160,7 @@ defmodule AshVaultRustler.OpaqueKeyTest do
       refute message =~ "decrypting"
     end
 
-    test "the decrypt direction raises the same error, never AuthenticationFailed",
+    test "the decrypt direction raises the same error, never CiphertextIntegrityFailed",
          %{scope: scope} do
       context = ctx(scope)
       blob = OpaqueVault.encrypt!("secret", context)

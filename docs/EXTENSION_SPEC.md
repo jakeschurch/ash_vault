@@ -533,8 +533,8 @@ is already running on 5432):
 - field policy denying the decrypted field blocks it while leaving other fields readable
 - tenant flows: two tenants, each reads its own value
 - cross-tenant ciphertext substitution (UPDATE the row's blob to the other tenant's) ->
-  `AuthenticationFailed`
-- cross-field substitution (copy `encrypted_ssn` into `encrypted_email`) -> `AuthenticationFailed`
+  `CiphertextIntegrityFailed`
+- cross-field substitution (copy `encrypted_ssn` into `encrypted_email`) -> `CiphertextIntegrityFailed`
 - plaintext absent from `changeset.arguments` and `changeset.params` after the change runs,
   on both the `change/3` and atomic paths
 - destroyed scope -> `Ash.read` returns `KeyDestroyed`, not a raised exception and not a 500

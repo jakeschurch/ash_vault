@@ -147,7 +147,7 @@ releases and ciphertext has to outlive OTP upgrades.
 Binding scope, resource and field into the authentication tag means a ciphertext cannot be
 relocated: pasting tenant A's `encrypted_email` into tenant B's row, or `encrypted_ssn`
 into `encrypted_email`, or a `users` blob into `contacts`, fails authentication with
-`AshVault.Errors.AuthenticationFailed` rather than silently decrypting into the wrong
+`AshVault.Errors.CiphertextIntegrityFailed` rather than silently decrypting into the wrong
 place.
 
 The `inspect(resource)` in there is a deliberate tradeoff: renaming a resource module
@@ -204,7 +204,7 @@ fallback to a global key; it is `AshVault.Errors.MissingScope`.
 | Serializer | `SerializationFailed`, `UnsupportedEnvelope` (`layer: :plaintext`), `InvalidCiphertext` |
 | Scope | `MissingScope`, `InvalidScope` |
 | Key provider | `KeyDestroyed`, `KeyNotFound`, `ProviderUnavailable` |
-| Cipher | `AuthenticationFailed`, `KeySizeMismatch` |
+| Cipher | `CiphertextIntegrityFailed`, `KeySizeMismatch` |
 | Envelope | `InvalidCiphertext`, `UnsupportedEnvelope`, `UnsupportedCipher` |
 
 `AshVault.Vault.Runtime` is the single place raw provider error terms are mapped onto those

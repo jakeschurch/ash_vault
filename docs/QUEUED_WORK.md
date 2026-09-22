@@ -7,7 +7,10 @@ are editing `lib/ash_vault/errors.ex` and `lib/ash_vault/vault/runtime.ex`.
 
 ## 1. Rename `AshVault.Errors.AuthenticationFailed` → `AshVault.Errors.CiphertextIntegrityFailed`
 
-**Status:** queued, agreed.
+**Status: DONE.** The module is `AshVault.Errors.CiphertextIntegrityFailed`, no alias was
+left behind, and `message/1` now leads with the integrity failure and states outright that
+it is not an authorization error. The scope below is kept as the record of why; the name
+`AuthenticationFailed` survives only in this section's own prose.
 
 ### Why
 
@@ -60,6 +63,9 @@ confusing name this change exists to remove.
 
 `grep -rn AuthenticationFailed` returns nothing outside this file's history, and
 `mix test --include postgres --include openbao` is green at its then-current count.
+
+Met: 323 tests (320 + one asserting the new message's "not an authorization error"
+disclaimer, and two for the `runtime.ex` redactions), 425 with postgres and openbao.
 
 ---
 

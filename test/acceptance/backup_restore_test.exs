@@ -25,7 +25,7 @@ defmodule AshVault.Acceptance.BackupRestoreTest do
 
   @moduletag :postgres
 
-  alias AshVault.Errors.AuthenticationFailed
+  alias AshVault.Errors.CiphertextIntegrityFailed
   alias AshVault.Errors.KeyDestroyed
   alias AshVault.KeyProviders.Local
   alias AshVault.Test.AcceptanceUser
@@ -162,7 +162,7 @@ defmodule AshVault.Acceptance.BackupRestoreTest do
     # ── 5. crypto-erase tenant A ────────────────────────────────────────────────────
     assert :ok = AshVault.destroy_keys!(vault, tenant_a)
 
-    # ── 6. A reads KeyDestroyed — not AuthenticationFailed, not a raise ─────────────
+    # ── 6. A reads KeyDestroyed — not CiphertextIntegrityFailed, not a raise ─────────────
     assert_key_destroyed(tenant_a)
     assert [%{email: @email_b, ssn: @ssn_b}] = read!(tenant_b)
 
@@ -204,7 +204,7 @@ defmodule AshVault.Acceptance.BackupRestoreTest do
     assert Enum.any?(errors, &match?(%KeyDestroyed{}, &1)),
            "expected AshVault.Errors.KeyDestroyed, got: #{inspect(errors)}"
 
-    refute Enum.any?(errors, &match?(%AuthenticationFailed{}, &1)),
+    refute Enum.any?(errors, &match?(%CiphertextIntegrityFailed{}, &1)),
            "erasure must never be reported as tampering: #{inspect(errors)}"
   end
 

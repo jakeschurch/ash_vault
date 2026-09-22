@@ -27,9 +27,9 @@ defmodule AshVault.Acceptance.DefinitionOfDoneTest do
    4. the database contains no plaintext — the raw column is an `"AV"` envelope  [anchor]
    5. embedded, array and array-of-embedded attributes round-trip
    6. nil handling — `encrypt_nil?: true` stores ciphertext, `false` stores SQL NULL
-   7. cross-tenant ciphertext substitution fails with `AuthenticationFailed`  [anchor]
-   8. cross-field / cross-resource substitution fails with `AuthenticationFailed`  [anchor]
-   9. tampered ciphertext fails with `AuthenticationFailed`
+   7. cross-tenant ciphertext substitution fails with `CiphertextIntegrityFailed`  [anchor]
+   8. cross-field / cross-resource substitution fails with `CiphertextIntegrityFailed`  [anchor]
+   9. tampered ciphertext fails with `CiphertextIntegrityFailed`
   10. multitenancy — each tenant reads its own value; one tenant key spans resources
   11. rotation — the envelope carries the key version; pre-rotation rows keep decrypting
   12. crypto-erasure — a destroyed scope reads `KeyDestroyed`; the rows stay
@@ -44,7 +44,7 @@ defmodule AshVault.Acceptance.DefinitionOfDoneTest do
 
   @moduletag :postgres
 
-  alias AshVault.Errors.AuthenticationFailed
+  alias AshVault.Errors.CiphertextIntegrityFailed
   alias AshVault.Errors.KeyDestroyed
   alias AshVault.Errors.KeyNotFound
   alias AshVault.Errors.MissingScope
@@ -172,7 +172,7 @@ defmodule AshVault.Acceptance.DefinitionOfDoneTest do
 
     errors = read_errors(@acme, [:email])
 
-    assert Enum.any?(errors, &match?(%AuthenticationFailed{}, &1))
+    assert Enum.any?(errors, &match?(%CiphertextIntegrityFailed{}, &1))
     refute Enum.any?(errors, &match?(%KeyDestroyed{}, &1))
   end
 
@@ -182,7 +182,7 @@ defmodule AshVault.Acceptance.DefinitionOfDoneTest do
 
     # field -> field, same row, same key
     raw("UPDATE users SET encrypted_email = encrypted_ssn")
-    assert Enum.any?(read_errors(@acme, [:email]), &match?(%AuthenticationFailed{}, &1))
+    assert Enum.any?(read_errors(@acme, [:email]), &match?(%CiphertextIntegrityFailed{}, &1))
 
     # resource -> resource, same tenant, same key
     Contact
@@ -195,7 +195,7 @@ defmodule AshVault.Acceptance.DefinitionOfDoneTest do
     assert {:error, %Ash.Error.Invalid{errors: contact_errors}} =
              Contact |> Ash.Query.load([:phone]) |> Ash.read(tenant: @acme)
 
-    assert Enum.any?(contact_errors, &match?(%AuthenticationFailed{}, &1))
+    assert Enum.any?(contact_errors, &match?(%CiphertextIntegrityFailed{}, &1))
   end
 
   # ── 9. tampered ciphertext ─────────────────────────────────────────────────────────
@@ -212,7 +212,7 @@ defmodule AshVault.Acceptance.DefinitionOfDoneTest do
     refute tampered == blob
     raw("UPDATE users SET encrypted_email = $1", [tampered])
 
-    assert Enum.any?(read_errors(@acme, [:email]), &match?(%AuthenticationFailed{}, &1))
+    assert Enum.any?(read_errors(@acme, [:email]), &match?(%CiphertextIntegrityFailed{}, &1))
   end
 
   # ── 10. multitenancy ───────────────────────────────────────────────────────────────
@@ -257,14 +257,14 @@ defmodule AshVault.Acceptance.DefinitionOfDoneTest do
 
     errors = read_errors(@acme, [:email])
     assert Enum.any?(errors, &match?(%KeyDestroyed{}, &1))
-    refute Enum.any?(errors, &match?(%AuthenticationFailed{}, &1))
+    refute Enum.any?(errors, &match?(%CiphertextIntegrityFailed{}, &1))
 
     assert [[1]] = raw("SELECT count(*) FROM users WHERE org_id = $1", [uuid(@acme)])
     assert [%{email: "safe@example.invalid"}] = read!(@other, [:email])
   end
 
   # ── 13. the operational errors are distinguishable ─────────────────────────────────
-  test "13. KeyDestroyed, KeyNotFound, ProviderUnavailable, AuthenticationFailed and " <>
+  test "13. KeyDestroyed, KeyNotFound, ProviderUnavailable, CiphertextIntegrityFailed and " <>
          "MissingScope are five distinct errors" do
     context = fn tenant ->
       %AshVault.Context{
@@ -277,11 +277,11 @@ defmodule AshVault.Acceptance.DefinitionOfDoneTest do
     live = "13-live-#{System.unique_integer([:positive])}"
     blob = AshVault.Test.Vault.encrypt!("plaintext", context.(live))
 
-    # AuthenticationFailed — right key, wrong AAD (another tenant's scope).
+    # CiphertextIntegrityFailed — right key, wrong AAD (another tenant's scope).
     other = "13-other-#{System.unique_integer([:positive])}"
     AshVault.Test.Vault.encrypt!("x", context.(other))
 
-    assert_raise AuthenticationFailed, fn ->
+    assert_raise CiphertextIntegrityFailed, fn ->
       AshVault.Test.Vault.decrypt!(blob, context.(other))
     end
 
@@ -303,7 +303,7 @@ defmodule AshVault.Acceptance.DefinitionOfDoneTest do
 
     assert Enum.any?(ticket_errors, &match?(%MissingScope{}, &1))
 
-    # KeyDestroyed — and specifically not AuthenticationFailed.
+    # KeyDestroyed — and specifically not CiphertextIntegrityFailed.
     :ok = AshVault.destroy_keys!(AshVault.Test.Vault, live)
 
     assert_raise KeyDestroyed, fn ->
@@ -398,7 +398,7 @@ defmodule AshVault.Acceptance.DefinitionOfDoneTest do
              AcceptanceUser |> Ash.Query.load([:email]) |> Ash.read(tenant: tenant)
 
     assert Enum.any?(errors, &match?(%KeyDestroyed{}, &1))
-    refute Enum.any?(errors, &match?(%AuthenticationFailed{}, &1))
+    refute Enum.any?(errors, &match?(%CiphertextIntegrityFailed{}, &1))
   end
 
   # ── 17. mix ash_vault.backfill ── [anchor: item 17] ────────────────────────────────

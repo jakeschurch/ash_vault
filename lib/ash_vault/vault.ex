@@ -90,7 +90,7 @@ defmodule AshVault.Vault do
   Called from the `use AshVault.Vault` macro. `AshVault.KeyProvider.key_bytes/1` had
   zero callers, so a `key_bytes: 16` in config, an OpenBao `key_type: "aes128-gcm96"`,
   or a truncated key file on disk all reached the cipher unchecked — and were then
-  reported as two different lies: `AshVault.Errors.AuthenticationFailed` on decrypt
+  reported as two different lies: `AshVault.Errors.CiphertextIntegrityFailed` on decrypt
   ("your data was tampered with", for a config typo) and a retryable
   `AshVault.Errors.ProviderUnavailable` naming the *cipher* as the provider on encrypt.
 

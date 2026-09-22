@@ -15,7 +15,7 @@ defmodule AshVault.VaultLocalTest do
 
   alias AshVault.Context
   alias AshVault.Envelope
-  alias AshVault.Errors.AuthenticationFailed
+  alias AshVault.Errors.CiphertextIntegrityFailed
   alias AshVault.Errors.KeyDestroyed
   alias AshVault.KeyProviders.Local
   alias AshVault.Test.Support.LocalVaultForTests, as: Vault
@@ -91,9 +91,9 @@ defmodule AshVault.VaultLocalTest do
   test "the AAD still binds resource and field over a filesystem provider" do
     blob = Vault.encrypt!("hunter2", ctx())
 
-    assert_raise AuthenticationFailed, fn -> Vault.decrypt!(blob, ctx(field: :dob)) end
+    assert_raise CiphertextIntegrityFailed, fn -> Vault.decrypt!(blob, ctx(field: :dob)) end
 
-    assert_raise AuthenticationFailed, fn ->
+    assert_raise CiphertextIntegrityFailed, fn ->
       Vault.decrypt!(blob, ctx(resource: Resources.Invoice))
     end
   end
@@ -103,6 +103,6 @@ defmodule AshVault.VaultLocalTest do
     {:ok, env} = Envelope.decode(blob)
 
     forged = AshVault.Envelope.V1.encode(%{env | tag: binary_part(env.tag, 0, 1)})
-    assert_raise AuthenticationFailed, fn -> Vault.decrypt!(forged, ctx()) end
+    assert_raise CiphertextIntegrityFailed, fn -> Vault.decrypt!(forged, ctx()) end
   end
 end

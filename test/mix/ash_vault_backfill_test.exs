@@ -342,7 +342,7 @@ defmodule Mix.Tasks.AshVault.BackfillTest do
           source_context: %{}
         })
 
-      assert {:error, %AshVault.Errors.AuthenticationFailed{}} =
+      assert {:error, %AshVault.Errors.CiphertextIntegrityFailed{}} =
                AshVault.decrypt_value(AshVault.Test.Vault, blob, wrong_context, :string, [])
     end
 

@@ -27,7 +27,7 @@ defmodule AshVault.Test.AcceptanceVaultResolver do
 
   The acceptance tests set `:acceptance_vault` in setup and assert, before doing anything
   else, that this resolver actually hands back the vault they think they are testing —
-  otherwise a write/read vault mismatch would show up as a spurious `AuthenticationFailed`
+  otherwise a write/read vault mismatch would show up as a spurious `CiphertextIntegrityFailed`
   and could be mistaken for a passing erasure assertion.
   """
 

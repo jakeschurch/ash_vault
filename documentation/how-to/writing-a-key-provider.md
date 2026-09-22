@@ -102,7 +102,7 @@ If you shred key material and *then* write the tombstone, the window between the
 ENOSPC, an EACCES, a read-only remount, a process crash — leaves the scope with no keys
 **and** no tombstone. The next `current_key/1` mints a fresh version 1; existing rows say
 `key_version: 1`, so `get_key/2` hands back the *new* v1 key, the tag check fails, and the
-caller is told `AshVault.Errors.AuthenticationFailed` — erasure wearing the costume of
+caller is told `AshVault.Errors.CiphertextIntegrityFailed` — erasure wearing the costume of
 tampering.
 
 Tombstone-first fails safe: the worst case is a scope marked destroyed whose key files
@@ -254,7 +254,7 @@ defmodule MyApp.KeyProviders.Sql do
   def destroy(scope) when is_binary(scope) do
     # Tombstone FIRST. A crash after the delete but before the tombstone would leave
     # the scope with no keys and no record, and the next current_key/1 would mint a
-    # fresh v1 — silent, undetectable data loss reported as AuthenticationFailed.
+    # fresh v1 — silent, undetectable data loss reported as CiphertextIntegrityFailed.
     with :ok <- write_tombstone(scope),
          :ok <- delete_keys(scope),
          :destroyed <- tombstone(scope) do

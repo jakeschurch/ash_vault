@@ -94,7 +94,7 @@ defmodule AshVault.MixProject do
         ],
         Errors: [
           AshVault.Errors,
-          AshVault.Errors.AuthenticationFailed,
+          AshVault.Errors.CiphertextIntegrityFailed,
           AshVault.Errors.InvalidCiphertext,
           AshVault.Errors.InvalidScope,
           AshVault.Errors.KeyDestroyed,

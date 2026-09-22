@@ -99,6 +99,10 @@ defmodule AshVault.Scopes.AshTenant do
 
   Structs are therefore named, not printed, and the description says explicitly whether
   an `:id` was present-but-nil or absent altogether — which is the whole diagnosis.
+
+  Every non-struct term is described by `AshVault.Scope.describe/1`, which
+  `AshVault.Errors.InvalidScope` uses too, so a scope term is redacted the same way
+  wherever it surfaces.
   """
   @spec describe_tenant(term()) :: binary()
   def describe_tenant(%struct{} = tenant) do
@@ -109,17 +113,12 @@ defmodule AshVault.Scopes.AshTenant do
     end
   end
 
-  def describe_tenant(tenant) when is_map(tenant) do
-    "a map with keys #{inspect(tenant |> Map.keys() |> Enum.filter(&is_atom/1) |> Enum.sort())}"
-  end
-
-  def describe_tenant(tenant) when is_list(tenant), do: "a list of #{length(tenant)} element(s)"
-  def describe_tenant(tenant) when is_tuple(tenant), do: "a #{tuple_size(tenant)}-tuple"
-  def describe_tenant(tenant) when is_float(tenant), do: "a float"
-  def describe_tenant(tenant) when is_pid(tenant), do: "a pid"
-  def describe_tenant(tenant) when is_reference(tenant), do: "a reference"
-  def describe_tenant(tenant) when is_function(tenant), do: "a function"
-  def describe_tenant(_tenant), do: "a term of an unsupported type"
+  # Everything that is not a struct describes identically to any other scope-shaped term,
+  # so the generic clauses live in `AshVault.Scope.describe/1` and are shared with
+  # `AshVault.Errors.InvalidScope`. Only the struct clause above is tenant-specific: the
+  # present-but-nil vs. absent `:id` distinction is the diagnosis of an unsupported
+  # *tenant* shape, and means nothing for a scope that simply is not a binary.
+  def describe_tenant(tenant), do: AshVault.Scope.describe(tenant)
 
   defp tenant(%Context{ash_context: ash_context})
        when is_map(ash_context) do

@@ -67,7 +67,7 @@ Steps:
    email and SSN values and assert zero hits.
 5. `AshVault.destroy_keys!(vault, tenant_a_scope)`.
 6. Assert reading A's rows returns `AshVault.Errors.KeyDestroyed` (not
-   `AuthenticationFailed`, not a raised exception). Assert B still decrypts.
+   `CiphertextIntegrityFailed`, not a raised exception). Assert B still decrypts.
 7. Restore the dump into the test database (drop + recreate + `psql -f`), i.e. the state from
    **before** the destruction.
 8. Assert A's rows are present again as rows, and that reading them **still** returns
@@ -117,7 +117,7 @@ The list, verbatim from the original project plan (it was previously referenced 
 
 Items 7 and 8 (cross-tenant and cross-field ciphertext substitution) are expressed as direct
 SQL UPDATEs through `Postgrex` that move a ciphertext blob, followed by an `Ash.read` that
-must return `AuthenticationFailed`.
+must return `CiphertextIntegrityFailed`.
 
 Item 4 (DB contains no plaintext) is a `Postgrex` query reading the raw column, asserting the
 bytes start with the `"AV"` envelope magic and contain no substring of the plaintext.

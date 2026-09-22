@@ -110,7 +110,7 @@ good.
   rotating a scope's key is one API call and touches no rows.
 * **Per-scope cryptographic erasure**, with tombstones that fail closed.
 * **A distinguishable error taxonomy.** `KeyDestroyed`, `KeyNotFound`,
-  `ProviderUnavailable`, `AuthenticationFailed`, `KeySizeMismatch` are different errors
+  `ProviderUnavailable`, `CiphertextIntegrityFailed`, `KeySizeMismatch` are different errors
   because the correct human response to each is different. An outage never looks like
   erasure; erasure never looks like tampering.
 * **Operator tooling**: `mix ash_vault.backfill`, `.verify`, `.key_info`, `.rotate`,

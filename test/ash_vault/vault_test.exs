@@ -7,7 +7,7 @@ defmodule AshVault.VaultTest do
 
   alias AshVault.Context
   alias AshVault.Envelope
-  alias AshVault.Errors.AuthenticationFailed
+  alias AshVault.Errors.CiphertextIntegrityFailed
   alias AshVault.Errors.InvalidCiphertext
   alias AshVault.Errors.KeyDestroyed
   alias AshVault.Errors.InvalidScope
@@ -23,6 +23,7 @@ defmodule AshVault.VaultTest do
   alias AshVault.Test.Support.GlobalVault
   alias AshVault.Test.Support.NonBinaryScopeVault
   alias AshVault.Test.Support.ShortKeyProvider
+  alias AshVault.Test.Support.StructScopeVault
   alias AshVault.Test.Support.ShortKeyVault
   alias AshVault.Test.Support.Resources
   alias AshVault.Test.Support.RotatingVault
@@ -108,14 +109,14 @@ defmodule AshVault.VaultTest do
                "ashvault:v1|acme|AshVault.Test.Support.Resources.User|ssn"
     end
 
-    test "cross-scope decrypt raises AuthenticationFailed" do
+    test "cross-scope decrypt raises CiphertextIntegrityFailed" do
       blob = TenantVault.encrypt!("hunter2", ctx(tenant: "acme"))
 
       # Give the other tenant a key of its own, so the failure is the AAD/key mismatch
       # rather than a missing key.
       _ = TenantVault.encrypt!("other", ctx(tenant: "globex"))
 
-      assert_raise AuthenticationFailed, fn ->
+      assert_raise CiphertextIntegrityFailed, fn ->
         TenantVault.decrypt!(blob, ctx(tenant: "globex"))
       end
     end
@@ -135,33 +136,33 @@ defmodule AshVault.VaultTest do
       blob = FixedKeyVault.encrypt!("hunter2", acme)
       assert FixedKeyVault.decrypt!(blob, acme) == "hunter2"
 
-      assert_raise AuthenticationFailed, fn -> FixedKeyVault.decrypt!(blob, globex) end
+      assert_raise CiphertextIntegrityFailed, fn -> FixedKeyVault.decrypt!(blob, globex) end
     end
 
     test "cross-field and cross-resource also fail on the AAD alone" do
       blob = FixedKeyVault.encrypt!("hunter2", ctx())
 
-      assert_raise AuthenticationFailed, fn ->
+      assert_raise CiphertextIntegrityFailed, fn ->
         FixedKeyVault.decrypt!(blob, ctx(field: :dob))
       end
 
-      assert_raise AuthenticationFailed, fn ->
+      assert_raise CiphertextIntegrityFailed, fn ->
         FixedKeyVault.decrypt!(blob, ctx(resource: Resources.Invoice))
       end
     end
 
-    test "cross-field decrypt raises AuthenticationFailed" do
+    test "cross-field decrypt raises CiphertextIntegrityFailed" do
       blob = TenantVault.encrypt!("hunter2", ctx(field: :ssn))
 
-      assert_raise AuthenticationFailed, fn ->
+      assert_raise CiphertextIntegrityFailed, fn ->
         TenantVault.decrypt!(blob, ctx(field: :dob))
       end
     end
 
-    test "cross-resource decrypt raises AuthenticationFailed" do
+    test "cross-resource decrypt raises CiphertextIntegrityFailed" do
       blob = TenantVault.encrypt!("hunter2", ctx(resource: Resources.User))
 
-      assert_raise AuthenticationFailed, fn ->
+      assert_raise CiphertextIntegrityFailed, fn ->
         TenantVault.decrypt!(blob, ctx(resource: Resources.Invoice))
       end
     end
@@ -170,7 +171,7 @@ defmodule AshVault.VaultTest do
       blob = TenantVault.encrypt!("hunter2", ctx())
 
       error =
-        assert_raise AuthenticationFailed, fn ->
+        assert_raise CiphertextIntegrityFailed, fn ->
           TenantVault.decrypt!(blob, ctx(field: :dob))
         end
 
@@ -179,13 +180,36 @@ defmodule AshVault.VaultTest do
       assert error.key_version == 1
     end
 
-    test "tampered ciphertext raises AuthenticationFailed" do
+    test "tampered ciphertext raises CiphertextIntegrityFailed" do
       blob = TenantVault.encrypt!("hunter2", ctx())
       size = byte_size(blob)
       <<prefix::binary-size(^size - 1), byte>> = blob
       tampered = <<prefix::binary, Bitwise.bxor(byte, 0xFF)>>
 
-      assert_raise AuthenticationFailed, fn -> TenantVault.decrypt!(tampered, ctx()) end
+      assert_raise CiphertextIntegrityFailed, fn -> TenantVault.decrypt!(tampered, ctx()) end
+    end
+
+    # An earlier name for this error borrowed the word "authentication" and was misread,
+    # by this project's own author, as an authorization failure — the mis-triage that
+    # turns "someone is writing to your ciphertext columns" into "someone lacks a
+    # permission". The name is fixed; the message says it out loud too, because the
+    # message is what an operator actually reads.
+    test "the message says what happened and that it is NOT an authorization error" do
+      blob = TenantVault.encrypt!("hunter2", ctx())
+      size = byte_size(blob)
+      <<prefix::binary-size(^size - 1), byte>> = blob
+      tampered = <<prefix::binary, Bitwise.bxor(byte, 0xFF)>>
+
+      error =
+        assert_raise CiphertextIntegrityFailed, fn -> TenantVault.decrypt!(tampered, ctx()) end
+
+      message = Exception.message(error)
+
+      assert message =~ "failed its integrity check"
+      assert message =~ "key version 1"
+      assert message =~ "This is not an authorization error."
+      assert message =~ "AshVault performs no authorization"
+      refute message =~ "Failed to authenticate"
     end
   end
 
@@ -218,7 +242,7 @@ defmodule AshVault.VaultTest do
           try do
             {:decrypted, TenantVault.decrypt!(forged, ctx())}
           rescue
-            error in [AuthenticationFailed] -> {:rejected, error}
+            error in [CiphertextIntegrityFailed] -> {:rejected, error}
           end
         end
 
@@ -233,12 +257,12 @@ defmodule AshVault.VaultTest do
       for len <- [0, 1, 2, 4, 8, 12, 15] do
         forged = AshVault.Envelope.V1.encode(%{env | tag: binary_part(env.tag, 0, len)})
 
-        assert_raise AuthenticationFailed, fn -> TenantVault.decrypt!(forged, ctx()) end
+        assert_raise CiphertextIntegrityFailed, fn -> TenantVault.decrypt!(forged, ctx()) end
       end
 
       # An over-long tag is no better.
       forged = AshVault.Envelope.V1.encode(%{env | tag: env.tag <> <<0>>})
-      assert_raise AuthenticationFailed, fn -> TenantVault.decrypt!(forged, ctx()) end
+      assert_raise CiphertextIntegrityFailed, fn -> TenantVault.decrypt!(forged, ctx()) end
     end
 
     test "a truncated nonce is rejected" do
@@ -248,7 +272,7 @@ defmodule AshVault.VaultTest do
       for len <- [0, 1, 8, 11] do
         forged = AshVault.Envelope.V1.encode(%{env | nonce: binary_part(env.nonce, 0, len)})
 
-        assert_raise AuthenticationFailed, fn -> TenantVault.decrypt!(forged, ctx()) end
+        assert_raise CiphertextIntegrityFailed, fn -> TenantVault.decrypt!(forged, ctx()) end
       end
     end
 
@@ -367,7 +391,7 @@ defmodule AshVault.VaultTest do
   end
 
   describe "destruction" do
-    test "decrypt after destroy raises KeyDestroyed, never AuthenticationFailed" do
+    test "decrypt after destroy raises KeyDestroyed, never CiphertextIntegrityFailed" do
       blob = TenantVault.encrypt!("hunter2", ctx())
 
       assert :ok = TenantVault.destroy!("acme")
@@ -401,7 +425,7 @@ defmodule AshVault.VaultTest do
 
   describe "key size mismatch (finding 8)" do
     # `AshVault.KeyProvider.key_bytes/1` had zero callers. A provider serving keys of
-    # the wrong size was reported as two different lies: AuthenticationFailed on
+    # the wrong size was reported as two different lies: CiphertextIntegrityFailed on
     # decrypt ("your data was tampered with", for a config typo) and a *retryable*
     # ProviderUnavailable naming the CIPHER as the provider on encrypt — so operators
     # retry a permanent misconfiguration forever.
@@ -420,7 +444,7 @@ defmodule AshVault.VaultTest do
       refute message =~ "was tampered with"
     end
 
-    test "decrypt raises KeySizeMismatch, never AuthenticationFailed" do
+    test "decrypt raises KeySizeMismatch, never CiphertextIntegrityFailed" do
       blob = TenantVault.encrypt!("hunter2", ctx())
 
       error = assert_raise KeySizeMismatch, fn -> ShortKeyVault.decrypt!(blob, ctx()) end
@@ -464,6 +488,24 @@ defmodule AshVault.VaultTest do
       blob = TenantVault.encrypt!("hunter2", ctx())
       assert_raise InvalidScope, fn -> NonBinaryScopeVault.decrypt!(blob, ctx()) end
     end
+
+    # `inspect(scope, structs: false)` rendered a loaded tenant record as a bare map with
+    # every field in it. The redaction is at construction, not at render, so the struct
+    # itself never carries the PII either — `inspect(error)` and Ash's error aggregation
+    # read the struct directly.
+    test "a struct scope is named, never printed" do
+      error = assert_raise InvalidScope, fn -> StructScopeVault.encrypt!("x", ctx()) end
+
+      assert error.scope == "a %AshVault.Test.Support.PiiTenant{}"
+
+      for rendered <- [Exception.message(error), inspect(error), inspect(error.scope)] do
+        refute rendered =~ "Acme Holdings"
+        refute rendered =~ "cfo@acme.example"
+        refute rendered =~ "org_1a2b3c"
+      end
+
+      assert Exception.message(error) =~ "which is not a binary"
+    end
   end
 
   describe "rotation racing a destroy (finding 12)" do
@@ -493,6 +535,24 @@ defmodule AshVault.VaultTest do
         end)
 
       assert log =~ "key rotation for scope"
+    end
+
+    # A scope key is a tenant id, and a tenant id is routinely an email address or an
+    # organisation name. `inspect(scope)` put it straight into the application log, which
+    # outlives and out-audiences the database. A fingerprint still lets an operator tell
+    # two tenants' failures apart and correlate repeats.
+    test "a failed rotation logs a scope fingerprint, never the scope key" do
+      tenant = "cfo@acme.example"
+
+      log =
+        capture_log(fn ->
+          assert is_binary(FailingRotateVault.encrypt!("secret", ctx(tenant: tenant)))
+        end)
+
+      refute log =~ tenant
+      refute log =~ "acme.example"
+      assert log =~ AshVault.Scope.fingerprint(tenant)
+      assert log =~ "continuing with the existing key"
     end
   end
 

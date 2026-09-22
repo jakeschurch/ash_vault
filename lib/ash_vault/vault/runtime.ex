@@ -16,7 +16,7 @@ defmodule AshVault.Vault.Runtime do
   alias AshVault.Cipher
   alias AshVault.Context
   alias AshVault.Envelope
-  alias AshVault.Errors.AuthenticationFailed
+  alias AshVault.Errors.CiphertextIntegrityFailed
   alias AshVault.Errors.KeyDestroyed
   alias AshVault.Errors.InvalidScope
   alias AshVault.Errors.KeyNotFound
@@ -110,9 +110,13 @@ defmodule AshVault.Vault.Runtime do
     if is_binary(scope) do
       scope
     else
+      # A description, never the term. `structs: false` used to render a loaded tenant
+      # record as a bare map with every field in it — name, email, billing address — into
+      # an error that Ash then logs and ships to APM. The diagnosis needs the shape only:
+      # "you returned a struct, not a binary".
       raise InvalidScope.exception(
               scope_module: opts.scope,
-              scope: inspect(scope, limit: 5, printable_limit: 128, structs: false),
+              scope: AshVault.Scope.describe(scope),
               resource: ctx.resource,
               field: ctx.field
             )
@@ -128,7 +132,7 @@ defmodule AshVault.Vault.Runtime do
   Raises `AshVault.Errors.InvalidCiphertext` or `AshVault.Errors.UnsupportedEnvelope` for
   unparseable input, `AshVault.Errors.KeyDestroyed` for crypto-erased scopes,
   `AshVault.Errors.KeyNotFound` for unknown key versions, and
-  `AshVault.Errors.AuthenticationFailed` when the tag does not verify.
+  `AshVault.Errors.CiphertextIntegrityFailed` when the tag does not verify.
   """
   @spec decrypt!(binary(), Context.t(), opts()) :: binary()
   def decrypt!(blob, %Context{} = ctx, opts) do
@@ -154,7 +158,7 @@ defmodule AshVault.Vault.Runtime do
       {:ok, plaintext} ->
         plaintext
 
-      # Never AuthenticationFailed: a config typo is not "your data was tampered with".
+      # Never CiphertextIntegrityFailed: a config typo is not "your data was tampered with".
       {:error, {:invalid_key_size, actual}} ->
         raise key_size_mismatch(opts, actual, cipher_mod)
 
@@ -162,7 +166,7 @@ defmodule AshVault.Vault.Runtime do
         raise opaque_key_unsupported(opts, cipher_mod, ctx, :decrypt)
 
       {:error, _reason} ->
-        raise AuthenticationFailed.exception(
+        raise CiphertextIntegrityFailed.exception(
                 resource: ctx.resource,
                 field: ctx.field,
                 key_version: env.key_version
@@ -306,9 +310,14 @@ defmodule AshVault.Vault.Runtime do
               )
 
       {:error, reason} ->
+        # The scope key is fingerprinted, not interpolated: a tenant id is routinely an
+        # email address or an organisation name, and this line goes to application logs,
+        # which have a longer life and a wider audience than the database does. The
+        # fingerprint is stable, so two failures for the same tenant still correlate.
         Logger.warning(
-          "AshVault: key rotation for scope #{inspect(scope)} failed (#{inspect(reason)}); " <>
-            "continuing with the existing key for #{inspect(ctx.resource)}.#{ctx.field}"
+          "AshVault: key rotation for scope #{AshVault.Scope.fingerprint(scope)} failed " <>
+            "(#{inspect(reason)}); continuing with the existing key for " <>
+            "#{inspect(ctx.resource)}.#{ctx.field}"
         )
 
         key_info

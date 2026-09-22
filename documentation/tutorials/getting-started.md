@@ -315,7 +315,7 @@ This data was cryptographically erased and cannot be recovered.
 The row is still there. Its bytes are unchanged. Every backup you have taken still contains
 it — and none of them can be read. That is the whole library.
 
-Note what the error is **not**: it is not `AuthenticationFailed` (which would mean
+Note what the error is **not**: it is not `CiphertextIntegrityFailed` (which would mean
 tampering) and not `ProviderUnavailable` (which would mean retry). Destruction is checked
 before any decryption is attempted, and the provider records a tombstone so the tenant can
 never be silently re-minted — even if someone restores an old key directory over the top,

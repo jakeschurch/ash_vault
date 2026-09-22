@@ -7,7 +7,7 @@ defmodule AshVault.Integration.EncryptionTest do
 
   @moduletag :postgres
 
-  alias AshVault.Errors.AuthenticationFailed
+  alias AshVault.Errors.CiphertextIntegrityFailed
   alias AshVault.Errors.KeyDestroyed
   alias AshVault.KeyProviders.Memory
   alias AshVault.Test.Contact
@@ -201,12 +201,12 @@ defmodule AshVault.Integration.EncryptionTest do
       assert {:error, %Ash.Error.Invalid{errors: errors}} =
                Contact |> Ash.Query.load([:phone]) |> Ash.read(tenant: @acme)
 
-      assert Enum.any?(errors, &match?(%AuthenticationFailed{}, &1))
+      assert Enum.any?(errors, &match?(%CiphertextIntegrityFailed{}, &1))
     end
   end
 
   describe "ciphertext substitution" do
-    test "cross-tenant substitution fails with AuthenticationFailed" do
+    test "cross-tenant substitution fails with CiphertextIntegrityFailed" do
       create!(%{email: "acme@b.c"}, @acme)
       create!(%{email: "other@b.c"}, @other)
 
@@ -217,11 +217,11 @@ defmodule AshVault.Integration.EncryptionTest do
       assert {:error, %Ash.Error.Invalid{errors: errors}} =
                User |> Ash.Query.load([:email]) |> Ash.read(tenant: @acme, authorize?: false)
 
-      assert Enum.any?(errors, &match?(%AuthenticationFailed{}, &1))
+      assert Enum.any?(errors, &match?(%CiphertextIntegrityFailed{}, &1))
       refute Enum.any?(errors, &match?(%KeyDestroyed{}, &1))
     end
 
-    test "cross-field substitution fails with AuthenticationFailed" do
+    test "cross-field substitution fails with CiphertextIntegrityFailed" do
       create!(%{email: "a@b.c", ssn: "123-45-6789"})
 
       raw("UPDATE users SET encrypted_email = encrypted_ssn")
@@ -229,7 +229,7 @@ defmodule AshVault.Integration.EncryptionTest do
       assert {:error, %Ash.Error.Invalid{errors: errors}} =
                User |> Ash.Query.load([:email]) |> Ash.read(tenant: @acme, authorize?: false)
 
-      assert Enum.any?(errors, &match?(%AuthenticationFailed{}, &1))
+      assert Enum.any?(errors, &match?(%CiphertextIntegrityFailed{}, &1))
     end
   end
 
@@ -244,7 +244,7 @@ defmodule AshVault.Integration.EncryptionTest do
                User |> Ash.Query.load([:email]) |> Ash.read(tenant: @acme, authorize?: false)
 
       assert Enum.any?(errors, &match?(%KeyDestroyed{}, &1))
-      refute Enum.any?(errors, &match?(%AuthenticationFailed{}, &1))
+      refute Enum.any?(errors, &match?(%CiphertextIntegrityFailed{}, &1))
 
       assert [%{email: "other@b.c"}] = read!(@other)
     end

@@ -18,7 +18,7 @@ defmodule AshVault.Acceptance.RotationTest do
   @moduletag :postgres
 
   alias AshVault.Envelope
-  alias AshVault.Errors.AuthenticationFailed
+  alias AshVault.Errors.CiphertextIntegrityFailed
   alias AshVault.Errors.KeyDestroyed
   alias AshVault.KeyProviders.Local
   alias AshVault.Test.AcceptanceUser
@@ -133,7 +133,7 @@ defmodule AshVault.Acceptance.RotationTest do
       assert Enum.any?(errors, &match?(%KeyDestroyed{}, &1)),
              "expected KeyDestroyed for #{row.id}, got: #{inspect(errors)}"
 
-      refute Enum.any?(errors, &match?(%AuthenticationFailed{}, &1))
+      refute Enum.any?(errors, &match?(%CiphertextIntegrityFailed{}, &1))
     end
 
     # The rows and their version stamps are all still on disk — only the keys are gone.

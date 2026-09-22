@@ -12,7 +12,8 @@ defmodule AshVault.Errors do
     * `AshVault.Errors.KeyNotFound` — the provider has no such key and no tombstone
     * `AshVault.Errors.KeyDestroyed` — the key was deliberately destroyed (crypto-erasure)
     * `AshVault.Errors.ProviderUnavailable` — transport/backend failure, retryable
-    * `AshVault.Errors.AuthenticationFailed` — AEAD tag mismatch
+    * `AshVault.Errors.CiphertextIntegrityFailed` — AEAD tag mismatch; the stored
+      bytes do not verify. A ciphertext-integrity failure, **not** an access-control one
     * `AshVault.Errors.UnsupportedEnvelope` — envelope version this build cannot parse
     * `AshVault.Errors.UnsupportedCipher` — cipher id not in the registry
     * `AshVault.Errors.InvalidCiphertext` — malformed, truncated or foreign bytes
@@ -23,7 +24,7 @@ defmodule AshVault.Errors do
       `AshVault.Key` handle and the cipher can only use raw bytes; a configuration
       fault, not retryable and not tampering
 
-  A destroyed key must never surface as `AshVault.Errors.AuthenticationFailed`:
+  A destroyed key must never surface as `AshVault.Errors.CiphertextIntegrityFailed`:
   destruction is checked before any decryption is attempted.
   """
 end
@@ -85,7 +86,7 @@ defmodule AshVault.Errors.KeySizeMismatch do
 
   This is a **configuration** fault — a `key_bytes:` that disagrees with the cipher, an
   OpenBao `key_type:` of `aes128-gcm96` under a 256-bit cipher, a truncated key file.
-  It is deliberately neither `AshVault.Errors.AuthenticationFailed` (which would tell
+  It is deliberately neither `AshVault.Errors.CiphertextIntegrityFailed` (which would tell
   an operator their data had been tampered with) nor
   `AshVault.Errors.ProviderUnavailable` (which would tell them to retry a permanent
   misconfiguration forever). Fix the configuration; retrying cannot help.
@@ -113,6 +114,11 @@ defmodule AshVault.Errors.InvalidScope do
   ciphertext, so they must be stable across processes, releases and OTP upgrades. A
   non-binary term is not: `:erlang.term_to_binary/1` is explicitly not stable, and an
   encoding change would relocate a tenant's tombstone and key name at once.
+
+  The `:scope` field holds a **description** of the offending term, never the term
+  itself — see `AshVault.Scope.describe/1`. A scope term is usually a tenant, and a
+  loaded tenant record carries customer PII into every log line and APM trace this error
+  reaches. The shape is the entire diagnosis.
   """
 
   use Splode.Error, fields: [:scope_module, :scope, :resource, :field], class: :invalid
@@ -177,22 +183,39 @@ defmodule AshVault.Errors.ProviderUnavailable do
   end
 end
 
-defmodule AshVault.Errors.AuthenticationFailed do
+defmodule AshVault.Errors.CiphertextIntegrityFailed do
   @moduledoc """
   Raised when the AEAD authentication tag does not verify.
 
-  Causes include tampering with the stored ciphertext, decrypting with the wrong key,
-  or decrypting under different associated data (a different scope, resource or field).
+  The "authentication" here is the *authenticated* in authenticated encryption: a
+  cryptographic check that the stored bytes are the bytes AshVault wrote, under the key
+  and the associated data it wrote them with. Causes are tampering with the stored
+  ciphertext, decrypting with the wrong key, or decrypting under different associated
+  data (a different scope, resource or field).
+
+  It is **not** an authorization or sign-in failure, and has nothing to do with
+  `AshAuthentication` or `Ash.Policy.Authorizer`. AshVault performs no authorization at
+  all; by the time a value reaches the crypto layer Ash has already decided the caller
+  may have it. This error is named for ciphertext integrity for exactly that reason: an
+  earlier name borrowed the word "authentication", and read as an access-control error it
+  gets triaged as a routine permissions problem, when it in fact means someone or
+  something is writing to your ciphertext columns.
+
+  A destroyed key must never surface here: destruction is checked before any decryption
+  is attempted, and reports `AshVault.Errors.KeyDestroyed`.
   """
 
   use Splode.Error, fields: [:resource, :field, :key_version], class: :invalid
 
   def message(%{resource: resource, field: field, key_version: version}) do
     """
-    Failed to authenticate ciphertext for #{inspect(resource)}.#{field} (key version #{inspect(version)}).
+    Ciphertext for #{inspect(resource)}.#{field} failed its integrity check (key version #{inspect(version)}).
 
-    The data was tampered with, decrypted with the wrong key, or decrypted under
-    different associated data.
+    The stored bytes were modified, were encrypted for a different tenant, resource or
+    field, or were encrypted with a different key.
+
+    This is not an authorization error. AshVault performs no authorization; if this
+    operation reached the crypto layer, Ash had already authorized it.
     """
   end
 end

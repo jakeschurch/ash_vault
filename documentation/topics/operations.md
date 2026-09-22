@@ -289,6 +289,20 @@ them correctly and they arrive from `Ash.read/2` and `Ash.create/2` as ordinary 
 rather than 500s. The whole point of having eleven rather than one is that the response
 differs.
 
+| Error | What it means | First response |
+|---|---|---|
+| `KeyDestroyed` | the key was crypto-erased; the data is gone by design | close the ticket |
+| `KeyNotFound` | no key and no tombstone for this scope/version | investigate the key store |
+| `ProviderUnavailable` | the key backend could not be reached | retry, then page |
+| `CiphertextIntegrityFailed` | **ciphertext integrity, not access control.** The stored bytes failed their AEAD tag check: modified, or read under a different key/tenant/resource/field. Nothing to do with actors, policies or `AshAuthentication` — AshVault authorizes nothing | treat as tampering unless a deploy explains it |
+| `KeySizeMismatch` | the provider's key size disagrees with the cipher | fix the config; retrying cannot help |
+| `MissingScope` | no tenant reached a tenant-scoped field | pass a tenant |
+| `InvalidScope` | a custom scope module returned a non-binary | fix the scope module |
+| `InvalidCiphertext` | the column is not an AshVault envelope | check the column and the backfill |
+| `UnsupportedEnvelope` | the envelope version is newer than this build | deploy a newer AshVault |
+| `UnsupportedCipher` | the envelope names an unregistered cipher | register it |
+| `SerializationFailed` | the value does not fit the attribute's type | fix the value or the type |
+
 ### `AshVault.Errors.KeyDestroyed` — the data is gone, by design
 
 ```
@@ -338,16 +352,22 @@ that cannot complete is never answered with "not destroyed".
 **Do not** conclude anything about erasure from this. An outage must never look like
 erasure, and erasure must never look like an outage.
 
-### `AshVault.Errors.AuthenticationFailed` — the bytes do not verify
+### `AshVault.Errors.CiphertextIntegrityFailed` — the bytes do not verify
 
 ```
-Failed to authenticate ciphertext for MyApp.Accounts.User.email (key version 1).
+Ciphertext for MyApp.Accounts.User.email failed its integrity check (key version 1).
 
-The data was tampered with, decrypted with the wrong key, or decrypted under
-different associated data.
+The stored bytes were modified, were encrypted for a different tenant, resource or
+field, or were encrypted with a different key.
+
+This is not an authorization error. AshVault performs no authorization; if this
+operation reached the crypto layer, Ash had already authorized it.
 ```
 
-**Meaning:** the AEAD tag did not verify. Three realistic causes, in order of likelihood:
+**Meaning:** the AEAD tag did not verify. This is *ciphertext integrity*, not access
+control: the "authentication" in AEAD is the bytes authenticating themselves, and the
+error is unrelated to `AshAuthentication`, `Ash.Policy.Authorizer` or the actor. Three
+realistic causes, in order of likelihood:
 
 1. **Different associated data.** The ciphertext is being read under a different scope,
    resource or field than it was written under. A relocated blob (which is the attack this
@@ -375,7 +395,7 @@ vault's `:cipher`.
 **Meaning:** a `key_bytes:` disagreeing with the cipher, an OpenBao `key_type:
 aes128-gcm96` under a 256-bit cipher, or a truncated key file.
 
-**Do:** fix the configuration. It is deliberately neither `AuthenticationFailed` (which
+**Do:** fix the configuration. It is deliberately neither `CiphertextIntegrityFailed` (which
 would tell you your data was tampered with, for a typo) nor `ProviderUnavailable` (which
 would have you retry a permanent misconfiguration forever).
 
@@ -415,7 +435,7 @@ scope module cannot reduce to a stable key — see
 ### `AshVault.Errors.InvalidScope` — a custom scope module is wrong
 
 ```
-MyApp.Scopes.Custom.resolve!/1 returned {:tenant, "acme"}, which is not a binary.
+MyApp.Scopes.Custom.resolve!/1 returned a 2-tuple, which is not a binary.
 
 AshVault scope keys must be binaries: they name key material in the provider and are
 bound into every ciphertext's associated data, so they have to be stable across
@@ -423,6 +443,12 @@ processes, releases and OTP upgrades.
 ```
 
 **Do:** fix the scope module. Only reachable with a custom `AshVault.Scope`.
+
+The returned term is **described, not printed** (`AshVault.Scope.describe/1`): a scope
+term is usually a tenant, and a loaded tenant record is full of customer PII that has no
+business in an error this one ends up in a log and an APM trace. The shape is the whole
+diagnosis; read the offending value in your own scope module, under a debugger, against
+data you are allowed to see.
 
 ### `AshVault.Errors.InvalidCiphertext` — the column is not an AshVault envelope
 
@@ -638,7 +664,7 @@ make sure its retention window is one you can defend to the same subject.
 At minimum, alert differently on these three, because the correct human response differs:
 
 * `ProviderUnavailable` → page. Encryption and decryption are both down.
-* `AuthenticationFailed` → investigate. Either a deploy changed a module name or a scope
+* `CiphertextIntegrityFailed` → investigate. Either a deploy changed a module name or a scope
   key, or someone is writing to your database.
 * `KeyDestroyed` → do not page. Expected after an erasure; a spike of it for a scope not in
   your deletion runbook is worth a look.

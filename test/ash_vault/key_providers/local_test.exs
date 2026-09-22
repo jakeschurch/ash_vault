@@ -459,7 +459,7 @@ defmodule AshVault.KeyProviders.LocalTest do
   describe "destroy ordering" do
     # Finding 7. Shred-then-tombstone leaves a window with no keys AND no tombstone: the
     # next current_key mints a fresh v1, existing rows say key_version: 1, and the
-    # caller gets AuthenticationFailed — erasure disguised as tampering.
+    # caller gets CiphertextIntegrityFailed — erasure disguised as tampering.
     @tag :unix
     test "a destroy that cannot write its tombstone never shreds the keys",
          %{provider: provider, root: root, scope: scope} do
@@ -516,7 +516,7 @@ defmodule AshVault.KeyProviders.LocalTest do
   describe "key file validation" do
     # Finding 8(c). A truncated key file used to be handed straight to the cipher,
     # which reports {:error, {:invalid_key_size, n}} — surfaced by the vault as
-    # AuthenticationFailed, i.e. "your data was tampered with" for a broken key store.
+    # CiphertextIntegrityFailed, i.e. "your data was tampered with" for a broken key store.
     test "a key file of the wrong size is ProviderUnavailable",
          %{provider: provider, root: root, scope: scope} do
       scope = scope.()

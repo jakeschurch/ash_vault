@@ -11,7 +11,7 @@ about *why* it failed. That is sound advice in general: a detailed cryptographic
 free oracle, and an attacker who can provoke errors learns from each one.
 
 AshVault does the opposite, deliberately. `AshVault.Errors.KeyDestroyed`,
-`AshVault.Errors.AuthenticationFailed`, `AshVault.Errors.ProviderUnavailable`,
+`AshVault.Errors.CiphertextIntegrityFailed`, `AshVault.Errors.ProviderUnavailable`,
 `AshVault.Errors.KeyNotFound` and `AshVault.Errors.KeySizeMismatch` are five distinct
 `Ash.Error` structs with five distinct messages, and the crypto core goes out of its way to
 keep them apart — it checks the tombstone *before* attempting decryption specifically so a
@@ -46,7 +46,7 @@ Given access, the oracle answers:
 | `KeyDestroyed` | this scope has been crypto-erased |
 | `KeyNotFound` | the envelope names a key version the provider does not have |
 | `ProviderUnavailable` | the key provider is currently unreachable |
-| `AuthenticationFailed` | the AEAD tag did not verify under this scope/resource/field |
+| `CiphertextIntegrityFailed` | the AEAD tag did not verify under this scope/resource/field |
 | `KeySizeMismatch` | the deployment's key size disagrees with its cipher |
 
 Two observations decide the trade:
@@ -58,7 +58,7 @@ them the key version and the cipher. `KeyNotFound` versus `KeyDestroyed` is a di
 they could largely make by reading the column. The oracle is not the cheapest source of any
 of this.
 
-**`AuthenticationFailed` is not a padding oracle.** The classic reason to collapse crypto
+**`CiphertextIntegrityFailed` is not a padding oracle.** The classic reason to collapse crypto
 errors is that a distinguishable "bad padding" versus "bad MAC" leaks a bit per query and
 composes into plaintext recovery. AES-256-GCM has no padding, and AshVault returns exactly
 one undifferentiated authentication failure for a wrong key, a wrong scope, a wrong
@@ -89,7 +89,7 @@ getting it wrong in that direction is an incident report that says customer data
 destroyed when it was not; in the other direction, a real erasure is dismissed as a blip.
 
 `KeySizeMismatch` exists for the same reason one layer down. Before it did, a `key_bytes:`
-that disagreed with the cipher surfaced on the read path as `AuthenticationFailed` — a
+that disagreed with the cipher surfaced on the read path as `CiphertextIntegrityFailed` — a
 configuration typo reported to the operator as *your data has been tampered with* — and on
 the write path as `ProviderUnavailable`, telling them to retry a permanent
 misconfiguration forever. A generic error does not remove that confusion; it makes it
@@ -116,7 +116,7 @@ defp to_public_error(%module{})
      when module in [
             AshVault.Errors.KeyDestroyed,
             AshVault.Errors.KeyNotFound,
-            AshVault.Errors.AuthenticationFailed,
+            AshVault.Errors.CiphertextIntegrityFailed,
             AshVault.Errors.ProviderUnavailable,
             AshVault.Errors.KeySizeMismatch,
             AshVault.Errors.InvalidCiphertext,
