@@ -12,7 +12,12 @@ defmodule AshVault.Application do
   def start(_type, _args) do
     maybe_warn_about_crash_dumps()
 
-    children = []
+    children = [
+      {Registry, keys: :unique, name: AshVault.KeyProviders.OpenBao.AuthRegistry},
+      {Task.Supervisor, name: AshVault.KeyProviders.OpenBao.AuthTaskSupervisor},
+      {DynamicSupervisor,
+       strategy: :one_for_one, name: AshVault.KeyProviders.OpenBao.AuthSupervisor}
+    ]
 
     opts = [strategy: :one_for_one, name: AshVault.Supervisor]
     Supervisor.start_link(children, opts)

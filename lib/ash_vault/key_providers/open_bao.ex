@@ -40,6 +40,11 @@ defmodule AshVault.KeyProviders.OpenBao do
         receive_timeout: 5_000,
         max_retries: 2
 
+  Instead of `:token`, `auth: {:kubernetes, role: "..."}` logs in with the pod's
+  service account through a supervised token holder, and `:cacertfile` (or
+  `:connect_options`) trusts a private CA. See
+  [Running against OpenBao in Kubernetes](openbao-in-kubernetes.md).
+
   `:token` accepts a literal binary, `{:system, "VAR"}`, or a zero-arity function.
 
   > #### What the token guarantee actually is {: .warning}

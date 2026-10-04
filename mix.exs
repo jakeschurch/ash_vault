@@ -35,6 +35,7 @@ defmodule AshVault.MixProject do
         "documentation/topics/macaroons.md",
         "documentation/topics/threat-model.md",
         "documentation/topics/operations.md",
+        "documentation/how-to/openbao-in-kubernetes.md",
         "documentation/how-to/writing-a-key-provider.md",
         "documentation/how-to/writing-a-cipher.md",
         "documentation/how-to/writing-a-scope.md",
@@ -106,7 +107,8 @@ defmodule AshVault.MixProject do
           AshVault.KeyProvider,
           AshVault.KeyProviders.Memory,
           AshVault.KeyProviders.Local,
-          AshVault.KeyProviders.OpenBao
+          AshVault.KeyProviders.OpenBao,
+          AshVault.KeyProviders.OpenBao.KubernetesAuth
         ],
         Scopes: [
           AshVault.Scope,

@@ -22,6 +22,7 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
   """
 
   alias AshVault.Errors.ProviderUnavailable
+  alias AshVault.KeyProviders.OpenBao.KubernetesAuth
 
   @default_address "http://127.0.0.1:8200"
   @default_transit_mount "transit"
@@ -367,22 +368,163 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
   @spec request(module(), atom(), String.t(), map() | nil) ::
           {:ok, term()} | {:error, Exception.t()}
   def request(provider, method, path, body \\ nil) do
-    with {:ok, token} <- token(provider) do
+    with {:ok, token} <- token(provider),
+         {:ok, base} <- base_options(provider) do
       options =
-        [
+        Keyword.merge(base,
           method: method,
-          base_url: address(provider),
           url: path,
           headers: [{"x-vault-token", token}],
-          receive_timeout: receive_timeout(provider),
           retry: :transient,
           max_retries: max_retries(provider)
-        ]
+        )
         |> then(fn options -> if body, do: Keyword.put(options, :json, body), else: options end)
 
       perform(provider, options)
     end
   end
+
+  @doc """
+  The token-free `Req` options every request to `provider` shares: address, timeout and
+  TLS.
+
+  `:cacertfile` becomes `connect_options: [transport_opts: [cacertfile: path, verify:
+  :verify_peer]]`, merged over any `:connect_options` given. Mint keeps its own hostname
+  check and server name indication on top. `verify: :verify_none` is refused outright.
+
+  A `:cacertfile` that is not a readable regular file is
+  `{:error, %ProviderUnavailable{reason: {:cacertfile_unreadable, path}}}`, checked
+  before any connection: otherwise Mint's own read raises inside the request and the
+  failure is indistinguishable from a network outage.
+  """
+  @spec base_options(module()) :: {:ok, keyword()} | {:error, Exception.t()}
+  def base_options(provider) do
+    config = config(provider)
+
+    with {:ok, connect_options} <- connect_options(provider, config) do
+      options =
+        Keyword.get(config, :req_options, [])
+        |> Keyword.merge(base_url: address(provider), receive_timeout: receive_timeout(provider))
+        |> then(fn options ->
+          if connect_options == [],
+            do: options,
+            else: Keyword.put(options, :connect_options, connect_options)
+        end)
+
+      {:ok, options}
+    end
+  end
+
+  defp connect_options(provider, config) do
+    connect_options = Keyword.get(config, :connect_options, [])
+    transport_opts = Keyword.get(connect_options, :transport_opts, [])
+
+    if Keyword.get(transport_opts, :verify) == :verify_none do
+      raise ArgumentError, """
+      #{inspect(provider)} refuses connect_options transport_opts verify: :verify_none.
+
+      Point :cacertfile at the CA that signed the OpenBao server certificate instead.
+      """
+    end
+
+    case Keyword.get(config, :cacertfile) do
+      nil ->
+        {:ok, connect_options}
+
+      path when is_binary(path) ->
+        if File.regular?(path) do
+          transport_opts = Keyword.merge(transport_opts, cacertfile: path, verify: :verify_peer)
+          {:ok, Keyword.put(connect_options, :transport_opts, transport_opts)}
+        else
+          {:error, unavailable(provider, {:cacertfile_unreadable, path})}
+        end
+
+      other ->
+        raise ArgumentError,
+              "#{inspect(provider)} :cacertfile must be a path string, got: #{inspect(other)}"
+    end
+  end
+
+  # ── Kubernetes auth ────────────────────────────────────────────────────────────
+
+  @doc """
+  The validated `auth: {:kubernetes, opts}` options for `provider`.
+
+  Raises `ArgumentError` if `provider` is not configured for Kubernetes auth.
+  """
+  @spec kubernetes_options!(module()) :: AshVault.KeyProviders.OpenBao.KubernetesAuth.options()
+  def kubernetes_options!(provider) do
+    case Keyword.get(config(provider), :auth) do
+      {:kubernetes, opts} -> KubernetesAuth.options!(provider, opts)
+      _ -> raise ArgumentError, "#{inspect(provider)} is not configured for Kubernetes auth"
+    end
+  end
+
+  @doc """
+  Log in with the Kubernetes auth method: read the service-account JWT, `POST` it to
+  `/v1/auth/<mount>/login`, and return `{:ok, client_token, lease_seconds}`.
+
+  Sends no `x-vault-token` header and does not retry: the token holder owns backoff.
+  Every failure is `ProviderUnavailable` with reason `{:kubernetes_auth, reason}`; the
+  response body, which carries the token, never reaches the error.
+  """
+  @spec kubernetes_login(module(), AshVault.KeyProviders.OpenBao.KubernetesAuth.options()) ::
+          {:ok, String.t(), non_neg_integer()} | {:error, Exception.t()}
+  def kubernetes_login(provider, options) do
+    with {:ok, jwt} <- read_jwt(provider, options.jwt_path),
+         {:ok, base} <- base_options(provider) do
+      request =
+        Keyword.merge(base,
+          method: :post,
+          url: "/v1/auth/#{options.mount}/login",
+          json: %{role: options.role, jwt: jwt},
+          retry: false
+        )
+
+      case perform(provider, request) do
+        {:ok, %{status: 200, body: body}} ->
+          login_result(provider, body)
+
+        {:ok, %{status: status}} ->
+          {:error, kubernetes_error(provider, {:http_status, status})}
+
+        {:error, %ProviderUnavailable{reason: {:not_started, _app}} = error} ->
+          {:error, error}
+
+        {:error, %ProviderUnavailable{reason: reason}} ->
+          {:error, kubernetes_error(provider, reason)}
+      end
+    end
+  end
+
+  defp read_jwt(provider, path) do
+    case File.read(path) do
+      {:ok, contents} ->
+        case String.trim(contents) do
+          "" -> {:error, kubernetes_error(provider, {:jwt_empty, path})}
+          jwt -> {:ok, jwt}
+        end
+
+      {:error, posix} ->
+        {:error, kubernetes_error(provider, {:jwt_unreadable, path, posix})}
+    end
+  end
+
+  defp login_result(provider, %{"auth" => %{"client_token" => token} = auth})
+       when is_binary(token) and token != "" do
+    case Map.get(auth, "lease_duration") do
+      lease when is_integer(lease) and lease >= 0 -> {:ok, token, lease}
+      _ -> {:error, kubernetes_error(provider, :malformed_login_response)}
+    end
+  end
+
+  defp login_result(provider, _body),
+    do: {:error, kubernetes_error(provider, :malformed_login_response)}
+
+  defp kubernetes_error(provider, {:http_status, 403}),
+    do: unavailable(provider, {:kubernetes_auth, :forbidden})
+
+  defp kubernetes_error(provider, reason), do: unavailable(provider, {:kubernetes_auth, reason})
 
   # `Req.request/1` returns `{:error, exception}` for a transport failure, but it also
   # *raises* (a bad `:base_url`, an unsupported scheme, a broken step) and can exit
@@ -547,7 +689,36 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
 
   # Resolves the token without ever placing it in a log line or an error struct.
   defp token(provider) do
-    case Keyword.get(config(provider), :token) do
+    config = config(provider)
+
+    case {Keyword.get(config, :auth), Keyword.get(config, :token)} do
+      {nil, token} ->
+        static_token(provider, token)
+
+      {{:kubernetes, opts}, nil} ->
+        KubernetesAuth.token(provider, KubernetesAuth.options!(provider, opts))
+
+      {{:kubernetes, _opts}, _token} ->
+        raise ArgumentError, """
+        #{inspect(provider)} is configured with both :token and auth: {:kubernetes, ...}.
+
+        Remove one. AshVault will not guess which credential you meant.
+        """
+
+      {auth, _token} ->
+        raise ArgumentError, """
+        #{inspect(provider)} has an unsupported :auth #{inspect(auth_kind(auth))}.
+
+        The supported form is auth: {:kubernetes, role: "..."}.
+        """
+    end
+  end
+
+  defp auth_kind({kind, _opts}) when is_atom(kind), do: kind
+  defp auth_kind(_auth), do: :unknown
+
+  defp static_token(provider, token) do
+    case token do
       token when is_binary(token) and token != "" -> {:ok, token}
       {:system, variable} when is_binary(variable) -> from_env(provider, variable)
       fun when is_function(fun, 0) -> from_fun(provider, fun)

@@ -155,6 +155,10 @@ config :my_app, AshVault.KeyProviders.OpenBao,
 `:token` accepts a literal binary, `{:system, "VAR"}`, or a zero-arity function. The
 provider is stateless — there is nothing to add to your supervision tree.
 
+In Kubernetes, use `auth: {:kubernetes, role: "..."}` in place of `:token`, and
+`cacertfile:` for a server certificate signed by a private CA. See
+[Running against OpenBao in Kubernetes](openbao-in-kubernetes.md).
+
 One-time operator setup, which mounts the KV-v2 engine that holds tombstones:
 
 ```elixir

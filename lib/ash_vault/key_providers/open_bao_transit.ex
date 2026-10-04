@@ -65,6 +65,11 @@ defmodule AshVault.KeyProviders.OpenBaoTransit do
         receive_timeout: 5_000,
         max_retries: 2
 
+  Instead of `:token`, `auth: {:kubernetes, role: "..."}` logs in with the pod's
+  service account through a supervised token holder, and `:cacertfile` (or
+  `:connect_options`) trusts a private CA. See
+  [Running against OpenBao in Kubernetes](openbao-in-kubernetes.md).
+
   `AshVault.Ciphers.OpenBaoTransit` reads this same configuration block — address and
   token are looked up under *this* module's key, never carried in the handle.
 
