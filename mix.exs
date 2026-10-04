@@ -162,6 +162,12 @@ defmodule AshVault.MixProject do
     ]
   end
 
+  # Aliases run in `:dev` unless told otherwise, and `mix test` refuses to run there, so
+  # without this `mix test.all` and `mix test.ci` fail before running a single test.
+  def cli do
+    [preferred_envs: ["test.all": :test, "test.ci": :test]]
+  end
+
   def application do
     [
       extra_applications: [:logger, :crypto],
