@@ -36,7 +36,8 @@ defmodule AshVault.Actions.DestroyKeys do
       AshVault.Errors.MissingScope,
       AshVault.Errors.KeyNotFound,
       AshVault.Errors.KeyDestroyed,
-      AshVault.Errors.ProviderUnavailable
+      AshVault.Errors.ProviderUnavailable,
+      AshVault.Errors.ProviderForbidden
     ] ->
       {:error, error}
   end

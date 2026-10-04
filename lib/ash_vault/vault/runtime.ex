@@ -24,6 +24,7 @@ defmodule AshVault.Vault.Runtime do
   alias AshVault.Errors.KeyNotFound
   alias AshVault.Errors.KeySizeMismatch
   alias AshVault.Errors.MissingScope
+  alias AshVault.Errors.ProviderForbidden
   alias AshVault.Errors.ProviderUnavailable
   alias AshVault.Errors.PurposeUnsupported
   alias AshVault.KeyProvider
@@ -78,7 +79,7 @@ defmodule AshVault.Vault.Runtime do
 
       # A network-backed cipher already knows who was unavailable and why; re-wrapping it
       # would re-attribute the outage to the cipher module.
-      {:error, %ProviderUnavailable{} = error} ->
+      {:error, %module{} = error} when module in [ProviderUnavailable, ProviderForbidden] ->
         raise error
 
       {:error, reason} ->
@@ -194,7 +195,7 @@ defmodule AshVault.Vault.Runtime do
       # stored bytes. A 403, a deleted transit key or a connection refused must reach the
       # operator as the outage it is. Reporting it as CiphertextIntegrityFailed would tell
       # them their data was tampered with, which is this codebase's cardinal lie.
-      {:error, %ProviderUnavailable{} = error} ->
+      {:error, %module{} = error} when module in [ProviderUnavailable, ProviderForbidden] ->
         raise error
 
       {:error, _reason} ->
@@ -232,7 +233,7 @@ defmodule AshVault.Vault.Runtime do
       {:error, {:purpose_unsupported, purpose}} ->
         raise PurposeUnsupported.exception(provider: opts.key_provider, purpose: purpose)
 
-      {:error, %ProviderUnavailable{} = error} ->
+      {:error, %module{} = error} when module in [ProviderUnavailable, ProviderForbidden] ->
         raise error
 
       {:error, reason} ->
@@ -287,6 +288,7 @@ defmodule AshVault.Vault.Runtime do
       KeyDestroyed,
       KeyNotFound,
       ProviderUnavailable,
+      ProviderForbidden,
       PurposeUnsupported
     ] ->
       {:error, error}
@@ -343,6 +345,7 @@ defmodule AshVault.Vault.Runtime do
       KeyDestroyed,
       KeyNotFound,
       ProviderUnavailable,
+      ProviderForbidden,
       PurposeUnsupported
     ] ->
       {:error, error}
@@ -401,6 +404,7 @@ defmodule AshVault.Vault.Runtime do
       KeyDestroyed,
       KeyNotFound,
       ProviderUnavailable,
+      ProviderForbidden,
       PurposeUnsupported
     ] ->
       {:error, error}
@@ -445,6 +449,7 @@ defmodule AshVault.Vault.Runtime do
     do: opaque_key_unsupported(opts, mac_module(opts), ctx, operation)
 
   defp mac_error(%ProviderUnavailable{} = error, _opts, _ctx, _operation), do: error
+  defp mac_error(%ProviderForbidden{} = error, _opts, _ctx, _operation), do: error
 
   defp mac_error(reason, opts, _ctx, _operation),
     do: ProviderUnavailable.exception(provider: mac_module(opts), reason: reason)
@@ -457,7 +462,7 @@ defmodule AshVault.Vault.Runtime do
       {:error, {:purpose_unsupported, purpose}} ->
         raise PurposeUnsupported.exception(provider: provider, purpose: purpose)
 
-      {:error, %ProviderUnavailable{} = error} ->
+      {:error, %module{} = error} when module in [ProviderUnavailable, ProviderForbidden] ->
         raise error
 
       {:error, reason} ->
@@ -487,7 +492,7 @@ defmodule AshVault.Vault.Runtime do
       {:error, {:purpose_unsupported, purpose}} ->
         raise PurposeUnsupported.exception(provider: provider, purpose: purpose)
 
-      {:error, %ProviderUnavailable{} = error} ->
+      {:error, %module{} = error} when module in [ProviderUnavailable, ProviderForbidden] ->
         raise error
 
       {:error, reason} ->
@@ -547,6 +552,9 @@ defmodule AshVault.Vault.Runtime do
       :ok ->
         :ok
 
+      {:error, %ProviderForbidden{} = error} ->
+        raise error
+
       {:error, reason} ->
         raise ProviderUnavailable.exception(provider: opts.key_provider, reason: reason)
     end
@@ -598,6 +606,9 @@ defmodule AshVault.Vault.Runtime do
       {:error, :not_found} ->
         raise KeyNotFound.exception(scope: scope, key_version: version)
 
+      {:error, %ProviderForbidden{} = error} ->
+        raise error
+
       {:error, reason} ->
         raise ProviderUnavailable.exception(provider: provider, reason: reason)
     end
@@ -619,6 +630,8 @@ defmodule AshVault.Vault.Runtime do
   def map_provider_error(:not_found, scope, _ctx) do
     KeyNotFound.exception(scope: scope, key_version: nil)
   end
+
+  def map_provider_error(%ProviderForbidden{} = error, _scope, _ctx), do: error
 
   def map_provider_error(reason, _scope, _ctx) do
     ProviderUnavailable.exception(provider: nil, reason: reason)

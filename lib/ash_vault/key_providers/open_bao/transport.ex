@@ -21,6 +21,7 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
   API for anything outside AshVault.
   """
 
+  alias AshVault.Errors.ProviderForbidden
   alias AshVault.Errors.ProviderUnavailable
   alias AshVault.KeyProviders.OpenBao.KubernetesAuth
 
@@ -110,7 +111,7 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
         case classify_transit_key(status, body) do
           :present -> {:ok, data(body)}
           :absent -> {:ok, :missing}
-          {:unavailable, reason} -> {:error, unavailable(provider, reason)}
+          {:unavailable, reason} -> {:error, unavailable(provider, reason, :read_key)}
         end
 
       {:error, error} ->
@@ -243,7 +244,7 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
         case classify_tombstone(status, body) do
           :destroyed -> {:error, :destroyed}
           :absent -> :absent
-          {:unavailable, reason} -> {:error, unavailable(provider, reason)}
+          {:unavailable, reason} -> {:error, unavailable(provider, reason, :read_tombstone)}
         end
 
       {:error, error} ->
@@ -537,7 +538,7 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
     case transport_status() do
       :ready ->
         case options |> Req.new() |> Req.request() do
-          {:ok, response} -> {:ok, response}
+          {:ok, response} -> {:ok, tag_operation(response, provider, options)}
           {:error, exception} -> {:error, unavailable(provider, transport_reason(exception))}
         end
 
@@ -632,21 +633,89 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
   def unavailable!(provider, response), do: {:error, unavailable(provider, response)}
 
   @doc """
-  Build a `AshVault.Errors.ProviderUnavailable` attributed to `provider`.
+  Build the error for a failed request attributed to `provider`.
+
+  A `403` is `AshVault.Errors.ProviderForbidden`, never
+  `AshVault.Errors.ProviderUnavailable`: the server answered and refused, which is a
+  policy, credential or addressing fault that retrying cannot fix. Everything else is
+  `ProviderUnavailable`.
+
+  `operation` names the refused request. For a response from this module's own
+  transport it is recorded on the response and need not be passed.
   """
-  @spec unavailable(module(), term()) :: Exception.t()
-  def unavailable(provider, %Req.Response{status: status}),
-    do: unavailable(provider, {:http_status, status})
+  @spec unavailable(module(), term(), atom() | nil) :: Exception.t()
+  def unavailable(provider, reason, operation \\ nil)
 
-  def unavailable(provider, %{status: status}) when is_integer(status),
-    do: unavailable(provider, {:http_status, status})
+  def unavailable(provider, %Req.Response{status: status} = response, operation),
+    do: unavailable(provider, {:http_status, status}, operation || operation_of(response))
 
-  def unavailable(provider, reason) do
-    ProviderUnavailable.exception(provider: provider, reason: normalise_reason(reason))
+  def unavailable(provider, %{status: status}, operation) when is_integer(status),
+    do: unavailable(provider, {:http_status, status}, operation)
+
+  def unavailable(provider, {:http_status, 403}, operation),
+    do: ProviderForbidden.exception(provider: provider, operation: operation)
+
+  def unavailable(provider, reason, _operation),
+    do: ProviderUnavailable.exception(provider: provider, reason: reason)
+
+  @operation_key :ash_vault_operation
+
+  defp tag_operation(%Req.Response{} = response, provider, options) do
+    operation = operation(provider, Keyword.get(options, :method), Keyword.get(options, :url))
+    Req.Response.put_private(response, @operation_key, operation)
   end
 
-  defp normalise_reason({:http_status, 403}), do: :forbidden
-  defp normalise_reason(reason), do: reason
+  defp tag_operation(response, _provider, _options), do: response
+
+  defp operation_of(response), do: Req.Response.get_private(response, @operation_key)
+
+  @doc """
+  The operation a request to `path` with `method` performs, as recorded on
+  `AshVault.Errors.ProviderForbidden`: `:read_key`, `:create_key`, `:delete_key`,
+  `:rotate_key`, `:configure_key`, `:encrypt`, `:decrypt`, `:hmac`, `:verify`, `:export`,
+  `:read_tombstone`, `:write_tombstone`, `:mount`, `:login`, or `:unknown`.
+
+  Derived from the path, never from the response, and never carrying the key name.
+  """
+  @spec operation(module(), atom(), String.t() | nil) :: atom()
+  def operation(provider, method, path) when is_binary(path) do
+    transit = "/v1/#{transit_mount(provider)}/"
+    tombstones = "/v1/#{kv_mount(provider)}/data/tombstones/"
+
+    cond do
+      String.starts_with?(path, transit) ->
+        path
+        |> String.replace_prefix(transit, "")
+        |> String.split("/")
+        |> transit_operation(method)
+
+      String.starts_with?(path, tombstones) ->
+        if method == :get, do: :read_tombstone, else: :write_tombstone
+
+      String.starts_with?(path, "/v1/sys/mounts/") ->
+        :mount
+
+      String.starts_with?(path, "/v1/auth/") ->
+        :login
+
+      true ->
+        :unknown
+    end
+  end
+
+  def operation(_provider, _method, _path), do: :unknown
+
+  defp transit_operation(["keys", _name], :get), do: :read_key
+  defp transit_operation(["keys", _name], :post), do: :create_key
+  defp transit_operation(["keys", _name], :delete), do: :delete_key
+  defp transit_operation(["keys", _name, "rotate"], _method), do: :rotate_key
+  defp transit_operation(["keys", _name, "config"], _method), do: :configure_key
+  defp transit_operation(["encrypt" | _rest], _method), do: :encrypt
+  defp transit_operation(["decrypt" | _rest], _method), do: :decrypt
+  defp transit_operation(["hmac" | _rest], _method), do: :hmac
+  defp transit_operation(["verify" | _rest], _method), do: :verify
+  defp transit_operation(["export" | _rest], _method), do: :export
+  defp transit_operation(_segments, _method), do: :unknown
 
   # ── configuration ──────────────────────────────────────────────────────────────
 

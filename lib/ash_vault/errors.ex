@@ -12,6 +12,9 @@ defmodule AshVault.Errors do
     * `AshVault.Errors.KeyNotFound` — the provider has no such key and no tombstone
     * `AshVault.Errors.KeyDestroyed` — the key was deliberately destroyed (crypto-erasure)
     * `AshVault.Errors.ProviderUnavailable` — transport/backend failure, retryable
+    * `AshVault.Errors.ProviderForbidden` — the key store answered and refused the
+      request (`403`): a policy, credential or addressing fault, **not** an outage and not
+      fixed by retrying the same request
     * `AshVault.Errors.CiphertextIntegrityFailed` — AEAD tag mismatch; the stored
       bytes do not verify. A ciphertext-integrity failure, **not** an access-control one
     * `AshVault.Errors.UnsupportedEnvelope` — envelope version this build cannot parse
@@ -249,6 +252,57 @@ defmodule AshVault.Errors.ProviderUnavailable do
     Key provider #{inspect(provider)} is unavailable: #{inspect(reason)}.
     """
   end
+end
+
+defmodule AshVault.Errors.ProviderForbidden do
+  @moduledoc """
+  Raised when the key store answered and **refused** the request: OpenBao's `403
+  permission denied`.
+
+  This is not `AshVault.Errors.ProviderUnavailable`. The backend is up and made a
+  decision; retrying the same request with the same credential gets the same answer. It
+  is a configuration fault an operator must fix — the policy, the token, or the address —
+  so alert on it rather than retry it.
+
+  `:operation` names the request that was refused (`:encrypt`, `:hmac`, `:create_key`,
+  `:read_key`, `:read_tombstone`, ...) so the missing grant can be found without a
+  server audit log. It is `nil` when the request is not known. The transit key name is
+  deliberately absent: it is a reversible encoding of the tenant id.
+
+  A tombstone read refused with `403` is this error, which still fails closed: nothing
+  that cannot read the tombstone ever reports a scope as intact.
+  """
+
+  use Splode.Error, fields: [:provider, :operation], class: :invalid
+
+  def message(%{provider: provider, operation: :encrypt}) do
+    """
+    Key provider #{inspect(provider)} was refused by OpenBao (403) on encrypt.
+
+    Not an outage, and retrying will not help. OpenBao treats an encrypt against a key it
+    cannot see as a request to create that key, which needs `create` on the encrypt path.
+    AshVault creates keys explicitly first, so this usually means one of:
+
+      * The key was created moments ago and `:address` reaches HA standby nodes, which
+        serve reads and policy checks from their own, briefly lagging, copy of the data.
+        Point `:address` at the active node only (the chart's `<release>-active` Service).
+      * The key was deleted out from under the application.
+      * The token's policy lacks `update` on the encrypt path.
+    """
+  end
+
+  def message(%{provider: provider, operation: operation}) do
+    """
+    Key provider #{inspect(provider)} was refused by OpenBao (403)#{describe(operation)}.
+
+    Not an outage, and retrying will not help. Check that the token's policy grants the
+    path, that the token has not been revoked, and that `:address` points at the server the
+    token was issued by.
+    """
+  end
+
+  defp describe(nil), do: ""
+  defp describe(operation), do: " on #{operation}"
 end
 
 defmodule AshVault.Errors.CiphertextIntegrityFailed do

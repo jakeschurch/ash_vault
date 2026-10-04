@@ -379,7 +379,7 @@ defmodule AshVault.KeyProviders.OpenBaoTest do
   end
 
   describe "error discrimination" do
-    test "a wrong token is ProviderUnavailable, never :destroyed", %{scope: scope} do
+    test "a wrong token is ProviderForbidden, never :destroyed", %{scope: scope} do
       scope = scope.()
       assert {:ok, _} = OpenBao.current_key(scope)
 
@@ -391,7 +391,7 @@ defmodule AshVault.KeyProviders.OpenBaoTest do
             OpenBao.rotate(scope),
             OpenBao.destroy(scope)
           ] do
-        assert {:error, %ProviderUnavailable{reason: :forbidden}} = result
+        assert {:error, %AshVault.Errors.ProviderForbidden{}} = result
       end
 
       # The scope is intact once the token is right again: an outage is not erasure.
@@ -404,7 +404,7 @@ defmodule AshVault.KeyProviders.OpenBaoTest do
       sentinel = "sentinel-bad-token-do-not-log"
       put_config(token: sentinel)
 
-      assert {:error, %ProviderUnavailable{} = error} = OpenBao.current_key(scope)
+      assert {:error, %AshVault.Errors.ProviderForbidden{} = error} = OpenBao.current_key(scope)
 
       refute inspect(error) =~ sentinel
       refute Exception.message(error) =~ sentinel

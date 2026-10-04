@@ -112,20 +112,29 @@ defmodule AshVault.KeyProviders.OpenBaoTransit do
   still fails every read closed — but it is key material that should not exist.
 
   Withhold the `create` capability on the encrypt path and OpenBao refuses the
-  auto-creation with `403` while still allowing encryption of existing keys (verified):
+  auto-creation with `403` while still allowing encryption of existing keys (verified).
+  The provider never relies on that auto-creation: `current_key/1` and `current_key/2`
+  create a missing key explicitly through `transit/keys` before handing out a handle, so
+  the application token needs `create` there and nowhere else:
 
-      path "transit/keys/*"            { capabilities = ["read"] }
-      path "transit/keys/+/rotate"     { capabilities = ["update"] }
-      path "transit/keys/+/config"     { capabilities = ["update"] }
-      path "transit/encrypt/*"         { capabilities = ["update"] }
-      path "transit/decrypt/*"         { capabilities = ["update"] }
+      path "transit/keys/ashvault_*"    { capabilities = ["create", "read", "update", "delete"] }
+      path "transit/encrypt/ashvault_*" { capabilities = ["update"] }
+      path "transit/decrypt/ashvault_*" { capabilities = ["update"] }
       path "ashvault/data/tombstones/*" { capabilities = ["create", "read", "update"] }
 
-  Note there is **no** `transit/export/*` grant, and there must not be one. A separate,
-  privileged token does key creation (`create` on `transit/keys/*`) and destruction.
-  Running the application token with `create` on `transit/encrypt/*` still works; it just
-  gives up this guarantee, and `current_key/1` will create keys on demand as the
-  exporting provider does.
+  (`update` on `transit/keys` covers `rotate` and `config`; `delete` is for `destroy/1`.)
+  Note there is **no** `transit/export/*` grant, and there must not be one.
+
+  A `403` from any of these is `AshVault.Errors.ProviderForbidden`, naming the refused
+  operation — a configuration fault, not the retryable `ProviderUnavailable`.
+
+  > #### Address the active node {: .warning}
+  >
+  > Against an HA cluster, `:address` must reach the **active** node only (the Helm
+  > chart's `<release>-active` Service). Standbys serve reads and policy checks from a
+  > copy that lags the active node, so an encrypt issued right after the explicit create
+  > can reach a standby that has not seen the key yet, which treats it as an implicit
+  > create and, under the policy above, answers `403`. Verified against openbao 2.6.3.
 
   ## The `:mac` keyring
 

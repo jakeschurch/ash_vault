@@ -86,7 +86,7 @@ Token resolution supports a literal binary, `{:system, var}`, or a 0-arity fun.
 | tombstone present | `{:error, :destroyed}` |
 | transit key 404, no tombstone | `{:error, :not_found}` |
 | requested version > latest, or below `min_decryption_version` | `{:error, :not_found}` |
-| 403 | `AshVault.Errors.ProviderUnavailable` with `reason: :forbidden` |
+| 403 | `AshVault.Errors.ProviderForbidden` with the refused `:operation` (not retryable) |
 | connection refused / timeout / 5xx | `AshVault.Errors.ProviderUnavailable` |
 | 200 but export body missing the version | `{:error, :not_found}` |
 

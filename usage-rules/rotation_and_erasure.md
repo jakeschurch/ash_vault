@@ -91,7 +91,8 @@ MyApp.Accounts.Organization
 
 - `KeyDestroyed` = erased on purpose. `ProviderUnavailable` = retry/alert. Never map the
   second to the first. Tombstone reads fail closed: an unreadable or ambiguous tombstone is
-  `ProviderUnavailable`, never "not destroyed".
+  `ProviderUnavailable` (or `ProviderForbidden` when the read is refused with `403`), never
+  "not destroyed". `ProviderForbidden` = fix the policy/token/address; do not retry.
 - `CiphertextIntegrityFailed` means tampered bytes, a different tenant/resource/field than
   the row was written for, or a different key. Investigate; it is never "access denied".
 

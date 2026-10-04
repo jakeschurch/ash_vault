@@ -40,6 +40,7 @@ ctx = %AshVault.Context{
 | `AshVault.Errors.KeyNotFound` | Claimed key version does not exist | Reject as invalid |
 | `AshVault.Errors.InvalidMac` | Key found, tag wrong (tampered/forged/other scope, resource or field) | Reject as invalid |
 | `AshVault.Errors.ProviderUnavailable` | Provider could not answer | **Retry**; nothing was decided |
+| `AshVault.Errors.ProviderForbidden` | Provider refused the request (`403`) | Configuration fault; nothing was decided |
 | `AshVault.Errors.PurposeUnsupported` | Provider has no `:mac` keyring | Configuration fault |
 
 - Never treat `ProviderUnavailable` as an invalid tag; that logs a forgery that did not happen.

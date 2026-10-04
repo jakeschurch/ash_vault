@@ -103,6 +103,9 @@ defmodule Mix.Tasks.AshVault.KeyInfo do
             "#{info.version} (#{length(info.versions)} version(s) retained)."
         )
 
+      {:error, %AshVault.Errors.ProviderForbidden{} = error} ->
+        Shared.abort!(Exception.message(error))
+
       {:error, reason} ->
         Shared.abort!(
           Exception.message(

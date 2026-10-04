@@ -110,6 +110,7 @@ Background jobs and scripts need a tenant too.
 | `AshVault.Errors.KeyDestroyed` | Scope was crypto-erased on purpose | Data is gone. Show "deleted"; do not retry |
 | `AshVault.Errors.KeyNotFound` | Provider has no such key and no tombstone | Investigate; this is a fault |
 | `AshVault.Errors.ProviderUnavailable` | Key store unreachable or failed | Retry, alert. **Not** erasure |
+| `AshVault.Errors.ProviderForbidden` | Key store refused the request (`403`) | Alert; fix policy/token/address. **Not** retryable, **not** erasure |
 | `AshVault.Errors.CiphertextIntegrityFailed` | Stored bytes do not verify (tamper, wrong tenant/field/key) | Security incident, not a permissions error |
 
 - **Never** treat `ProviderUnavailable` as "erased" or "no data". An outage must not look
