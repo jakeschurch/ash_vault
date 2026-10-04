@@ -61,7 +61,7 @@ Steps:
 1. Create tenant A and tenant B. Write encrypted rows for each.
 2. Assert A decrypts; assert B decrypts.
 3. Take a real backup: `pg_dump` the test database to a file
-   (`System.cmd("pg_dump", [...])` against the container, or `docker exec`). A `COPY`-based
+   (`System.cmd("pg_dump", [...])` against the repo's own host and port). A `COPY`-based
    dump is fine; it must be a genuine file on disk, not an in-transaction savepoint.
 4. Assert the dump file contains **no plaintext** — grep the raw bytes for the plaintext
    email and SSN values and assert zero hits.
