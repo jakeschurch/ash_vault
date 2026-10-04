@@ -94,6 +94,23 @@ defmodule AshVault.KeyProviders.OpenBaoKubernetesAuthTest do
     pid
   end
 
+  # The stub reports a login when the request *arrives*; the holder swaps the token in
+  # only when the login Task's result comes back. Until then it rightly keeps serving the
+  # still-valid old token, so a test that needs the new one must wait for the swap.
+  defp await_holder_token(token, attempts \\ 100) do
+    cond do
+      :sys.get_state(holder_pid()).token == token ->
+        :ok
+
+      attempts == 0 ->
+        flunk("holder never switched to #{inspect(token)}")
+
+      true ->
+        Process.sleep(10)
+        await_holder_token(token, attempts - 1)
+    end
+  end
+
   describe "login" do
     test "logs in with the SA JWT, caches the token and sends it on requests", %{
       jwt_path: jwt_path
@@ -162,6 +179,7 @@ defmodule AshVault.KeyProviders.OpenBaoKubernetesAuthTest do
       File.write!(jwt_path, "jwt-2")
 
       assert_receive {:login, _, %{"jwt" => "jwt-2"}, _}, 900
+      await_holder_token("token-for-jwt-2")
 
       assert {:ok, _response} = Transport.get(@provider, "/v1/y")
       assert_received {:request, "/v1/y", ["token-for-jwt-2"]}
