@@ -15,6 +15,34 @@ defmodule AshVault.KeyProvider do
       `current_key/1` and `get_key/2` must return `{:error, :destroyed}` forever — never
       `{:error, :not_found}`, and never a freshly minted key. Silently re-minting would
       turn crypto-erasure into silent data loss.
+
+  ## Purposes
+
+  A scope can hold more than one **keyring**, one per *purpose*:
+
+    * `:data` — the keys `AshVault.Cipher` encrypts with. The arity forms every
+      provider has always had (`current_key/1`, `get_key/2`, `rotate/1`) are this
+      purpose, and always will be.
+    * `:mac` — the keys `AshVault.Mac` authenticates with: `current_key/2`,
+      `get_key/3` and `rotate/2` with `:mac` as the last argument.
+
+  A provider declares what it can serve with `c:purposes/0`; one that does not define it
+  serves `:data` only, and every provider written before purposes existed keeps working
+  unchanged. Call sites never dispatch on arity themselves — they go through
+  `current_key/3`, `get_key/4` and `rotate/3` in this module, which route `:data` to the
+  original callbacks and refuse a purpose the provider has not declared.
+
+  The rules for a `:mac` keyring are the `:data` rules, plus separation:
+
+    * minted on first use at version 1, rotated independently — rotating `:mac` never
+      moves `:data`, and rotating `:data` never moves `:mac`;
+    * old versions stay fetchable after a rotation, so tags minted under them still
+      verify;
+    * `c:destroy/1` destroys **every** purpose under the one tombstone, and afterwards
+      each purpose answers `{:error, :destroyed}` forever and never re-mints;
+    * a `:mac` key is never a `:data` key, never the lookup key, and never derived from
+      either. It is minted at `mac_key_bytes/0` bytes regardless of the provider's data
+      `c:key_bytes/0`.
   """
 
   @type scope :: term()
@@ -29,6 +57,9 @@ defmodule AshVault.KeyProvider do
   @type key :: AshVault.Key.t()
   @type version :: non_neg_integer()
   @type key_info :: %{version: version(), key: AshVault.Key.t(), created_at: DateTime.t()}
+
+  @typedoc "Which keyring of a scope a key belongs to. See *Purposes* above."
+  @type purpose :: :data | :mac
 
   @doc "Fetch (minting on first use) the current key for a scope."
   @callback current_key(scope()) :: {:ok, key_info()} | {:error, term()}
@@ -105,9 +136,142 @@ defmodule AshVault.KeyProvider do
   """
   @callback setup() :: :ok | {:error, term()}
 
-  @optional_callbacks key_bytes: 0, lookup_key: 1, child_spec: 1, setup: 0
+  @doc """
+  The purposes this provider can serve keys for. Optional; `[:data]` when absent.
+
+  A provider listing `:mac` must implement `c:current_key/2`, `c:get_key/3` and
+  `c:rotate/2`, and its `c:destroy/1` must destroy the `:mac` keyring too.
+  """
+  @callback purposes() :: [purpose()]
+
+  @doc """
+  `c:current_key/1` for a purpose. Only called with a purpose `c:purposes/0` lists.
+  """
+  @callback current_key(scope(), purpose()) :: {:ok, key_info()} | {:error, term()}
+
+  @doc """
+  `c:get_key/2` for a purpose. Only called with a purpose `c:purposes/0` lists.
+  """
+  @callback get_key(scope(), version(), purpose()) ::
+              {:ok, AshVault.Key.t()}
+              | {:error, :not_found}
+              | {:error, :destroyed}
+              | {:error, term()}
+
+  @doc """
+  `c:rotate/1` for a purpose. Only called with a purpose `c:purposes/0` lists.
+  """
+  @callback rotate(scope(), purpose()) :: {:ok, version()} | {:error, term()}
+
+  @optional_callbacks key_bytes: 0,
+                      lookup_key: 1,
+                      child_spec: 1,
+                      setup: 0,
+                      purposes: 0,
+                      current_key: 2,
+                      get_key: 3,
+                      rotate: 2
 
   @default_key_bytes 32
+  @mac_key_bytes 32
+  @purposes [:data, :mac]
+
+  @doc """
+  Every purpose AshVault knows, `[:data, :mac]`.
+  """
+  @spec all_purposes() :: [purpose()]
+  def all_purposes, do: @purposes
+
+  @doc """
+  The size, in bytes, of every `:mac` key a shipped provider mints: `32`.
+
+  Fixed, and deliberately independent of a provider's data `c:key_bytes/0` — an
+  `aes128-gcm96` data keyring must not quietly halve the MAC key.
+  """
+  @spec mac_key_bytes() :: pos_integer()
+  def mac_key_bytes, do: @mac_key_bytes
+
+  @doc """
+  The purposes a provider serves: its `c:purposes/0`, or `[:data]` when it has none.
+  """
+  @spec purposes(module()) :: [purpose()]
+  def purposes(provider) when is_atom(provider) do
+    if exports?(provider, :purposes, 0), do: provider.purposes(), else: [:data]
+  end
+
+  @doc """
+  Whether a provider can serve keys for `purpose`.
+
+  `:data` is always `true`. For any other purpose this fails **open** for a module that
+  is not compiled yet, exactly like `supports_lookup?/1` and for the same reason: it is
+  called from compile-time checks, and `AshVault.Errors.PurposeUnsupported` is the clean
+  runtime backstop. `AshVault.KeyProviders.Cached` is unwrapped to the provider it wraps.
+
+  Purpose support is read from `c:purposes/0` and never inferred from arity:
+  `AshVault.KeyProviders.Memory` and `AshVault.KeyProviders.Local` have long exported a
+  `current_key/2` that takes a *server* and a scope, and a provider that copied that
+  pattern must not be mistaken for one that understands purposes.
+  """
+  @spec supports_purpose?(module(), purpose()) :: boolean()
+  def supports_purpose?(_provider, :data), do: true
+
+  def supports_purpose?(provider, purpose) when is_atom(provider) and purpose in @purposes do
+    with {:module, ^provider} <- Code.ensure_compiled(provider),
+         inner = unwrap_cached(provider),
+         {:module, ^inner} <- Code.ensure_compiled(inner) do
+      purpose in purposes(inner)
+    else
+      _not_compiled -> true
+    end
+  end
+
+  def supports_purpose?(_provider, _purpose), do: false
+
+  @doc """
+  Fetch (minting on first use) a scope's current key for `purpose`.
+
+  `:data` calls `c:current_key/1`, exactly as AshVault always has. Any other purpose the
+  provider does not list in `c:purposes/0` is `{:error, {:purpose_unsupported, purpose}}`
+  — a configuration fault, which `AshVault.Vault.Runtime` reports as
+  `AshVault.Errors.PurposeUnsupported`, never as an outage.
+  """
+  @spec current_key(module(), scope(), purpose()) :: {:ok, key_info()} | {:error, term()}
+  def current_key(provider, scope, :data), do: provider.current_key(scope)
+
+  def current_key(provider, scope, purpose) do
+    with :ok <- check_purpose(provider, purpose), do: provider.current_key(scope, purpose)
+  end
+
+  @doc """
+  Fetch one key version of a scope's `purpose` keyring. See `current_key/3`.
+  """
+  @spec get_key(module(), scope(), version(), purpose()) ::
+          {:ok, AshVault.Key.t()} | {:error, term()}
+  def get_key(provider, scope, version, :data), do: provider.get_key(scope, version)
+
+  def get_key(provider, scope, version, purpose) do
+    with :ok <- check_purpose(provider, purpose), do: provider.get_key(scope, version, purpose)
+  end
+
+  @doc """
+  Rotate a scope's `purpose` keyring. See `current_key/3`.
+  """
+  @spec rotate(module(), scope(), purpose()) :: {:ok, version()} | {:error, term()}
+  def rotate(provider, scope, :data), do: provider.rotate(scope)
+
+  def rotate(provider, scope, purpose) do
+    with :ok <- check_purpose(provider, purpose), do: provider.rotate(scope, purpose)
+  end
+
+  defp check_purpose(provider, purpose) do
+    Code.ensure_loaded(provider)
+
+    if purpose in @purposes and purpose in purposes(provider) do
+      :ok
+    else
+      {:error, {:purpose_unsupported, purpose}}
+    end
+  end
 
   @doc """
   The key size a provider mints, falling back to 32 bytes when it does not say.

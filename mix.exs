@@ -31,6 +31,7 @@ defmodule AshVault.MixProject do
         "documentation/topics/migrating-from-plaintext.md",
         "documentation/topics/two-vaults.md",
         "documentation/topics/searchable-fields.md",
+        "documentation/topics/key-purposes-and-macs.md",
         "documentation/topics/threat-model.md",
         "documentation/topics/operations.md",
         "documentation/how-to/writing-a-key-provider.md",
@@ -39,7 +40,8 @@ defmodule AshVault.MixProject do
         "documentation/how-to/writing-a-rotation-policy.md",
         "documentation/adr/0001-no-cloak-vault.md",
         "documentation/adr/0002-distinguishable-crypto-errors.md",
-        "README.md"
+        "README.md",
+        "CHANGELOG.md"
       ],
       groups_for_extras: [
         Tutorials: ~r"documentation/tutorials/",
@@ -72,6 +74,9 @@ defmodule AshVault.MixProject do
           AshVault.Context,
           AshVault.Cipher,
           AshVault.Ciphers.AES.GCM,
+          AshVault.Mac,
+          AshVault.Macs.HmacSha256,
+          AshVault.Macs.OpenBaoTransit,
           AshVault.Envelope,
           AshVault.Envelope.V1
         ],
@@ -105,7 +110,9 @@ defmodule AshVault.MixProject do
           AshVault.Errors.ProviderUnavailable,
           AshVault.Errors.SerializationFailed,
           AshVault.Errors.UnsupportedCipher,
-          AshVault.Errors.UnsupportedEnvelope
+          AshVault.Errors.UnsupportedEnvelope,
+          AshVault.Errors.InvalidMac,
+          AshVault.Errors.PurposeUnsupported
         ]
       ]
     ]

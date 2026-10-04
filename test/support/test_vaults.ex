@@ -380,3 +380,55 @@ defmodule AshVault.Test.Support.NoLookupGlobalVault do
     key_provider: AshVault.Test.Support.NoLookupProvider,
     scope: AshVault.Scopes.Global
 end
+
+defmodule AshVault.Test.Support.VaultMacTestCachedMemory do
+  @moduledoc """
+  A `Cached` wrapper over `AshVault.KeyProviders.Memory`, defined directly rather than
+  through a vault's `cache:` option (which refuses to cache Memory), so the `:mac`
+  pass-through can be exercised without a filesystem.
+  """
+
+  use AshVault.KeyProviders.Cached, provider: AshVault.KeyProviders.Memory, cluster: false
+end
+
+defmodule AshVault.Test.Support.VaultMacTestOpaqueProvider do
+  @moduledoc "Serves only opaque handles, for every purpose, so a local MAC must refuse."
+
+  @behaviour AshVault.KeyProvider
+
+  @handle %AshVault.Key{ref: :handle, owner: __MODULE__}
+
+  @doc false
+  @impl AshVault.KeyProvider
+  def purposes, do: [:data, :mac]
+
+  @doc false
+  @impl AshVault.KeyProvider
+  def current_key(_scope), do: {:ok, info()}
+
+  @doc false
+  @impl AshVault.KeyProvider
+  def current_key(_scope, _purpose), do: {:ok, info()}
+
+  @doc false
+  @impl AshVault.KeyProvider
+  def get_key(_scope, _version), do: {:ok, @handle}
+
+  @doc false
+  @impl AshVault.KeyProvider
+  def get_key(_scope, _version, _purpose), do: {:ok, @handle}
+
+  @doc false
+  @impl AshVault.KeyProvider
+  def rotate(_scope), do: {:ok, 1}
+
+  @doc false
+  @impl AshVault.KeyProvider
+  def rotate(_scope, _purpose), do: {:ok, 1}
+
+  @doc false
+  @impl AshVault.KeyProvider
+  def destroy(_scope), do: :ok
+
+  defp info, do: %{version: 1, key: @handle, created_at: ~U[2026-01-01 00:00:00Z]}
+end

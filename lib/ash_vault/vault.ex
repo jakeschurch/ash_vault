@@ -17,6 +17,10 @@ defmodule AshVault.Vault do
 
     * `:key_provider` — **required**, an `AshVault.KeyProvider`
     * `:cipher` — an `AshVault.Cipher`, defaults to `AshVault.Ciphers.AES.GCM`
+    * `:mac` — an `AshVault.Mac` for `mac!/2` and `verify_mac!/4`. Defaults to
+      `AshVault.Macs.OpenBaoTransit` when the key provider is
+      `AshVault.KeyProviders.OpenBaoTransit` (whose keys never leave OpenBao), and to
+      `AshVault.Macs.HmacSha256` otherwise. See [Key purposes and MACs](key-purposes-and-macs.md).
     * `:envelope` — an `AshVault.Envelope`, defaults to `AshVault.Envelope.V1`
     * `:scope` — an `AshVault.Scope`, defaults to `AshVault.Scopes.AshTenant`
     * `:rotation_policy` — an `AshVault.RotationPolicy`, defaults to
@@ -28,6 +32,22 @@ defmodule AshVault.Vault do
       `false`** and should stay that way unless you mean it; see below.
 
   The generated module is a thin set of delegations to `AshVault.Vault.Runtime`.
+
+  ## MACs
+
+  Besides encrypting, a vault authenticates: `mac!/2` returns `{key_version, tag}` under
+  the scope's `:mac` keyring, `verify_mac!/4` checks one, and `rotate!(scope, purpose:
+  :mac)` rotates that keyring without touching the data keys. `destroy!/1` revokes every
+  tag the scope ever issued, because it destroys the `:mac` keyring with everything else.
+
+      {version, tag} = MyApp.Vault.mac!("payload", ctx)
+      :ok = MyApp.Vault.verify_mac!("payload", version, tag, ctx)
+
+  The `:mac` keyring needs a provider that serves it (`c:AshVault.KeyProvider.purposes/0`).
+  Every provider AshVault ships does. With an explicit `mac:` option, a provider that is
+  already compiled and does not is a compile error here; without one, a vault over such
+  a provider still compiles — it never MACs until asked to — and `mac!/2` raises
+  `AshVault.Errors.PurposeUnsupported`.
 
   ## Caching keys
 
@@ -126,14 +146,23 @@ defmodule AshVault.Vault do
   @doc "Decrypt an encoded envelope for a context, returning the plaintext."
   @callback decrypt!(binary(), AshVault.Context.t()) :: binary()
 
-  @doc "Rotate the key for a scope."
+  @doc "Rotate the `:data` key for a scope."
   @callback rotate!(scope :: term()) :: {:ok, non_neg_integer()}
+
+  @doc "Rotate a scope's keyring for a purpose: `rotate!(scope, purpose: :mac)`."
+  @callback rotate!(scope :: term(), opts :: keyword()) :: {:ok, non_neg_integer()}
+
+  @doc "Compute a MAC over `data` for a context, returning `{key_version, tag}`."
+  @callback mac!(binary(), AshVault.Context.t()) :: {pos_integer(), binary()}
+
+  @doc "Verify a tag from `c:mac!/2`, returning `:ok` or raising."
+  @callback verify_mac!(binary(), term(), term(), AshVault.Context.t()) :: :ok
 
   @doc "Crypto-erase every key for a scope."
   @callback destroy!(scope :: term()) :: :ok
 
   @doc "Introspect the vault's compile-time configuration."
-  @callback __ash_vault__(:key_provider | :cipher | :envelope | :scope | :rotation_policy) ::
+  @callback __ash_vault__(:key_provider | :cipher | :mac | :envelope | :scope | :rotation_policy) ::
               module()
 
   @doc "The child specifications this vault's key provider needs supervised."
@@ -185,6 +214,70 @@ defmodule AshVault.Vault do
     end
 
     :ok
+  end
+
+  @doc """
+  The default `AshVault.Mac` for a key provider: `AshVault.Macs.OpenBaoTransit` over
+  `AshVault.KeyProviders.OpenBaoTransit`, whose `:mac` keys are opaque handles, and
+  `AshVault.Macs.HmacSha256` over everything else.
+  """
+  @spec default_mac(module()) :: module()
+  def default_mac(provider) do
+    if AshVault.KeyProvider.unwrap_cached(provider) == AshVault.KeyProviders.OpenBaoTransit,
+      do: AshVault.Macs.OpenBaoTransit,
+      else: AshVault.Macs.HmacSha256
+  end
+
+  @doc """
+  Compile-time guard for an **explicitly** configured `mac:`.
+
+  Fires only when it can positively determine a fault, like `verify_key_sizes!/2`:
+
+    * the provider is compiled and its `c:AshVault.KeyProvider.purposes/0` does not list
+      `:mac`;
+    * `AshVault.Macs.OpenBaoTransit` over any provider but
+      `AshVault.KeyProviders.OpenBaoTransit`, or `AshVault.Macs.HmacSha256` over it — the
+      handle and the MAC would not understand each other.
+
+  A vault with no `mac:` option is never checked here: existing vaults over third-party
+  providers keep compiling, and `AshVault.Errors.PurposeUnsupported` is the runtime
+  answer if one of them is ever asked to MAC.
+  """
+  @spec verify_mac_pairing!(module(), map()) :: :ok
+  def verify_mac_pairing!(_vault, %{mac: nil}), do: :ok
+
+  def verify_mac_pairing!(vault, %{key_provider: provider, mac: mac}) do
+    unless AshVault.KeyProvider.supports_purpose?(provider, :mac) do
+      raise ArgumentError, """
+      #{inspect(vault)} configures `mac: #{inspect(mac)}`, but its key provider
+      #{inspect(provider)} cannot serve :mac keys — its `purposes/0` does not list :mac.
+
+      Implement the optional `AshVault.KeyProvider` callbacks `purposes/0`,
+      `current_key/2`, `get_key/3` and `rotate/2`, or use a provider that ships them.
+      """
+    end
+
+    transit_provider? =
+      AshVault.KeyProvider.unwrap_cached(provider) == AshVault.KeyProviders.OpenBaoTransit
+
+    cond do
+      mac == AshVault.Macs.OpenBaoTransit and not transit_provider? ->
+        raise ArgumentError, """
+        #{inspect(vault)}: AshVault.Macs.OpenBaoTransit computes MACs inside OpenBao from
+        the key handles AshVault.KeyProviders.OpenBaoTransit serves, but the key provider
+        is #{inspect(provider)}. Use AshVault.Macs.HmacSha256, or that provider.
+        """
+
+      mac == AshVault.Macs.HmacSha256 and transit_provider? ->
+        raise ArgumentError, """
+        #{inspect(vault)}: AshVault.KeyProviders.OpenBaoTransit never exports key
+        material, so AshVault.Macs.HmacSha256 has no bytes to MAC with. Use
+        `mac: AshVault.Macs.OpenBaoTransit` (the default for this provider).
+        """
+
+      true ->
+        :ok
+    end
   end
 
   defp safe_key_bytes(module) do
@@ -317,6 +410,31 @@ defmodule AshVault.Vault do
   end
 
   @doc """
+  The purpose a `rotate!/2` keyword list names: `:data` unless `purpose:` says otherwise.
+
+  Raises `ArgumentError` for anything but `:data` or `:mac`, and for unknown options, so a
+  typo such as `purpos: :mac` cannot quietly rotate the data key instead.
+  """
+  @spec purpose!(keyword()) :: AshVault.KeyProvider.purpose()
+  def purpose!(opts) when is_list(opts) do
+    case Keyword.split(opts, [:purpose]) do
+      {purpose_opts, []} ->
+        case Keyword.get(purpose_opts, :purpose, :data) do
+          purpose when purpose in [:data, :mac] ->
+            purpose
+
+          other ->
+            raise ArgumentError,
+                  "rotate!/2 `:purpose` must be :data or :mac, got: #{inspect(other)}"
+        end
+
+      {_purpose_opts, unknown} ->
+        raise ArgumentError,
+              "rotate!/2 accepts only `:purpose`, got: #{inspect(Keyword.keys(unknown))}"
+    end
+  end
+
+  @doc """
   The OTP application a vault module is being compiled into.
 
   Used as the default for the `:otp_app` option, so that
@@ -363,6 +481,11 @@ defmodule AshVault.Vault do
         cipher: opts[:cipher] || AshVault.Ciphers.AES.GCM
       })
 
+      AshVault.Vault.verify_mac_pairing!(__MODULE__, %{
+        key_provider: ash_vault_inner_provider,
+        mac: opts[:mac]
+      })
+
       @ash_vault_opts %{
         key_provider:
           AshVault.Vault.define_cache_module!(
@@ -372,6 +495,8 @@ defmodule AshVault.Vault do
             ash_vault_location
           ),
         cipher: opts[:cipher] || AshVault.Ciphers.AES.GCM,
+        mac: opts[:mac] || AshVault.Vault.default_mac(ash_vault_inner_provider),
+        vault: __MODULE__,
         envelope: opts[:envelope] || AshVault.Envelope.V1,
         scope: opts[:scope] || AshVault.Scopes.AshTenant,
         rotation_policy: opts[:rotation_policy] || AshVault.RotationPolicies.Manual
@@ -388,10 +513,37 @@ defmodule AshVault.Vault do
       @spec decrypt!(binary(), AshVault.Context.t()) :: binary()
       def decrypt!(blob, ctx), do: AshVault.Vault.Runtime.decrypt!(blob, ctx, @ash_vault_opts)
 
-      @doc "Rotate the key for a scope."
+      @doc """
+      Rotate a scope's keyring: the `:data` key by default, or another purpose with
+      `purpose: :mac`.
+      """
       @impl AshVault.Vault
-      @spec rotate!(term()) :: {:ok, non_neg_integer()}
-      def rotate!(scope), do: AshVault.Vault.Runtime.rotate!(scope, @ash_vault_opts)
+      @spec rotate!(term(), keyword()) :: {:ok, non_neg_integer()}
+      def rotate!(scope, rotate_opts \\ []) do
+        AshVault.Vault.Runtime.rotate!(
+          scope,
+          AshVault.Vault.purpose!(rotate_opts),
+          @ash_vault_opts
+        )
+      end
+
+      @doc """
+      Compute a MAC over `data` for a context, returning `{key_version, tag}`.
+
+      See `AshVault.Vault.Runtime.mac!/3`.
+      """
+      @impl AshVault.Vault
+      @spec mac!(binary(), AshVault.Context.t()) :: {pos_integer(), binary()}
+      def mac!(data, ctx), do: AshVault.Vault.Runtime.mac!(data, ctx, @ash_vault_opts)
+
+      @doc """
+      Verify a tag from `mac!/2`. Returns `:ok` or raises; see
+      `AshVault.Vault.Runtime.verify_mac!/5` for which error means what.
+      """
+      @impl AshVault.Vault
+      @spec verify_mac!(binary(), term(), term(), AshVault.Context.t()) :: :ok
+      def verify_mac!(data, key_version, tag, ctx),
+        do: AshVault.Vault.Runtime.verify_mac!(data, key_version, tag, ctx, @ash_vault_opts)
 
       @doc "Crypto-erase every key for a scope."
       @impl AshVault.Vault
@@ -437,10 +589,10 @@ defmodule AshVault.Vault do
 
       @doc "Introspect this vault's compile-time configuration."
       @impl AshVault.Vault
-      @spec __ash_vault__(:key_provider | :cipher | :envelope | :scope | :rotation_policy) ::
+      @spec __ash_vault__(:key_provider | :cipher | :mac | :envelope | :scope | :rotation_policy) ::
               module()
       def __ash_vault__(key)
-          when key in [:key_provider, :cipher, :envelope, :scope, :rotation_policy],
+          when key in [:key_provider, :cipher, :mac, :envelope, :scope, :rotation_policy],
           do: Map.fetch!(@ash_vault_opts, key)
     end
   end

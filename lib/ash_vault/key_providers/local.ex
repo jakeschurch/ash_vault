@@ -17,6 +17,8 @@ defmodule AshVault.KeyProviders.Local do
           v1.key             # raw key bytes, mode 0600
           v2.key
           lookup.key         # the non-rotating searchable-field secret, mode 0600
+          mac-meta.json      # the :mac keyring's own meta, same shape as meta.json
+          mac-v1.key         # :mac key bytes (always 32), mode 0600
         <scope_dir>.tombstone   # presence == scope destroyed
 
   `scope_dir` is `Base.url_encode64(scope, padding: false)` — total, reversible and
@@ -108,7 +110,7 @@ defmodule AshVault.KeyProviders.Local do
   ## Destruction
 
   `destroy/1` writes the **tombstone first**, fsyncs it, and only then overwrites each
-  `v*.key` with random bytes of the same length, fsyncs, unlinks, and removes
+  `*.key` — `:data`, `:mac` and lookup alike — with random bytes of the same length, fsyncs, unlinks, and removes
   `meta.json` and the scope directory. Once the shred completes the tombstone is
   rewritten with a `shredded_at`, so an interrupted destroy is visible to an operator.
 
@@ -163,6 +165,7 @@ defmodule AshVault.KeyProviders.Local do
   @default_key_bytes 32
   @key_file_mode 0o600
   @meta_file "meta.json"
+  @mac_meta_file "mac-meta.json"
   @sentinel_file ".ash_vault_root"
 
   @doc """
@@ -269,31 +272,116 @@ defmodule AshVault.KeyProviders.Local do
   def scope_dir(scope) when is_binary(scope), do: Base.url_encode64(scope, padding: false)
 
   @doc """
-  Fetch the current key for a scope, minting version 1 on first use.
+  The purposes this provider serves: `[:data, :mac]`.
+  """
+  @impl AshVault.KeyProvider
+  @spec purposes() :: [AshVault.KeyProvider.purpose()]
+  def purposes, do: [:data, :mac]
+
+  @doc """
+  Fetch the current `:data` key for a scope, minting version 1 on first use.
   """
   @impl AshVault.KeyProvider
   @spec current_key(AshVault.KeyProvider.scope()) ::
           {:ok, AshVault.KeyProvider.key_info()} | {:error, term()}
-  def current_key(scope), do: current_key(__MODULE__, scope)
+  def current_key(scope), do: current_key(__MODULE__, scope, :data)
 
   @doc """
-  Fetch a specific key version for a scope.
+  Two forms, told apart by the first argument — a scope is always a binary, a server
+  never is:
+
+    * `current_key(scope, purpose)` — the `c:AshVault.KeyProvider.current_key/2`
+      callback, against the default-named instance;
+    * `current_key(server, scope)` — `current_key/1` against an explicitly named
+      instance.
+  """
+  @impl AshVault.KeyProvider
+  @spec current_key(term(), term()) :: {:ok, AshVault.KeyProvider.key_info()} | {:error, term()}
+  def current_key(scope, purpose) when is_binary(scope),
+    do: current_key(__MODULE__, scope, purpose)
+
+  def current_key(server, scope),
+    do: call(server, {:current_key, validate_server_scope!(server, scope), :data})
+
+  @doc """
+  `current_key/2` for a purpose, against an explicitly named instance.
+  """
+  @spec current_key(
+          GenServer.server(),
+          AshVault.KeyProvider.scope(),
+          AshVault.KeyProvider.purpose()
+        ) :: {:ok, AshVault.KeyProvider.key_info()} | {:error, term()}
+  def current_key(server, scope, purpose),
+    do: call(server, {:current_key, validate_scope!(scope), validate_purpose!(purpose)})
+
+  @doc """
+  Fetch a specific `:data` key version for a scope.
   """
   @impl AshVault.KeyProvider
   @spec get_key(AshVault.KeyProvider.scope(), AshVault.KeyProvider.version()) ::
           {:ok, binary()} | {:error, :not_found} | {:error, :destroyed} | {:error, term()}
-  def get_key(scope, version), do: get_key(__MODULE__, scope, version)
+  def get_key(scope, version), do: get_key(__MODULE__, scope, version, :data)
 
   @doc """
-  Mint the next key version for a scope, keeping previous versions fetchable.
+  Two forms, told apart by the first argument:
+
+    * `get_key(scope, version, purpose)` — the `c:AshVault.KeyProvider.get_key/3`
+      callback, against the default-named instance;
+    * `get_key(server, scope, version)` — `get_key/2` against a named instance.
+  """
+  @impl AshVault.KeyProvider
+  @spec get_key(term(), term(), term()) ::
+          {:ok, binary()} | {:error, :not_found} | {:error, :destroyed} | {:error, term()}
+  def get_key(scope, version, purpose) when is_binary(scope),
+    do: get_key(__MODULE__, scope, version, purpose)
+
+  def get_key(server, scope, version),
+    do: call(server, {:get_key, validate_scope!(scope), version, :data})
+
+  @doc """
+  `get_key/3` for a purpose, against an explicitly named instance.
+  """
+  @spec get_key(
+          GenServer.server(),
+          AshVault.KeyProvider.scope(),
+          AshVault.KeyProvider.version(),
+          AshVault.KeyProvider.purpose()
+        ) :: {:ok, binary()} | {:error, :not_found} | {:error, :destroyed} | {:error, term()}
+  def get_key(server, scope, version, purpose),
+    do: call(server, {:get_key, validate_scope!(scope), version, validate_purpose!(purpose)})
+
+  @doc """
+  Mint the next `:data` key version for a scope, keeping previous versions fetchable.
   """
   @impl AshVault.KeyProvider
   @spec rotate(AshVault.KeyProvider.scope()) ::
           {:ok, AshVault.KeyProvider.version()} | {:error, term()}
-  def rotate(scope), do: rotate(__MODULE__, scope)
+  def rotate(scope), do: rotate(__MODULE__, scope, :data)
 
   @doc """
-  Irreversibly destroy every key for a scope and write its tombstone.
+  Two forms, told apart by the first argument:
+
+    * `rotate(scope, purpose)` — the `c:AshVault.KeyProvider.rotate/2` callback;
+    * `rotate(server, scope)` — `rotate/1` against a named instance.
+  """
+  @impl AshVault.KeyProvider
+  @spec rotate(term(), term()) :: {:ok, AshVault.KeyProvider.version()} | {:error, term()}
+  def rotate(scope, purpose) when is_binary(scope), do: rotate(__MODULE__, scope, purpose)
+
+  def rotate(server, scope),
+    do: call(server, {:rotate, validate_server_scope!(server, scope), :data})
+
+  @doc """
+  `rotate/2` for a purpose, against an explicitly named instance.
+  """
+  @spec rotate(GenServer.server(), AshVault.KeyProvider.scope(), AshVault.KeyProvider.purpose()) ::
+          {:ok, AshVault.KeyProvider.version()} | {:error, term()}
+  def rotate(server, scope, purpose),
+    do: call(server, {:rotate, validate_scope!(scope), validate_purpose!(purpose)})
+
+  @doc """
+  Irreversibly destroy every key for a scope — every purpose, and the lookup key — and
+  write its tombstone.
   """
   @impl AshVault.KeyProvider
   @spec destroy(AshVault.KeyProvider.scope()) :: :ok | {:error, term()}
@@ -312,28 +400,6 @@ defmodule AshVault.KeyProviders.Local do
   @impl AshVault.KeyProvider
   @spec lookup_key(AshVault.KeyProvider.scope()) :: {:ok, binary()} | {:error, term()}
   def lookup_key(scope), do: lookup_key(__MODULE__, scope)
-
-  @doc """
-  Same as `current_key/1`, against an explicitly named instance.
-  """
-  @spec current_key(GenServer.server(), AshVault.KeyProvider.scope()) ::
-          {:ok, AshVault.KeyProvider.key_info()} | {:error, term()}
-  def current_key(server, scope), do: call(server, {:current_key, validate_scope!(scope)})
-
-  @doc """
-  Same as `get_key/2`, against an explicitly named instance.
-  """
-  @spec get_key(GenServer.server(), AshVault.KeyProvider.scope(), AshVault.KeyProvider.version()) ::
-          {:ok, binary()} | {:error, :not_found} | {:error, :destroyed} | {:error, term()}
-  def get_key(server, scope, version),
-    do: call(server, {:get_key, validate_scope!(scope), version})
-
-  @doc """
-  Same as `rotate/1`, against an explicitly named instance.
-  """
-  @spec rotate(GenServer.server(), AshVault.KeyProvider.scope()) ::
-          {:ok, AshVault.KeyProvider.version()} | {:error, term()}
-  def rotate(server, scope), do: call(server, {:rotate, validate_scope!(scope)})
 
   @doc """
   Same as `destroy/1`, against an explicitly named instance.
@@ -363,6 +429,20 @@ defmodule AshVault.KeyProviders.Local do
     Scopes reach a key provider already normalised to a binary by the vault's
     `AshVault.Scope` implementation.
     """
+  end
+
+  # `current_key(:not_a_scope, :mac)` lands in the named-server clause, because its first
+  # argument is not a binary. Report the term the caller meant as a scope, not the purpose.
+  defp validate_server_scope!(server, scope) when scope in [:data, :mac],
+    do: validate_scope!(server)
+
+  defp validate_server_scope!(_server, scope), do: validate_scope!(scope)
+
+  defp validate_purpose!(purpose) when purpose in [:data, :mac], do: purpose
+
+  defp validate_purpose!(purpose) do
+    raise ArgumentError,
+          "#{inspect(__MODULE__)} purposes are :data and :mac, got: #{inspect(purpose)}"
   end
 
   defp resolve_root!(opts) do
@@ -487,16 +567,16 @@ defmodule AshVault.KeyProviders.Local do
   end
 
   @impl GenServer
-  def handle_call({:current_key, scope}, _from, state) do
-    {:reply, do_current_key(state, scope), state}
+  def handle_call({:current_key, scope, purpose}, _from, state) do
+    {:reply, do_current_key(state, scope, purpose), state}
   end
 
-  def handle_call({:get_key, scope, version}, _from, state) do
-    {:reply, do_get_key(state, scope, version), state}
+  def handle_call({:get_key, scope, version, purpose}, _from, state) do
+    {:reply, do_get_key(state, scope, version, purpose), state}
   end
 
-  def handle_call({:rotate, scope}, _from, state) do
-    {:reply, do_rotate(state, scope), state}
+  def handle_call({:rotate, scope, purpose}, _from, state) do
+    {:reply, do_rotate(state, scope, purpose), state}
   end
 
   def handle_call({:destroy, scope}, _from, state) do
@@ -509,22 +589,22 @@ defmodule AshVault.KeyProviders.Local do
 
   # -- operations ------------------------------------------------------------
 
-  defp do_current_key(state, scope) do
+  defp do_current_key(state, scope, purpose) do
     with :absent <- tombstone_state(state, scope) do
-      case read_meta(state, scope) do
-        :missing -> mint(state, scope, 1)
-        {:ok, meta} -> load_current(state, scope, meta)
+      case read_meta(state, scope, purpose) do
+        :missing -> mint(state, scope, 1, purpose)
+        {:ok, meta} -> load_current(state, scope, meta, purpose)
         {:error, _} = error -> error
       end
     end
   end
 
-  defp load_current(state, scope, meta) do
+  defp load_current(state, scope, meta, purpose) do
     version = meta.current
 
-    case File.read(key_path(state, scope, version)) do
+    case File.read(key_path(state, scope, version, purpose)) do
       {:ok, key} ->
-        with :ok <- validate_key_size(state, key, scope, version) do
+        with :ok <- validate_key_size(state, key, scope, version, purpose) do
           {:ok, %{version: version, key: key, created_at: Map.fetch!(meta.versions, version)}}
         end
 
@@ -534,7 +614,8 @@ defmodule AshVault.KeyProviders.Local do
         {:error, :not_found}
 
       {:error, reason} ->
-        {:error, unavailable({:key_read_failed, key_path(state, scope, version), reason})}
+        {:error,
+         unavailable({:key_read_failed, key_path(state, scope, version, purpose), reason})}
     end
   end
 
@@ -542,11 +623,20 @@ defmodule AshVault.KeyProviders.Local do
   # to the cipher it becomes `{:error, {:invalid_key_size, n}}`, which the vault would
   # report as `AshVault.Errors.CiphertextIntegrityFailed` — "your data was tampered with" for
   # what is in fact a broken key file.
-  defp validate_key_size(%{key_bytes: expected}, key, _scope, _version)
-       when byte_size(key) == expected,
-       do: :ok
+  defp validate_key_size(state, key, scope, version, purpose) do
+    expected = key_size(state, purpose)
 
-  defp validate_key_size(%{key_bytes: expected}, key, scope, version) do
+    if byte_size(key) == expected do
+      :ok
+    else
+      key_size_error(expected, key, scope, version)
+    end
+  end
+
+  defp key_size(state, :data), do: state.key_bytes
+  defp key_size(_state, :mac), do: AshVault.KeyProvider.mac_key_bytes()
+
+  defp key_size_error(expected, key, scope, version) do
     {:error,
      unavailable(
        {:invalid_key_size,
@@ -559,22 +649,22 @@ defmodule AshVault.KeyProviders.Local do
      )}
   end
 
-  defp do_get_key(state, scope, version) do
+  defp do_get_key(state, scope, version, purpose) do
     with :absent <- tombstone_state(state, scope) do
       # `version` is public API. Without this guard a caller passing
       # "../../../etc/ssl/private/server" reads any `.key` file this process can reach.
       if is_integer(version) and version > 0 do
-        read_key_file(state, scope, version)
+        read_key_file(state, scope, version, purpose)
       else
         {:error, :not_found}
       end
     end
   end
 
-  defp read_key_file(state, scope, version) do
-    case File.read(key_path(state, scope, version)) do
+  defp read_key_file(state, scope, version, purpose) do
+    case File.read(key_path(state, scope, version, purpose)) do
       {:ok, key} ->
-        with :ok <- validate_key_size(state, key, scope, version), do: {:ok, key}
+        with :ok <- validate_key_size(state, key, scope, version, purpose), do: {:ok, key}
 
       {:error, reason} when reason in [:enoent, :enotdir] ->
         {:error, :not_found}
@@ -584,14 +674,15 @@ defmodule AshVault.KeyProviders.Local do
     end
   end
 
-  defp do_rotate(state, scope) do
+  defp do_rotate(state, scope, purpose) do
     with :absent <- tombstone_state(state, scope) do
-      case read_meta(state, scope) do
+      case read_meta(state, scope, purpose) do
         :missing ->
-          with {:ok, %{version: version}} <- mint(state, scope, 1), do: {:ok, version}
+          with {:ok, %{version: version}} <- mint(state, scope, 1, purpose), do: {:ok, version}
 
         {:ok, meta} ->
-          with {:ok, %{version: version}} <- mint(state, scope, meta.current + 1, meta),
+          with {:ok, %{version: version}} <-
+                 mint(state, scope, meta.current + 1, purpose, meta),
                do: {:ok, version}
 
         {:error, _} = error ->
@@ -647,10 +738,12 @@ defmodule AshVault.KeyProviders.Local do
 
   # -- minting ---------------------------------------------------------------
 
-  defp mint(state, scope, version, meta \\ %{current: 0, versions: %{}}) do
+  # A `:mac` key is its own random draw at the fixed MAC key size, in its own files: never
+  # the data key, never derived from it, and never the same length by accident.
+  defp mint(state, scope, version, purpose, meta \\ %{current: 0, versions: %{}}) do
     dir = scope_path(state, scope)
     created_at = DateTime.utc_now()
-    key = :crypto.strong_rand_bytes(state.key_bytes)
+    key = :crypto.strong_rand_bytes(key_size(state, purpose))
 
     meta = %{
       current: version,
@@ -661,8 +754,8 @@ defmodule AshVault.KeyProviders.Local do
          # Key material lands first. A crash between these two writes leaves an orphan
          # key file (harmless); the reverse order would leave meta.json pointing at a
          # key that does not exist, which is an accidental crypto-erasure.
-         :ok <- atomic_write(key_path(state, scope, version), key),
-         :ok <- atomic_write(Path.join(dir, @meta_file), encode_meta(meta)) do
+         :ok <- atomic_write(key_path(state, scope, version, purpose), key),
+         :ok <- atomic_write(meta_path(state, scope, purpose), encode_meta(meta)) do
       {:ok, %{version: version, key: key, created_at: created_at}}
     end
   end
@@ -686,8 +779,8 @@ defmodule AshVault.KeyProviders.Local do
     })
   end
 
-  defp read_meta(state, scope) do
-    path = Path.join(scope_path(state, scope), @meta_file)
+  defp read_meta(state, scope, purpose) do
+    path = meta_path(state, scope, purpose)
 
     case File.read(path) do
       {:ok, body} -> decode_meta(body, path)
@@ -899,8 +992,17 @@ defmodule AshVault.KeyProviders.Local do
 
   defp sentinel_path(root), do: Path.join(root, @sentinel_file)
 
-  defp key_path(state, scope, version),
+  # Each purpose has its own name space inside the scope directory: `v<n>.key` and
+  # `meta.json` for `:data`, `mac-v<n>.key` and `mac-meta.json` for `:mac`. No name in one
+  # can be produced by the other, so `get_key/2` can never hand a MAC key to the cipher.
+  defp key_path(state, scope, version, :data),
     do: Path.join(scope_path(state, scope), "v#{version}.key")
+
+  defp key_path(state, scope, version, :mac),
+    do: Path.join(scope_path(state, scope), "mac-v#{version}.key")
+
+  defp meta_path(state, scope, :data), do: Path.join(scope_path(state, scope), @meta_file)
+  defp meta_path(state, scope, :mac), do: Path.join(scope_path(state, scope), @mac_meta_file)
 
   # `v<n>.key` for data keys, `lookup.key` for this one: the name spaces cannot collide,
   # so `get_key/2` can never hand the lookup key to the cipher.

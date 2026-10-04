@@ -28,6 +28,14 @@ defmodule AshVault.Errors do
       normally caught at compile time by `AshVault.Verifiers.VerifyVault`
     * `AshVault.Errors.LookupNormalizationFailed` — a searchable field's `normalize:`
       strategy returned something that is not a binary
+    * `AshVault.Errors.InvalidMac` — a MAC tag does not verify for this data, context
+      and key version. Not an outage, not erasure
+    * `AshVault.Errors.PurposeUnsupported` — the key provider cannot serve keys for a
+      purpose (such as `:mac`); a configuration fault, not retryable
+
+  For MACs the taxonomy reads: `KeyDestroyed` — the scope was erased, so every tag it
+  ever issued is revoked; `KeyNotFound` — the tag names a key version that does not exist;
+  `ProviderUnavailable` — retry, nothing was decided; `InvalidMac` — the tag is wrong.
 
   A destroyed key must never surface as `AshVault.Errors.CiphertextIntegrityFailed`:
   destruction is checked before any decryption is attempted.
@@ -82,6 +90,8 @@ defmodule AshVault.Errors.MissingScope do
   end
 
   defp verb(%{operation: :decrypt}), do: "decrypt"
+  defp verb(%{operation: :mac}), do: "compute a MAC for"
+  defp verb(%{operation: :verify_mac}), do: "verify a MAC for"
   defp verb(_error), do: "encrypt"
 end
 
@@ -336,5 +346,67 @@ defmodule AshVault.Errors.OpaqueKeyUnsupported do
   end
 
   defp verb(:decrypt), do: "decrypting"
+  defp verb(:mac), do: "computing a MAC for"
+  defp verb(:verify_mac), do: "verifying a MAC for"
   defp verb(_operation), do: "encrypting"
+end
+
+defmodule AshVault.Errors.InvalidMac do
+  @moduledoc """
+  Raised by `verify_mac!` when a tag does not verify.
+
+  The key version was found, the scope is not destroyed and the provider answered: the
+  tag is simply not the tag for this data, under this context (scope, resource, field)
+  and this key version. Causes are a forged or tampered tag, tampered data, a tag
+  replayed from another scope, resource or field, or a tag paired with the wrong key
+  version.
+
+  It is deliberately distinct from the three answers that are *not* "the tag is wrong":
+
+    * `AshVault.Errors.KeyDestroyed` — the scope was crypto-erased; every tag it issued is
+      revoked, permanently
+    * `AshVault.Errors.KeyNotFound` — the claimed key version does not exist
+    * `AshVault.Errors.ProviderUnavailable` — the provider could not answer; retry
+
+  The struct carries neither the tag nor the data. A tag is a bearer credential, and Ash
+  logs and reports errors verbatim.
+  """
+
+  use Splode.Error, fields: [:resource, :field, :key_version], class: :invalid
+
+  def message(%{resource: resource, field: field, key_version: version}) do
+    """
+    MAC verification failed for #{inspect(resource)}.#{field} (key version #{inspect(version)}).
+
+    The tag does not match the data under this scope, resource, field and key version.
+    This is not an outage and not erasure: the tag, the data or the key version presented
+    with it is wrong.
+    """
+  end
+end
+
+defmodule AshVault.Errors.PurposeUnsupported do
+  @moduledoc """
+  Raised when the key provider cannot serve keys for a purpose — typically a vault asked
+  to `mac!` over a provider whose `c:AshVault.KeyProvider.purposes/0` does not list
+  `:mac`, or a third-party provider written before purposes existed.
+
+  A configuration fault: retrying cannot help, and it is never reported as
+  `AshVault.Errors.ProviderUnavailable`. `use AshVault.Vault` catches it at compile time
+  whenever a `mac:` is configured explicitly and the provider module is already
+  compiled; this is the runtime backstop.
+  """
+
+  use Splode.Error, fields: [:provider, :purpose], class: :invalid
+
+  def message(%{provider: provider, purpose: purpose}) do
+    """
+    #{inspect(provider)} cannot serve #{inspect(purpose)} keys: its \
+    `purposes/0` does not list #{inspect(purpose)}.
+
+    Implement the optional `AshVault.KeyProvider` callbacks `purposes/0`,
+    `current_key/2`, `get_key/3` and `rotate/2` for it — see "Writing a key provider" —
+    or use a provider that ships them (`Memory`, `Local`, `OpenBao`, `OpenBaoTransit`).
+    """
+  end
 end

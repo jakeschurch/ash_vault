@@ -8,7 +8,8 @@ defmodule AshVault.Vault.Runtime do
   on its own.
 
   All functions here take `opts`, a map with the `:key_provider`, `:cipher`, `:envelope`,
-  `:scope` and `:rotation_policy` modules.
+  `:scope` and `:rotation_policy` modules, and — for `mac!/3` and `verify_mac!/5` — the
+  `:mac` module. `:vault`, when present, labels telemetry.
   """
 
   require Logger
@@ -17,20 +18,25 @@ defmodule AshVault.Vault.Runtime do
   alias AshVault.Context
   alias AshVault.Envelope
   alias AshVault.Errors.CiphertextIntegrityFailed
+  alias AshVault.Errors.InvalidMac
   alias AshVault.Errors.KeyDestroyed
   alias AshVault.Errors.InvalidScope
   alias AshVault.Errors.KeyNotFound
   alias AshVault.Errors.KeySizeMismatch
   alias AshVault.Errors.MissingScope
   alias AshVault.Errors.ProviderUnavailable
+  alias AshVault.Errors.PurposeUnsupported
+  alias AshVault.KeyProvider
   alias AshVault.RotationPolicy
 
   @type opts :: %{
-          key_provider: module(),
-          cipher: module(),
-          envelope: module(),
-          scope: module(),
-          rotation_policy: module()
+          required(:key_provider) => module(),
+          required(:cipher) => module(),
+          required(:envelope) => module(),
+          required(:scope) => module(),
+          required(:rotation_policy) => module(),
+          optional(:mac) => module(),
+          optional(:vault) => module()
         }
 
   @doc """
@@ -201,21 +207,257 @@ defmodule AshVault.Vault.Runtime do
   end
 
   @doc """
-  Rotate the key for a scope, raising on provider failure.
+  Rotate the `:data` key for a scope, raising on provider failure.
   """
   @spec rotate!(term(), opts()) :: {:ok, non_neg_integer()}
-  def rotate!(scope, opts) do
-    case opts.key_provider.rotate(scope) do
+  def rotate!(scope, opts), do: rotate!(scope, :data, opts)
+
+  @doc """
+  Rotate a scope's keyring for `purpose`, raising on provider failure.
+
+  `:data` calls the provider's `c:AshVault.KeyProvider.rotate/1`, exactly as `rotate!/2`
+  always has. A purpose the provider does not serve raises
+  `AshVault.Errors.PurposeUnsupported` — a configuration fault, never reported as an
+  outage.
+  """
+  @spec rotate!(term(), KeyProvider.purpose(), opts()) :: {:ok, non_neg_integer()}
+  def rotate!(scope, purpose, opts) do
+    case KeyProvider.rotate(opts.key_provider, scope, purpose) do
       {:ok, version} ->
         {:ok, version}
 
       {:error, :destroyed} ->
         raise KeyDestroyed.exception(scope: scope, key_version: nil)
 
+      {:error, {:purpose_unsupported, purpose}} ->
+        raise PurposeUnsupported.exception(provider: opts.key_provider, purpose: purpose)
+
+      {:error, %ProviderUnavailable{} = error} ->
+        raise error
+
       {:error, reason} ->
         raise ProviderUnavailable.exception(provider: opts.key_provider, reason: reason)
     end
   end
+
+  @doc """
+  Compute a MAC over `data` for a context, under the scope's current `:mac` key.
+
+  Returns `{key_version, tag}`: `tag` is the raw bytes `AshVault.Mac.c:mac/3` produced,
+  and `key_version` is what `verify_mac!/5` needs back. The tag is bound to the scope,
+  resource and field through the same associated data `encrypt!/3` uses
+  (`build_aad/2`), so a tag minted for one tenant, resource or field never verifies for
+  another.
+
+  The scope's `:mac` keyring is minted on first use. Raises
+  `AshVault.Errors.KeyDestroyed` for an erased scope, `AshVault.Errors.PurposeUnsupported`
+  when the provider has no `:mac` keyring, and `AshVault.Errors.ProviderUnavailable` for
+  an outage.
+
+  Emits `[:ash_vault, :mac, :sign]`; see `AshVault.Telemetry`.
+  """
+  @spec mac!(binary(), Context.t(), opts()) :: {pos_integer(), binary()}
+  def mac!(data, %Context{} = ctx, opts) when is_binary(data) do
+    metadata = mac_metadata(ctx, opts, nil)
+
+    :sign
+    |> span(metadata, fn -> do_mac(data, ctx, opts) end, fn {version, _tag} -> version end)
+    |> unwrap!()
+  end
+
+  defp do_mac(data, ctx, opts) do
+    scope = resolve_scope!(ctx, opts.scope, :mac)
+    key_info = current_mac_key!(opts.key_provider, scope, ctx)
+    mac = mac_module(opts)
+
+    case mac.mac(data, key_info.key, build_aad(scope, ctx)) do
+      {:ok, tag} when is_binary(tag) ->
+        {:ok, {key_info.version, tag}}
+
+      {:error, reason} ->
+        {:error, mac_error(reason, opts, ctx, :mac)}
+
+      other ->
+        {:error, ProviderUnavailable.exception(provider: mac, reason: {:unexpected, other})}
+    end
+  rescue
+    error in [
+      AshVault.Errors.MissingScope,
+      AshVault.Errors.InvalidScope,
+      KeyDestroyed,
+      KeyNotFound,
+      ProviderUnavailable,
+      PurposeUnsupported
+    ] ->
+      {:error, error}
+  end
+
+  @doc """
+  Verify a tag produced by `mac!/3`, returning `:ok` or raising.
+
+  The key is fetched **before** the tag is looked at, so the answer about the key always
+  wins over the answer about the tag:
+
+    * `AshVault.Errors.KeyDestroyed` — the scope was erased. Every tag it issued is
+      revoked, however valid it once was.
+    * `AshVault.Errors.KeyNotFound` — `key_version` does not exist (including a
+      non-integer one).
+    * `AshVault.Errors.ProviderUnavailable` — the provider could not answer. Retryable,
+      and never reported as an invalid tag.
+    * `AshVault.Errors.InvalidMac` — everything was found and the tag is wrong: tampered,
+      forged, paired with the wrong version, or minted under another scope, resource or
+      field.
+
+  Comparison is constant-time (`AshVault.Macs.HmacSha256`) or done by OpenBao
+  (`AshVault.Macs.OpenBaoTransit`). Emits `[:ash_vault, :mac, :verify]`.
+  """
+  @spec verify_mac!(binary(), term(), term(), Context.t(), opts()) :: :ok
+  def verify_mac!(data, key_version, tag, %Context{} = ctx, opts) when is_binary(data) do
+    metadata = mac_metadata(ctx, opts, key_version)
+
+    :verify
+    |> span(metadata, fn -> do_verify_mac(data, key_version, tag, ctx, opts) end, fn _ ->
+      key_version
+    end)
+    |> unwrap!()
+  end
+
+  defp do_verify_mac(data, key_version, tag, ctx, opts) do
+    scope = resolve_scope!(ctx, opts.scope, :verify_mac)
+    key = get_mac_key!(opts.key_provider, scope, key_version, ctx)
+    mac = mac_module(opts)
+
+    if is_binary(tag) do
+      case mac.verify(data, tag, key, build_aad(scope, ctx)) do
+        :ok -> {:ok, :ok}
+        {:error, :invalid_tag} -> {:error, invalid_mac(ctx, key_version)}
+        {:error, reason} -> {:error, mac_error(reason, opts, ctx, :verify_mac)}
+      end
+    else
+      {:error, invalid_mac(ctx, key_version)}
+    end
+  rescue
+    error in [
+      AshVault.Errors.MissingScope,
+      AshVault.Errors.InvalidScope,
+      KeyDestroyed,
+      KeyNotFound,
+      ProviderUnavailable,
+      PurposeUnsupported
+    ] ->
+      {:error, error}
+  end
+
+  defp invalid_mac(ctx, key_version) do
+    InvalidMac.exception(resource: ctx.resource, field: ctx.field, key_version: key_version)
+  end
+
+  defp mac_module(opts), do: Map.get(opts, :mac) || AshVault.Macs.HmacSha256
+
+  # The MAC's error vocabulary is the cipher's: the same three configuration and outage
+  # answers, classified the same way. Anything unrecognised is an outage of the MAC
+  # module, never a verdict on the tag.
+  defp mac_error({:invalid_key_size, actual}, opts, _ctx, _operation) do
+    mac = mac_module(opts)
+
+    KeySizeMismatch.exception(
+      provider: opts.key_provider,
+      cipher: mac,
+      expected: mac.key_bytes(),
+      actual: actual
+    )
+  end
+
+  defp mac_error(:opaque_key_unsupported, opts, ctx, operation),
+    do: opaque_key_unsupported(opts, mac_module(opts), ctx, operation)
+
+  defp mac_error(%ProviderUnavailable{} = error, _opts, _ctx, _operation), do: error
+
+  defp mac_error(reason, opts, _ctx, _operation),
+    do: ProviderUnavailable.exception(provider: mac_module(opts), reason: reason)
+
+  defp current_mac_key!(provider, scope, ctx) do
+    case KeyProvider.current_key(provider, scope, :mac) do
+      {:ok, key_info} ->
+        key_info
+
+      {:error, {:purpose_unsupported, purpose}} ->
+        raise PurposeUnsupported.exception(provider: provider, purpose: purpose)
+
+      {:error, %ProviderUnavailable{} = error} ->
+        raise error
+
+      {:error, reason} ->
+        case map_provider_error(reason, scope, ctx) do
+          %ProviderUnavailable{} = error -> raise %{error | provider: provider}
+          error -> raise error
+        end
+    end
+  end
+
+  defp get_mac_key!(provider, scope, version, ctx) do
+    case KeyProvider.get_key(provider, scope, version, :mac) do
+      {:ok, key} ->
+        key
+
+      {:error, :destroyed} ->
+        raise KeyDestroyed.exception(
+                scope: scope,
+                key_version: version,
+                resource: ctx.resource,
+                field: ctx.field
+              )
+
+      {:error, :not_found} ->
+        raise KeyNotFound.exception(scope: scope, key_version: version)
+
+      {:error, {:purpose_unsupported, purpose}} ->
+        raise PurposeUnsupported.exception(provider: provider, purpose: purpose)
+
+      {:error, %ProviderUnavailable{} = error} ->
+        raise error
+
+      {:error, reason} ->
+        raise ProviderUnavailable.exception(provider: provider, reason: reason)
+    end
+  end
+
+  # The work runs inside the span and returns `{:ok, _} | {:error, exception}`; the raise
+  # happens outside it. A raise inside would emit `:exception`, and `AshVault.Telemetry`
+  # tells compliance handlers to watch `:stop` — a failed verification must reach them.
+  defp span(event, metadata, fun, version_of) do
+    :telemetry.span([:ash_vault, :mac, event], metadata, fn ->
+      result = fun.()
+
+      stop =
+        metadata
+        |> Map.merge(AshVault.Telemetry.result_metadata(result))
+        |> Map.put(:key_version, stop_version(result, version_of, metadata))
+
+      {result, stop}
+    end)
+  end
+
+  defp stop_version({:ok, value}, version_of, _metadata), do: version_of.(value)
+  defp stop_version(_result, _version_of, metadata), do: metadata.key_version
+
+  defp unwrap!({:ok, value}), do: value
+  defp unwrap!({:error, error}), do: raise(error)
+
+  # Never the data, never the tag, never the scope (it is not on the per-operation events
+  # either; see `AshVault.Telemetry`).
+  defp mac_metadata(ctx, opts, key_version) do
+    ctx
+    |> AshVault.Telemetry.context_metadata()
+    |> Map.merge(%{
+      vault: Map.get(opts, :vault),
+      mac: mac_module(opts),
+      key_version: scalar_version(key_version)
+    })
+  end
+
+  defp scalar_version(version) when is_integer(version), do: version
+  defp scalar_version(_version), do: nil
 
   @doc """
   Destroy every key for a scope (crypto-erasure), raising on provider failure.

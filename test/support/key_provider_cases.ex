@@ -34,6 +34,10 @@ defmodule AshVault.Test.Support.KeyProviderCases do
       handles rather than raw bytes (`AshVault.KeyProviders.OpenBaoTransit`). Defaults
       to `false`.
 
+  The `use` itself takes `mac: false` for a provider that serves only the `:data`
+  purpose; by default the `:mac` purpose contract runs too, and every provider AshVault
+  ships passes it.
+
   ## Non-exporting providers
 
   Exactly **one** case in this suite is about raw bytes: "first current_key mints
@@ -51,10 +55,20 @@ defmodule AshVault.Test.Support.KeyProviderCases do
   @doc false
   defmacro __using__(opts) do
     setup_fun = Keyword.fetch!(opts, :setup)
+    mac? = Keyword.get(opts, :mac, true)
 
     quote do
       import AshVault.Test.Support.KeyProviderCases,
-        only: [current_key: 2, get_key: 3, rotate: 2, destroy: 2]
+        only: [
+          module_of: 1,
+          current_key: 2,
+          current_key: 3,
+          get_key: 3,
+          get_key: 4,
+          rotate: 2,
+          rotate: 3,
+          destroy: 2
+        ]
 
       setup context do
         unquote(setup_fun).(context)
@@ -240,6 +254,184 @@ defmodule AshVault.Test.Support.KeyProviderCases do
           assert {:ok, %{key: ^kept_key}} = current_key(provider, kept)
         end
       end
+
+      if unquote(mac?) do
+        describe "key provider contract: the :mac purpose" do
+          test "declares :mac", %{provider: provider} do
+            assert :mac in AshVault.KeyProvider.purposes(module_of(provider))
+            assert AshVault.KeyProvider.supports_purpose?(module_of(provider), :mac)
+          end
+
+          test "first current_key(:mac) mints version 1",
+               %{provider: provider, scope: scope} = context do
+            scope = scope.()
+
+            assert {:ok, key_info} = current_key(provider, scope, :mac)
+            assert key_info.version == 1
+            assert %DateTime{} = key_info.created_at
+
+            if Map.get(context, :opaque_keys?, false) do
+              assert AshVault.Key.opaque?(key_info.key)
+              assert AshVault.Key.key?(key_info.key)
+            else
+              assert is_binary(key_info.key)
+              assert byte_size(key_info.key) == AshVault.KeyProvider.mac_key_bytes()
+            end
+          end
+
+          test "current_key(:mac) is stable across calls", %{provider: provider, scope: scope} do
+            scope = scope.()
+
+            assert {:ok, first} = current_key(provider, scope, :mac)
+            assert {:ok, second} = current_key(provider, scope, :mac)
+            assert first == second
+          end
+
+          # The separation the whole purpose dimension exists for. A MAC key that was the
+          # data key (or the lookup key) would let one primitive's output be replayed as
+          # the other's, and rotating one would silently move the other.
+          test "the :mac key is never the :data key, nor the lookup key",
+               %{provider: provider, scope: scope} do
+            scope = scope.()
+
+            assert {:ok, %{version: 1, key: data_key}} = current_key(provider, scope)
+            assert {:ok, %{version: 1, key: mac_key}} = current_key(provider, scope, :mac)
+            refute mac_key == data_key
+            assert {:ok, ^data_key} = get_key(provider, scope, 1)
+            assert {:ok, ^mac_key} = get_key(provider, scope, 1, :mac)
+
+            module = module_of(provider)
+
+            if is_binary(mac_key) and AshVault.KeyProvider.supports_lookup?(module) and
+                 not is_tuple(provider) do
+              assert {:ok, lookup_key} = AshVault.KeyProvider.lookup_key(module, scope)
+              refute lookup_key == mac_key
+            end
+          end
+
+          test "different scopes get different :mac keys", %{provider: provider, scope: scope} do
+            assert {:ok, a} = current_key(provider, scope.(), :mac)
+            assert {:ok, b} = current_key(provider, scope.(), :mac)
+            assert a.key != b.key
+          end
+
+          test "rotate(:mac) mints v2, keeps v1 fetchable, and leaves :data alone",
+               %{provider: provider, scope: scope} do
+            scope = scope.()
+
+            assert {:ok, %{version: 1, key: data_v1} = data_before} = current_key(provider, scope)
+            assert {:ok, %{version: 1, key: mac_v1}} = current_key(provider, scope, :mac)
+
+            assert {:ok, 2} = rotate(provider, scope, :mac)
+            assert {:ok, %{version: 2, key: mac_v2}} = current_key(provider, scope, :mac)
+            refute mac_v1 == mac_v2
+
+            assert {:ok, ^mac_v1} = get_key(provider, scope, 1, :mac)
+            assert {:ok, ^mac_v2} = get_key(provider, scope, 2, :mac)
+
+            assert {:ok, ^data_before} = current_key(provider, scope)
+            assert {:ok, ^data_v1} = get_key(provider, scope, 1)
+            assert {:error, :not_found} = get_key(provider, scope, 2)
+          end
+
+          test "rotate(:data) leaves :mac alone", %{provider: provider, scope: scope} do
+            scope = scope.()
+
+            assert {:ok, %{version: 1}} = current_key(provider, scope)
+            assert {:ok, %{version: 1} = mac_before} = current_key(provider, scope, :mac)
+            assert {:ok, 2} = rotate(provider, scope)
+            assert {:ok, 3} = rotate(provider, scope)
+
+            assert {:ok, ^mac_before} = current_key(provider, scope, :mac)
+            assert {:error, :not_found} = get_key(provider, scope, 2, :mac)
+          end
+
+          test "rotate(:mac) on a scope that has never been used returns {:ok, 1}",
+               %{provider: provider, scope: scope} do
+            scope = scope.()
+
+            assert {:ok, 1} = rotate(provider, scope, :mac)
+            assert {:ok, %{version: 1}} = current_key(provider, scope, :mac)
+            assert {:ok, 2} = rotate(provider, scope, :mac)
+          end
+
+          test "get_key(:mac) for unknown, zero, negative or non-integer versions is :not_found",
+               %{provider: provider, scope: scope} do
+            fresh = scope.()
+            assert {:error, :not_found} = get_key(provider, fresh, 1, :mac)
+
+            scope = scope.()
+            assert {:ok, _} = current_key(provider, scope, :mac)
+
+            for version <- [99, 0, -1, :one, 1.5, "1", "../../etc/passwd"] do
+              assert {:error, :not_found} = get_key(provider, scope, version, :mac),
+                     "expected :not_found for :mac version #{inspect(version)}"
+            end
+          end
+
+          test "destroy tombstones the :mac keyring, and it never re-mints",
+               %{provider: provider, scope: scope} do
+            scope = scope.()
+
+            assert {:ok, %{version: 1, key: mac_key}} = current_key(provider, scope, :mac)
+            assert {:ok, 2} = rotate(provider, scope, :mac)
+            assert :ok = destroy(provider, scope)
+
+            for _ <- 1..3 do
+              assert {:error, :destroyed} = current_key(provider, scope, :mac)
+              assert {:error, :destroyed} = get_key(provider, scope, 1, :mac)
+              assert {:error, :destroyed} = get_key(provider, scope, 2, :mac)
+              assert {:error, :destroyed} = get_key(provider, scope, 99, :mac)
+              assert {:error, :destroyed} = rotate(provider, scope, :mac)
+            end
+
+            refute match?({:ok, %{key: ^mac_key}}, current_key(provider, scope, :mac))
+            assert {:error, :destroyed} = current_key(provider, scope)
+          end
+
+          test "one tombstone covers every purpose, whichever purpose was used",
+               %{provider: provider, scope: scope} do
+            mac_only = scope.()
+            assert {:ok, _} = current_key(provider, mac_only, :mac)
+            assert :ok = destroy(provider, mac_only)
+            assert {:error, :destroyed} = current_key(provider, mac_only)
+            assert {:error, :destroyed} = current_key(provider, mac_only, :mac)
+
+            never_used = scope.()
+            assert :ok = destroy(provider, never_used)
+            assert {:error, :destroyed} = current_key(provider, never_used, :mac)
+            assert {:error, :destroyed} = rotate(provider, never_used, :mac)
+          end
+
+          test "destroying one scope leaves another scope's :mac keyring untouched",
+               %{provider: provider, scope: scope} do
+            destroyed = scope.()
+            kept = scope.()
+
+            assert {:ok, _} = current_key(provider, destroyed, :mac)
+            assert {:ok, %{key: kept_key}} = current_key(provider, kept, :mac)
+            assert :ok = destroy(provider, destroyed)
+
+            assert {:ok, %{key: ^kept_key}} = current_key(provider, kept, :mac)
+          end
+
+          test "a non-binary scope is rejected for the :mac purpose too", %{provider: provider} do
+            for bad <- [:atom, 42, {:tuple, 1}, %{a: 1}, ["list"], nil] do
+              assert_raise ArgumentError, ~r/must be binaries/, fn ->
+                current_key(provider, bad, :mac)
+              end
+
+              assert_raise ArgumentError, ~r/must be binaries/, fn ->
+                get_key(provider, bad, 1, :mac)
+              end
+
+              assert_raise ArgumentError, ~r/must be binaries/, fn ->
+                rotate(provider, bad, :mac)
+              end
+            end
+          end
+        end
+      end
     end
   end
 
@@ -265,4 +457,33 @@ defmodule AshVault.Test.Support.KeyProviderCases do
   @spec destroy(module() | {module(), GenServer.server()}, term()) :: :ok | {:error, term()}
   def destroy({module, server}, scope), do: module.destroy(server, scope)
   def destroy(module, scope), do: module.destroy(scope)
+
+  @doc "Call `current_key/2` for a purpose, on a provider module or `{module, server}` pair."
+  @spec current_key(module() | {module(), GenServer.server()}, term(), atom()) ::
+          {:ok, AshVault.KeyProvider.key_info()} | {:error, term()}
+  def current_key({module, server}, scope, purpose),
+    do: module.current_key(server, scope, purpose)
+
+  def current_key(module, scope, purpose),
+    do: AshVault.KeyProvider.current_key(module, scope, purpose)
+
+  @doc "Call `get_key/3` for a purpose, on a provider module or `{module, server}` pair."
+  @spec get_key(module() | {module(), GenServer.server()}, term(), term(), atom()) ::
+          {:ok, AshVault.Key.t()} | {:error, term()}
+  def get_key({module, server}, scope, version, purpose),
+    do: module.get_key(server, scope, version, purpose)
+
+  def get_key(module, scope, version, purpose),
+    do: AshVault.KeyProvider.get_key(module, scope, version, purpose)
+
+  @doc "Call `rotate/2` for a purpose, on a provider module or `{module, server}` pair."
+  @spec rotate(module() | {module(), GenServer.server()}, term(), atom()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def rotate({module, server}, scope, purpose), do: module.rotate(server, scope, purpose)
+  def rotate(module, scope, purpose), do: AshVault.KeyProvider.rotate(module, scope, purpose)
+
+  @doc "The provider module of a provider module or `{module, server}` pair."
+  @spec module_of(module() | {module(), GenServer.server()}) :: module()
+  def module_of({module, _server}), do: module
+  def module_of(module), do: module
 end

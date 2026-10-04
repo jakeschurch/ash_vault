@@ -122,6 +122,37 @@ defmodule AshVault.KeyProviders.OpenBaoTransit do
   gives up this guarantee, and `current_key/1` will create keys on demand as the
   exporting provider does.
 
+  ## The `:mac` keyring
+
+  The `:mac` purpose (see *Purposes* in `AshVault.KeyProvider`) is a second transit key
+  per scope, `mac_key_name/1`, created `exportable: false` and verified non-exportable on
+  every metadata read exactly like the data key. Only its per-version HMAC key is used,
+  through `transit/hmac` and `transit/verify`; like the exporting provider it is an
+  `aes256-gcm96` key rather than transit's `hmac` type, because an `hmac`-type key's
+  metadata carries no creation times (see `AshVault.KeyProviders.OpenBao`). Its handle is
+  a different shape from a data key handle:
+
+      %AshVault.Key{ref: {:mac, "ashvault_nx_dGVuYW50XzQy.mac", 1}, owner: AshVault.KeyProviders.OpenBaoTransit}
+
+  `AshVault.Ciphers.OpenBaoTransit` matches only the two-element data shape, so it refuses
+  a MAC handle; `AshVault.Macs.OpenBaoTransit` matches only this one, so it refuses a
+  data handle. The separation of the two keyrings is enforced at the handle, not left to
+  the caller's discipline. Pair them:
+
+      use AshVault.Vault,
+        key_provider: AshVault.KeyProviders.OpenBaoTransit,
+        cipher: AshVault.Ciphers.OpenBaoTransit,
+        mac: AshVault.Macs.OpenBaoTransit
+
+  The application token then also needs:
+
+      path "transit/hmac/*"            { capabilities = ["update"] }
+      path "transit/verify/*"          { capabilities = ["update"] }
+
+  `transit/hmac` does **not** create a missing key (verified against openbao 2.6.2: it
+  answers `"encryption key not found"`), so the race described above for
+  `transit/encrypt` has no MAC counterpart.
+
   ## Searchable fields are not supported
 
   This provider deliberately does not implement `c:AshVault.KeyProvider.lookup_key/1`. A
@@ -178,6 +209,100 @@ defmodule AshVault.KeyProviders.OpenBaoTransit do
   @impl AshVault.KeyProvider
   @spec setup() :: :ok | {:error, Exception.t()}
   def setup, do: Transport.ensure_kv_mount(__MODULE__)
+
+  @doc """
+  The purposes this provider serves: `[:data, :mac]`.
+  """
+  @impl AshVault.KeyProvider
+  @spec purposes() :: [AshVault.KeyProvider.purpose()]
+  def purposes, do: [:data, :mac]
+
+  @doc """
+  The transit key name holding a scope's `:mac` keyring.
+
+      iex> AshVault.KeyProviders.OpenBaoTransit.mac_key_name("tenant_42")
+      "ashvault_nx_dGVuYW50XzQy.mac"
+
+  `.` is outside the base64url alphabet and the prefix, so no data key name can equal
+  any MAC key name — see `AshVault.KeyProviders.OpenBao.mac_key_name/1`.
+  """
+  @spec mac_key_name(AshVault.KeyProvider.scope()) :: String.t()
+  def mac_key_name(scope), do: key_name(scope) <> ".mac"
+
+  @doc """
+  The current handle for a scope and purpose. `:data` is `current_key/1`; `:mac` creates
+  the scope's non-exportable `hmac` transit key on first use.
+  """
+  @impl AshVault.KeyProvider
+  @spec current_key(AshVault.KeyProvider.scope(), AshVault.KeyProvider.purpose()) ::
+          {:ok, AshVault.KeyProvider.key_info()} | {:error, term()}
+  def current_key(scope, :data), do: current_key(scope)
+
+  def current_key(scope, :mac) do
+    name = mac_key_name(scope)
+
+    # The tombstone is the DATA key name's: one tombstone per scope, covering every
+    # purpose.
+    with :absent <- check_tombstone(key_name(scope)),
+         {:ok, meta} <- mac_meta_or_create(name),
+         version = meta["latest_version"],
+         {:ok, created_at} <- Transport.created_at(__MODULE__, meta, version) do
+      {:ok, %{version: version, key: mac_handle(name, version), created_at: created_at}}
+    end
+  end
+
+  @doc """
+  A handle to one version of a scope's keyring for a purpose, validated against the
+  server first — see `get_key/2`.
+  """
+  @impl AshVault.KeyProvider
+  @spec get_key(
+          AshVault.KeyProvider.scope(),
+          AshVault.KeyProvider.version(),
+          AshVault.KeyProvider.purpose()
+        ) :: {:ok, AshVault.Key.opaque()} | {:error, term()}
+  def get_key(scope, version, :data), do: get_key(scope, version)
+
+  def get_key(scope, version, :mac) do
+    name = mac_key_name(scope)
+
+    with :absent <- check_tombstone(key_name(scope)) do
+      if is_integer(version) and version > 0 do
+        fetch_mac_version(name, version)
+      else
+        {:error, :not_found}
+      end
+    end
+  end
+
+  @doc """
+  Mint the next key version for a scope and purpose. The `:data` and `:mac` keyrings
+  are different transit keys and rotate independently.
+  """
+  @impl AshVault.KeyProvider
+  @spec rotate(AshVault.KeyProvider.scope(), AshVault.KeyProvider.purpose()) ::
+          {:ok, AshVault.KeyProvider.version()} | {:error, term()}
+  def rotate(scope, :data), do: rotate(scope)
+
+  def rotate(scope, :mac) do
+    name = mac_key_name(scope)
+
+    with :absent <- check_tombstone(key_name(scope)),
+         {:ok, meta} <- Transport.read_meta(__MODULE__, name) do
+      case meta do
+        :missing ->
+          with {:ok, created} <- create_mac_key(name), do: {:ok, created["latest_version"]}
+
+        _ ->
+          with :ok <- check_mac_meta(name, meta),
+               {:ok, response} <-
+                 Transport.post(__MODULE__, path("/keys/#{name}/rotate"), %{}),
+               {:ok, data} <- transit_ok(response) do
+            {:ok, data["latest_version"]}
+          end
+      end
+    end
+  end
 
   @doc """
   The current key handle for a scope, creating the transit key (version 1) on first use.
@@ -296,15 +421,17 @@ defmodule AshVault.KeyProviders.OpenBaoTransit do
   Returns `:ok` only once the transit key is confirmed absent by a fresh read, and a
   repeated call resumes cleanup behind an existing tombstone.
 
-  There is no lookup key to delete — this provider has none.
+  Both keyrings go: the data key and the `:mac` key, behind the one tombstone. There is
+  no lookup key to delete — this provider has none.
   """
   @impl AshVault.KeyProvider
   @spec destroy(AshVault.KeyProvider.scope()) :: :ok | {:error, term()}
   def destroy(scope) do
     name = key_name(scope)
 
-    with :ok <- ensure_tombstone(name) do
-      Transport.delete_transit_key(__MODULE__, name)
+    with :ok <- ensure_tombstone(name),
+         :ok <- Transport.delete_transit_key(__MODULE__, name) do
+      Transport.delete_transit_key(__MODULE__, mac_key_name(scope))
     end
   end
 
@@ -342,6 +469,29 @@ defmodule AshVault.KeyProviders.OpenBaoTransit do
 
   def unwrap(_key), do: :error
 
+  @doc """
+  The opaque handle this provider serves for a `:mac` key version.
+
+  Tagged `{:mac, name, version}` so it cannot be mistaken for a data key handle by
+  `unwrap/1` — or by `AshVault.Ciphers.OpenBaoTransit`, which goes through it.
+  """
+  @spec mac_handle(String.t(), AshVault.KeyProvider.version()) :: AshVault.Key.opaque()
+  def mac_handle(name, version) when is_binary(name) and is_integer(version) do
+    %AshVault.Key{ref: {:mac, name, version}, owner: __MODULE__}
+  end
+
+  @doc """
+  The transit key name and version a `:mac` handle refers to, for
+  `AshVault.Macs.OpenBaoTransit`. `:error` for anything else, a data handle included.
+  """
+  @spec unwrap_mac(AshVault.Key.t()) :: {:ok, {String.t(), pos_integer()}} | :error
+  def unwrap_mac(%AshVault.Key{ref: {:mac, name, version}, owner: __MODULE__})
+      when is_binary(name) and is_integer(version) and version > 0 do
+    {:ok, {name, version}}
+  end
+
+  def unwrap_mac(_key), do: :error
+
   # ── transit ────────────────────────────────────────────────────────────────────
 
   defp check_tombstone(name), do: Transport.check_tombstone(__MODULE__, name)
@@ -367,6 +517,50 @@ defmodule AshVault.KeyProviders.OpenBaoTransit do
       {:ok, meta}
     end
   end
+
+  defp fetch_mac_version(name, version) do
+    case Transport.read_meta(__MODULE__, name) do
+      {:ok, :missing} ->
+        {:error, :not_found}
+
+      {:ok, meta} ->
+        with :ok <- check_mac_meta(name, meta) do
+          if usable_version?(meta, version),
+            do: {:ok, mac_handle(name, version)},
+            else: {:error, :not_found}
+        end
+
+      {:error, error} ->
+        {:error, error}
+    end
+  end
+
+  defp mac_meta_or_create(name) do
+    case Transport.read_meta(__MODULE__, name) do
+      {:ok, :missing} ->
+        create_mac_key(name)
+
+      {:ok, meta} ->
+        with :ok <- check_mac_meta(name, meta), do: {:ok, meta}
+
+      {:error, error} ->
+        {:error, error}
+    end
+  end
+
+  defp create_mac_key(name) do
+    body = %{type: "aes256-gcm96", exportable: false, allow_plaintext_backup: false}
+
+    with {:ok, response} <- Transport.post(__MODULE__, path("/keys/#{name}"), body),
+         {:ok, meta} <- transit_ok(response),
+         :ok <- check_mac_meta(name, meta) do
+      {:ok, meta}
+    end
+  end
+
+  # The same read-back as the data key: creating an existing key is a silent no-op, so a
+  # `.mac` key created exportable elsewhere must be refused, not quietly used.
+  defp check_mac_meta(name, meta), do: refuse_exportable(name, meta)
 
   # The invariant that makes this provider's name true. Creating an existing key is a
   # silent no-op on OpenBao 2.6.2 — the `exportable: false` we send is ignored and the

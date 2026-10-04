@@ -612,6 +612,68 @@ defmodule AshVault.KeyProviders.LocalTest do
     end
   end
 
+  describe "the :mac keyring on disk" do
+    test "lives in mac-meta.json and mac-v<n>.key, mode 0600, beside the data keys",
+         %{provider: provider, root: root, scope: scope} do
+      scope = scope.()
+      assert {:ok, %{version: 1}} = current_key(provider, scope)
+      assert {:ok, %{version: 1}} = current_key(provider, scope, :mac)
+      assert {:ok, 2} = rotate(provider, scope, :mac)
+
+      dir = scope_path(root, scope)
+
+      assert Enum.sort(File.ls!(dir)) ==
+               ["mac-meta.json", "mac-v1.key", "mac-v2.key", "meta.json", "v1.key"]
+
+      for file <- ["mac-meta.json", "mac-v1.key", "mac-v2.key"] do
+        %File.Stat{mode: mode} = File.stat!(Path.join(dir, file))
+        assert Bitwise.band(mode, 0o777) == 0o600
+      end
+
+      assert %{"current" => 2} =
+               dir |> Path.join("mac-meta.json") |> File.read!() |> Jason.decode!()
+
+      assert %{"current" => 1} = dir |> Path.join("meta.json") |> File.read!() |> Jason.decode!()
+    end
+
+    test "a :mac key file of the wrong size is ProviderUnavailable",
+         %{provider: provider, root: root, scope: scope} do
+      scope = scope.()
+      assert {:ok, %{version: 1}} = current_key(provider, scope, :mac)
+
+      File.write!(Path.join(scope_path(root, scope), "mac-v1.key"), :crypto.strong_rand_bytes(16))
+
+      assert {:error, %ProviderUnavailable{reason: {:invalid_key_size, _}}} =
+               current_key(provider, scope, :mac)
+
+      assert {:error, %ProviderUnavailable{reason: {:invalid_key_size, _}}} =
+               get_key(provider, scope, 1, :mac)
+    end
+
+    test "is 32 bytes even when the data keyring is configured smaller", %{tmp_dir: tmp_dir} do
+      root = Path.join(tmp_dir, "small")
+      Local.init_root!(root)
+      name = :"ash_vault_local_small_#{System.unique_integer([:positive])}"
+      start_supervised!({Local, name: name, root: root, key_bytes: 16}, id: name)
+
+      assert {:ok, %{key: data_key}} = Local.current_key(name, "s")
+      assert {:ok, %{key: mac_key}} = Local.current_key(name, "s", :mac)
+      assert byte_size(data_key) == 16
+      assert byte_size(mac_key) == 32
+    end
+
+    test "destroy shreds the :mac key files too", %{provider: provider, root: root, scope: scope} do
+      scope = scope.()
+      assert {:ok, _} = current_key(provider, scope, :mac)
+      assert {:ok, 2} = rotate(provider, scope, :mac)
+      assert :ok = destroy(provider, scope)
+
+      refute File.exists?(scope_path(root, scope))
+      assert File.exists?(tombstone_path(root, scope))
+      assert {:error, :destroyed} = current_key(provider, scope, :mac)
+    end
+  end
+
   describe "get_key/2 version validation" do
     # Finding 15. get_key/2 is public API, and "v#{version}.key" interpolated an
     # unvalidated term into a path.

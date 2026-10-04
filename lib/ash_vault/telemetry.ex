@@ -18,6 +18,8 @@ defmodule AshVault.Telemetry do
   | `[:ash_vault, :decrypt]` | `AshVault.decrypt_value/5` — one field of one record |
   | `[:ash_vault, :key, :rotate]` | `AshVault.rotate_key!/3` — a scope's key is rotated |
   | `[:ash_vault, :key, :destroy]` | `AshVault.destroy_keys!/3` — a scope is crypto-erased |
+  | `[:ash_vault, :mac, :sign]` | a vault's `mac!/2` — a tag is minted |
+  | `[:ash_vault, :mac, :verify]` | a vault's `verify_mac!/4` — a tag is checked |
 
   `[:ash_vault, :key, :destroy]` is the compliance-critical one: it is the record that an
   erasure request was actually executed, and it is the only event whose absence is itself
@@ -47,8 +49,16 @@ defmodule AshVault.Telemetry do
   |---|---|
   | `[:ash_vault, :encrypt]` | `:resource`, `:field`, `:phase` |
   | `[:ash_vault, :decrypt]` | `:resource`, `:field`, `:phase`, `:vault` |
-  | `[:ash_vault, :key, :rotate]` | `:resource`, `:field`, `:phase`, `:vault`, `:scope`, `:scope_fingerprint`, `:key_version` |
+  | `[:ash_vault, :key, :rotate]` | `:resource`, `:field`, `:phase`, `:vault`, `:scope`, `:scope_fingerprint`, `:purpose`, `:key_version` |
   | `[:ash_vault, :key, :destroy]` | `:resource`, `:field`, `:phase`, `:vault`, `:scope`, `:scope_fingerprint` |
+  | `[:ash_vault, :mac, :sign]` | `:resource`, `:field`, `:phase`, `:vault`, `:mac`, `:key_version` |
+  | `[:ash_vault, :mac, :verify]` | `:resource`, `:field`, `:phase`, `:vault`, `:mac`, `:key_version` |
+
+  `:purpose` is `:data` or `:mac`. `:mac` is the `AshVault.Mac` module. On
+  `[:ash_vault, :mac, :sign]` `:key_version` is `nil` at `:start` and the version the tag
+  was minted under at `:stop`; on `[:ash_vault, :mac, :verify]` it is the version the
+  caller presented, when that is an integer. Neither event ever carries the tag or the
+  data: a tag is a bearer credential.
 
   `:phase` is `:write` or `:read`. `:key_version` is `nil` on rotate's `:start` and the
   newly minted version on its `:stop`. `:vault` is absent from `[:ash_vault, :encrypt]`
