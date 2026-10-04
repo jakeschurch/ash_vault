@@ -348,6 +348,79 @@ defmodule AshVault.Vault.Runtime do
       {:error, error}
   end
 
+  @doc """
+  Compute a MAC over `data` under one **stated** version of the scope's `:mac` keyring.
+
+  `mac!/3` always signs under the current version; this is its version-pinned sibling,
+  for a caller that must recompute a tag at the version a credential names — a macaroon
+  verifier recomputes its root signature this way, then compares the result itself.
+
+  The key is fetched exactly as `verify_mac!/5` fetches it, so the taxonomy is the same:
+  `AshVault.Errors.KeyDestroyed` (the scope was erased — revoked), `AshVault.Errors.KeyNotFound`
+  (no such version, including a non-integer one — invalid) and
+  `AshVault.Errors.ProviderUnavailable` (retry; nothing was decided). It never mints a
+  keyring: a version that does not exist is `KeyNotFound`, not a fresh key.
+
+  Emits `[:ash_vault, :mac, :sign]` with the stated `key_version`.
+  """
+  @spec mac_at!(binary(), term(), Context.t(), opts()) :: binary()
+  def mac_at!(data, key_version, %Context{} = ctx, opts) when is_binary(data) do
+    metadata = mac_metadata(ctx, opts, key_version)
+
+    :sign
+    |> span(metadata, fn -> do_mac_at(data, key_version, ctx, opts) end, fn _tag ->
+      scalar_version(key_version)
+    end)
+    |> unwrap!()
+  end
+
+  defp do_mac_at(data, key_version, ctx, opts) do
+    scope = resolve_scope!(ctx, opts.scope, :mac)
+
+    unless is_integer(key_version) and key_version > 0 do
+      raise KeyNotFound.exception(scope: scope, key_version: key_version)
+    end
+
+    key = get_mac_key!(opts.key_provider, scope, key_version, ctx)
+    mac = mac_module(opts)
+
+    case mac.mac(data, key, build_aad(scope, ctx)) do
+      {:ok, tag} when is_binary(tag) ->
+        {:ok, tag}
+
+      {:error, reason} ->
+        {:error, mac_error(reason, opts, ctx, :mac)}
+
+      other ->
+        {:error, ProviderUnavailable.exception(provider: mac, reason: {:unexpected, other})}
+    end
+  rescue
+    error in [
+      AshVault.Errors.MissingScope,
+      AshVault.Errors.InvalidScope,
+      KeyDestroyed,
+      KeyNotFound,
+      ProviderUnavailable,
+      PurposeUnsupported
+    ] ->
+      {:error, error}
+  end
+
+  @doc """
+  The current version of the scope's `:mac` keyring, minting the keyring on first use.
+
+  What `mac_at!/4` needs to sign under the current key, and what a verifier compares a
+  stated version against to decide whether that version is still accepted. Raises
+  `AshVault.Errors.KeyDestroyed` for an erased scope, `AshVault.Errors.PurposeUnsupported`
+  when the provider has no `:mac` keyring and `AshVault.Errors.ProviderUnavailable` for an
+  outage. Never returns key material.
+  """
+  @spec current_mac_version!(Context.t(), opts()) :: pos_integer()
+  def current_mac_version!(%Context{} = ctx, opts) do
+    scope = resolve_scope!(ctx, opts.scope, :mac)
+    current_mac_key!(opts.key_provider, scope, ctx).version
+  end
+
   defp invalid_mac(ctx, key_version) do
     InvalidMac.exception(resource: ctx.resource, field: ctx.field, key_version: key_version)
   end

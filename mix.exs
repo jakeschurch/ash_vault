@@ -32,6 +32,7 @@ defmodule AshVault.MixProject do
         "documentation/topics/two-vaults.md",
         "documentation/topics/searchable-fields.md",
         "documentation/topics/key-purposes-and-macs.md",
+        "documentation/topics/macaroons.md",
         "documentation/topics/threat-model.md",
         "documentation/topics/operations.md",
         "documentation/how-to/writing-a-key-provider.md",
@@ -66,7 +67,26 @@ defmodule AshVault.MixProject do
           AshVault.Context.Builder,
           AshVault.Transformers.ExpandAttributes,
           AshVault.Transformers.SetupEncryption,
-          AshVault.Verifiers.VerifyVault
+          AshVault.Transformers.SetupMacaroons,
+          AshVault.Verifiers.VerifyVault,
+          AshVault.Verifiers.VerifyMacaroons
+        ],
+        Macaroons: [
+          AshVault.Macaroon,
+          AshVault.Macaroon.Caveat,
+          AshVault.Macaroon.Caveats.ActionIn,
+          AshVault.Macaroon.CheckContext,
+          AshVault.Macaroon.Verified,
+          AshVault.Checks.MacaroonAllows,
+          AshVault.Macaroon.Preparations.Verify,
+          AshVault.Macaroon.Actions.Mint,
+          AshVault.Macaroon.Runtime,
+          AshVault.Macaroon.Envelope,
+          AshVault.Macaroon.CaveatCodec,
+          AshVault.Macaroon.Chain,
+          AshVault.Macaroon.Clock,
+          AshVault.Macaroon.Definition,
+          AshVault.Macaroon.CaveatDefinition
         ],
         "Crypto core": [
           AshVault.Vault,
@@ -112,7 +132,9 @@ defmodule AshVault.MixProject do
           AshVault.Errors.UnsupportedCipher,
           AshVault.Errors.UnsupportedEnvelope,
           AshVault.Errors.InvalidMac,
-          AshVault.Errors.PurposeUnsupported
+          AshVault.Errors.PurposeUnsupported,
+          AshVault.Errors.InvalidMacaroon,
+          AshVault.Errors.MacaroonRevoked
         ]
       ]
     ]

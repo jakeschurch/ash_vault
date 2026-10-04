@@ -8,5 +8,6 @@ defmodule Example.Accounts do
     resource Example.Accounts.User
     resource Example.Accounts.AuthUser
     resource Example.Accounts.Contact
+    resource Example.Accounts.ApiKey
   end
 end

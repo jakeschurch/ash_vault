@@ -41,11 +41,13 @@ defmodule AshVault do
 
   @transformers [
     AshVault.Transformers.ExpandAttributes,
-    AshVault.Transformers.SetupEncryption
+    AshVault.Transformers.SetupEncryption,
+    AshVault.Transformers.SetupMacaroons
   ]
 
   @verifiers [
-    AshVault.Verifiers.VerifyVault
+    AshVault.Verifiers.VerifyVault,
+    AshVault.Verifiers.VerifyMacaroons
   ]
 
   use Spark.Dsl.Extension,

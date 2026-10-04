@@ -16,6 +16,9 @@ defmodule AshVault.Dsl do
 
   `attributes [:email, :ssn]` is sugar for a list of `encrypt` entities with default
   options; `AshVault.Transformers.ExpandAttributes` expands it.
+
+  A `macaroon` entity declares an attenuable bearer token for the resource's records;
+  see `AshVault.Macaroon` and [Macaroons](macaroons.md).
   """
 
   @encrypt %Spark.Dsl.Entity{
@@ -63,6 +66,119 @@ defmodule AshVault.Dsl do
     ]
   }
 
+  @caveat %Spark.Dsl.Entity{
+    name: :caveat,
+    describe: """
+    Declare a caveat a token may carry. Every caveat a token carries must be declared,
+    and every one must admit the request; see `AshVault.Macaroon.Caveat`.
+    """,
+    examples: [
+      "caveat :ip, :string, check: MyApp.Caveats.Ip",
+      """
+      caveat :actions, {:array, :string},
+        phase: :authorize,
+        check: AshVault.Macaroon.Caveats.ActionIn
+      """
+    ],
+    target: AshVault.Macaroon.CaveatDefinition,
+    args: [:name, :type],
+    identifier: :name,
+    schema: [
+      name: [type: :atom, required: true, doc: "The caveat's name, as it appears in tokens."],
+      type: [
+        type: :any,
+        required: true,
+        doc:
+          "The value type: `:string`, `:integer`, `:boolean`, `:utc_datetime`, " <>
+            "`:utc_datetime_usec`, `{:array, :string}` or `{:array, :integer}`."
+      ],
+      constraints: [type: :keyword_list, default: [], doc: "Constraints for casting on mint."],
+      check: [
+        type:
+          {:spark_function_behaviour, AshVault.Macaroon.Caveat,
+           {AshVault.Macaroon.Caveat.Function, 2}},
+        required: true,
+        doc:
+          "An `AshVault.Macaroon.Caveat` module, `{module, opts}`, or a " <>
+            "`fn value, check_context -> ... end`."
+      ],
+      phase: [
+        type: {:in, [:verify, :authorize]},
+        default: :verify,
+        doc:
+          "`:verify` checks run in the verifying read, once the record is loaded. " <>
+            "`:authorize` checks run in `AshVault.Checks.MacaroonAllows`, against the " <>
+            "action being authorized — and only there."
+      ]
+    ]
+  }
+
+  @macaroon %Spark.Dsl.Entity{
+    name: :macaroon,
+    describe: """
+    Declare a macaroon: an attenuable bearer token naming one record of this resource,
+    signed under the scope's `:mac` key. Generates a mint action and a verifying read
+    action, each with a code interface. See [Macaroons](macaroons.md).
+    """,
+    examples: [
+      """
+      macaroon :api do
+        prefix "myapp"
+        identity :id
+        revoked_when expr(not is_nil(revoked_at))
+        default_ttl 86_400
+        caveat :ip, :string, check: MyApp.Caveats.Ip
+      end
+      """
+    ],
+    target: AshVault.Macaroon.Definition,
+    imports: [Ash.Expr],
+    args: [:name],
+    identifier: :name,
+    entities: [caveats: [@caveat]],
+    schema: [
+      name: [type: :atom, required: true, doc: "The macaroon's name."],
+      prefix: [
+        type: :string,
+        required: true,
+        doc:
+          "The token prefix: 2-32 characters of `[a-z][a-z0-9]*`. Make it distinctive " <>
+            "so secret scanners can recognise a leaked token."
+      ],
+      identity: [
+        type: :atom,
+        required: true,
+        doc:
+          "How a token names its record: the (single) primary key attribute, or an " <>
+            "identity with exactly one key."
+      ],
+      revoked_when: [
+        type: :any,
+        doc:
+          "An expression over the record. The token verifies only while it evaluates " <>
+            "to exactly `false`; `true`, `nil` or an error all revoke."
+      ],
+      default_ttl: [
+        type: {:or, [:pos_integer, {:in, [:infinity]}]},
+        required: true,
+        doc: "Lifetime of a minted token in seconds, or `:infinity` for no expiry caveat."
+      ],
+      accepted_key_versions: [
+        type: {:or, [:pos_integer, {:in, [:all]}]},
+        default: 1,
+        doc:
+          "How many of the most recent `:mac` key versions are accepted. With the " <>
+            "default `1`, rotating the scope's `:mac` keyring revokes every outstanding " <>
+            "token of this macaroon in that scope."
+      ],
+      mint_action: [type: :atom, doc: "Name of the generated mint action. `:mint_<name>`."],
+      read_action: [
+        type: :atom,
+        doc: "Name of the generated verifying read action. `:<name>_by_token`."
+      ]
+    ]
+  }
+
   @key_lifecycle %Spark.Dsl.Section{
     name: :key_lifecycle,
     describe: "Generate generic actions for key rotation and cryptographic erasure.",
@@ -75,7 +191,7 @@ defmodule AshVault.Dsl do
   @ash_vault %Spark.Dsl.Section{
     name: :ash_vault,
     describe: "Configure encrypted attributes for this resource.",
-    entities: [@encrypt],
+    entities: [@encrypt, @macaroon],
     sections: [@key_lifecycle],
     schema: [
       vault: [

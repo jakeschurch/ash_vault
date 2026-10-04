@@ -18,6 +18,7 @@ terminal, and step 8 is the one that matters.
 | `lib/example/accounts/user.ex` | `encrypt :email`, plus a **field policy** on the decrypted field. |
 | `lib/example/accounts/contact.ex` | `attributes [:phone]` — a *second* resource under the *same* tenant key. |
 | `lib/example/accounts/auth_user.ex` | `encrypt :email, searchable?: true, unique?: true` — a **password login by an encrypted email address**, plus upsert-by-email. Its moduledoc records exactly why AshAuthentication's `password` strategy DSL cannot be pointed at an encrypted field. |
+| `lib/example/accounts/api_key.ex` | A **macaroon** API key: `mint_api`, the verifying `api_by_token` read, a plug-style `sign_in_with_api_key` action, an `:ip` verify-phase caveat and an `:actions` caveat enforced by `AshVault.Checks.MacaroonAllows`. Nothing secret is stored in the table. |
 | `lib/example/accounts/password.ex` | The two halves the strategy would otherwise supply: hashing on register, verification on sign-in, both through `AshAuthentication.BcryptProvider`. |
 | `lib/example/vault.ex` | The vault, and the config switch between the OpenBao and Local key providers. |
 | `lib/example/backup.ex` | Real `pg_dump` (via `docker exec`) and real `psql` restore. |
