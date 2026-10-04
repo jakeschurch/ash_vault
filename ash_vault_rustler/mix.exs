@@ -53,8 +53,11 @@ defmodule AshVaultRustler.MixProject do
   defp package do
     [
       files: ~w(lib native/ashvault_nif/src native/ashvault_nif/Cargo.* .formatter.exs
-                mix.exs README.md checksum-*.exs),
-      licenses: ["MIT"]
+                mix.exs README.md LICENSE checksum-*.exs),
+      licenses: ["MIT"],
+      links: %{
+        "Source" => "https://github.com/jakeschurch/ash_vault/tree/main/ash_vault_rustler"
+      }
     ]
   end
 

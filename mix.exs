@@ -22,6 +22,7 @@ defmodule AshVault.MixProject do
 
   defp package do
     [
+      licenses: ["MIT"],
       links: %{
         "Source" => "https://github.com/jakeschurch/ash_vault",
         "Changelog" => "https://github.com/jakeschurch/ash_vault/blob/main/CHANGELOG.md"
