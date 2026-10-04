@@ -147,4 +147,40 @@ defmodule AshVault.KeyProviders.OpenBaoKeyNameTest do
       assert OpenBao.key_name("a") == "ashvault_" <> Base.url_encode64("a", padding: false)
     end
   end
+
+  describe "the :mac key name" do
+    alias AshVault.KeyProviders.OpenBaoTransit
+
+    # The MAC namespace needs no arithmetic: `.` is a legal transit key character but not
+    # a base64url one, and not in either prefix. No data or lookup name contains a `.`;
+    # every MAC name does.
+    property "no data or lookup key name ever contains the MAC separator" do
+      check all(scope <- scope(), max_runs: 2_000) do
+        refute String.contains?(OpenBao.key_name(scope), ".")
+        refute String.contains?(OpenBao.lookup_key_name(scope), ".")
+        refute String.contains?(OpenBaoTransit.key_name(scope), ".")
+      end
+    end
+
+    property "no scope's MAC key name is any scope's data or lookup key name" do
+      check all(s1 <- scope(), s2 <- scope(), max_runs: 500) do
+        refute OpenBao.mac_key_name(s1) == OpenBao.key_name(s2)
+        refute OpenBao.mac_key_name(s1) == OpenBao.lookup_key_name(s2)
+        refute OpenBaoTransit.mac_key_name(s1) == OpenBaoTransit.key_name(s2)
+      end
+    end
+
+    property "MAC key names are injective in the scope" do
+      check all(s1 <- scope(), s2 <- scope(), s1 != s2, max_runs: 500) do
+        refute OpenBao.mac_key_name(s1) == OpenBao.mac_key_name(s2)
+      end
+    end
+
+    # Why the suffix is `.mac` and not `_mac`: the underscore form is reachable.
+    test "a `_mac` suffix would collide, which is why the separator is `.`" do
+      assert {:ok, bytes} = Base.url_decode64("AAAA_mac", padding: false)
+      assert OpenBao.key_name(bytes) == OpenBao.key_name(<<0, 0, 0>>) <> "_mac"
+      assert OpenBao.mac_key_name(<<0, 0, 0>>) == OpenBao.key_name(<<0, 0, 0>>) <> ".mac"
+    end
+  end
 end

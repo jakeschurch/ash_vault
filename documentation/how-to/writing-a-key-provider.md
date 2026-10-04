@@ -353,6 +353,53 @@ defmodule MyApp.Vault do
 end
 ```
 
+## Serving the `:mac` purpose
+
+A scope can hold a second keyring, `:mac`, used by `AshVault.Mac` for `mac!/2` and
+`verify_mac!/4` (see [Key purposes and MACs](../topics/key-purposes-and-macs.md)). It is
+optional. A provider that only implements the `:data` callbacks keeps encrypting exactly
+as before; a vault over it raises `AshVault.Errors.PurposeUnsupported` if asked to MAC,
+and refuses to compile if `mac:` is configured explicitly.
+
+To serve it, implement four optional callbacks:
+
+```elixir
+@impl AshVault.KeyProvider
+def purposes, do: [:data, :mac]
+
+@impl AshVault.KeyProvider
+def current_key(scope, :data), do: current_key(scope)
+def current_key(scope, :mac), do: ...
+
+@impl AshVault.KeyProvider
+def get_key(scope, version, :data), do: get_key(scope, version)
+def get_key(scope, version, :mac), do: ...
+
+@impl AshVault.KeyProvider
+def rotate(scope, :data), do: rotate(scope)
+def rotate(scope, :mac), do: ...
+```
+
+Support is read from `purposes/0` and **never inferred from arity**. `Memory` and
+`Local` have long exported a `current_key(server, scope)`; a provider with a
+same-shaped helper must not be mistaken for one that understands purposes. Callers go
+through `AshVault.KeyProvider.current_key/3`, `get_key/4` and `rotate/3`, which route
+`:data` to the original callbacks and refuse any purpose `purposes/0` does not list.
+
+Every failure mode above applies to the `:mac` keyring unchanged, plus:
+
+* **Separate key material.** Mint `:mac` keys from fresh randomness at
+  `AshVault.KeyProvider.mac_key_bytes/0` (32) bytes, regardless of your data
+  `key_bytes/0`. Never reuse or derive from the data key or the lookup key.
+* **Name keyrings injectively.** If you store the `:mac` keyring under a name derived
+  from the data keyring's (`OpenBao` uses `<data name>.mac`), make sure no scope's MAC
+  name can equal another scope's data or lookup name. Use a separator that cannot occur
+  in an encoded scope.
+* **One tombstone.** `destroy/1` destroys the `:mac` keyring along with everything else,
+  and the existing tombstone answers `{:error, :destroyed}` for every purpose. Check it
+  first on every `:mac` path, and fail closed exactly as for `:data`.
+* **Independent rotation.** Rotating `:mac` never moves `:data`, and the reverse.
+
 ## Run the contract suite
 
 `test/support/key_provider_cases.ex` is a `__using__` macro holding the cases every
@@ -397,6 +444,13 @@ The cases, and the rule each one pins down:
 | a zero, negative or non-integer version is `:not_found` | version is validated, not interpolated |
 | **`created_at` is stable across calls and never moves backwards on rotate** | no fabricated timestamps |
 | destroying one scope leaves others untouched | erasure is scoped |
+| the `:mac` keyring mints, rotates and is fetched like `:data` | same contract per purpose |
+| the `:mac` key is never the `:data` key nor the lookup key | keyrings are separate |
+| rotating either purpose leaves the other alone | independent rotation |
+| `destroy` tombstones `:mac` too, and it never re-mints | one tombstone per scope |
+
+The `:mac` cases run by default; pass `mac: false` to the `use` for a provider that
+serves only `:data`.
 
 Add your own tests for whatever your backing store can do that these cannot express —
 `Local`, for example, additionally asserts that keys and tombstones survive a provider

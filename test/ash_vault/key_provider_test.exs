@@ -46,9 +46,82 @@ defmodule AshVault.KeyProviderTest do
     def destroy(_scope), do: :ok
   end
 
+  # The arity trap: a provider that copied Memory's named-server pattern exports
+  # `current_key/2`, `get_key/3` and `rotate/2` without understanding purposes at all.
+  defmodule ServerFormProvider do
+    @moduledoc false
+    @behaviour AshVault.KeyProvider
+
+    @impl true
+    def current_key(_scope), do: {:error, :not_found}
+    @impl true
+    def current_key(_server, _scope), do: raise("must never be called as a purpose form")
+    @impl true
+    def get_key(_scope, _version), do: {:error, :not_found}
+    @impl true
+    def get_key(_server, _scope, _version), do: raise("must never be called as a purpose form")
+    @impl true
+    def rotate(_scope), do: {:error, :not_found}
+    @impl true
+    def rotate(_server, _scope), do: raise("must never be called as a purpose form")
+    @impl true
+    def destroy(_scope), do: :ok
+  end
+
   defmodule ThirdPartyVault do
     @moduledoc false
     use AshVault.Vault, key_provider: NoCallbacksProvider
+  end
+
+  describe "purposes" do
+    test "a provider without purposes/0 serves :data only" do
+      assert KeyProvider.purposes(NoCallbacksProvider) == [:data]
+      assert KeyProvider.supports_purpose?(NoCallbacksProvider, :data)
+      refute KeyProvider.supports_purpose?(NoCallbacksProvider, :mac)
+    end
+
+    test "every shipped provider serves :data and :mac" do
+      for provider <- [
+            Memory,
+            Local,
+            OpenBao,
+            AshVault.KeyProviders.OpenBaoTransit,
+            CachedBaoVault.CachedKeyProvider
+          ] do
+        assert KeyProvider.purposes(provider) == [:data, :mac], inspect(provider)
+        assert KeyProvider.supports_purpose?(provider, :mac), inspect(provider)
+      end
+    end
+
+    test ":mac support is declared, never inferred from arity" do
+      refute KeyProvider.supports_purpose?(ServerFormProvider, :mac)
+
+      assert {:error, {:purpose_unsupported, :mac}} =
+               KeyProvider.current_key(ServerFormProvider, "s", :mac)
+
+      assert {:error, {:purpose_unsupported, :mac}} =
+               KeyProvider.get_key(ServerFormProvider, "s", 1, :mac)
+
+      assert {:error, {:purpose_unsupported, :mac}} =
+               KeyProvider.rotate(ServerFormProvider, "s", :mac)
+    end
+
+    test ":data routes to the original callbacks" do
+      assert {:error, :not_found} = KeyProvider.current_key(ServerFormProvider, "s", :data)
+      assert {:error, :not_found} = KeyProvider.get_key(ServerFormProvider, "s", 1, :data)
+      assert {:error, :not_found} = KeyProvider.rotate(ServerFormProvider, "s", :data)
+    end
+
+    test "an unknown purpose is unsupported everywhere" do
+      refute KeyProvider.supports_purpose?(Memory, :lookup)
+
+      assert {:error, {:purpose_unsupported, :lookup}} =
+               KeyProvider.current_key(Memory, "s", :lookup)
+    end
+
+    test "a provider that is not compiled yet fails open, like supports_lookup?/1" do
+      assert KeyProvider.supports_purpose?(AshVault.Test.NotCompiledProvider, :mac)
+    end
   end
 
   describe "children/1" do

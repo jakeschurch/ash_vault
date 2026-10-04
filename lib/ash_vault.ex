@@ -72,9 +72,19 @@ defmodule AshVault do
   >
   > Changing a lookup key is therefore a **backfill**, not a rotation —
   > `mix ash_vault.backfill --lookup` — and there is deliberately no API for it here.
+
+  ## Rotating the `:mac` keyring
+
+  `opts` takes `purpose: :mac` to rotate the scope's MAC keyring instead of its data
+  key. New tags are minted under the new version; tags minted under older versions keep
+  verifying, because the old versions stay fetchable. Neither keyring's rotation moves
+  the other. See [Key purposes and MACs](key-purposes-and-macs.md).
   """
-  @spec rotate_key!(module(), term(), AshVault.Context.t() | nil) :: {:ok, non_neg_integer()}
-  def rotate_key!(vault, scope, context \\ nil) do
+  @spec rotate_key!(module(), term(), AshVault.Context.t() | nil, keyword()) ::
+          {:ok, non_neg_integer()}
+  def rotate_key!(vault, scope, context \\ nil, opts \\ []) do
+    purpose = AshVault.Vault.purpose!(opts)
+
     metadata =
       context
       |> AshVault.Telemetry.context_metadata()
@@ -82,11 +92,15 @@ defmodule AshVault do
         vault: vault,
         scope: scope,
         scope_fingerprint: scope_fingerprint(scope),
+        purpose: purpose,
         key_version: nil
       })
 
     :telemetry.span([:ash_vault, :key, :rotate], metadata, fn ->
-      result = vault.rotate!(scope)
+      # `:data` keeps calling `rotate!/1`, so a hand-written vault module that predates
+      # purposes still rotates through here.
+      result =
+        if purpose == :data, do: vault.rotate!(scope), else: vault.rotate!(scope, opts)
 
       {result,
        metadata

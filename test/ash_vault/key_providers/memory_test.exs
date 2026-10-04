@@ -72,6 +72,32 @@ defmodule AshVault.KeyProviders.MemoryTest do
       assert rendered =~ "key_bytes"
     end
 
+    test ":mac key material never appears in a process status report either",
+         %{provider: {Memory, name}} do
+      assert {:ok, %{key: mac_key}} = Memory.current_key(name, "sensitive", :mac)
+
+      rendered =
+        name
+        |> Process.whereis()
+        |> :sys.get_status()
+        |> inspect(limit: :infinity, printable_limit: :infinity)
+
+      refute rendered =~ inspect(mac_key)
+      refute rendered =~ Base.encode16(mac_key)
+      assert rendered =~ "mac_current"
+    end
+
+    test "an unknown purpose is an ArgumentError, not a silent :data key",
+         %{provider: {Memory, name}} do
+      assert_raise ArgumentError, ~r/purposes are :data and :mac/, fn ->
+        Memory.current_key(name, "s", :lookup)
+      end
+
+      assert_raise ArgumentError, ~r/purposes are :data and :mac/, fn ->
+        Memory.current_key("s", :lookup)
+      end
+    end
+
     test "calls against a dead instance surface as a provider error" do
       assert {:error, {:provider_unavailable, _}} =
                Memory.current_key(:ash_vault_memory_never_started, "x")

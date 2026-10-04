@@ -110,6 +110,17 @@ defmodule AshVault.KeyProviders.Cached do
   the only writes that can survive are ones that were already committed before the
   erasure began.
 
+  ## `:mac` keys pass through uncached
+
+  Only the `:data` keyring is cached. A `:mac` key request (see *Purposes* in
+  `AshVault.KeyProvider`) goes straight to the wrapped provider every time, gated only by
+  this cache's own tombstone: a scope already known to be destroyed answers
+  `{:error, :destroyed}` without a round trip, and a `:destroyed` answer from the wrapped
+  provider is remembered exactly as it is for `:data`. Caching MAC keys would need a slot
+  per purpose in every `AshVault.KeyCache` backend, and a second keyring for `destroy/1`
+  to evict before erasure is true; until that exists, passing through is the answer that
+  cannot be stale.
+
   ## Options
 
     * `:provider` — **required**, the wrapped `AshVault.KeyProvider`.
@@ -258,6 +269,83 @@ defmodule AshVault.KeyProviders.Cached do
     else
       :destroyed -> {:error, :destroyed}
       {:ok, {:key_info, key_info}, _generation} -> {:ok, key_info}
+    end
+  end
+
+  @doc """
+  Fetch the current key for a scope and purpose. `:data` is `current_key/2`; any other
+  purpose passes through to the wrapped provider uncached (see the moduledoc).
+  """
+  @spec current_key(AshVault.KeyProvider.scope(), AshVault.KeyProvider.purpose(), opts()) ::
+          {:ok, AshVault.KeyProvider.key_info()} | {:error, term()}
+  def current_key(scope, :data, opts), do: current_key(scope, opts)
+
+  def current_key(scope, purpose, opts) do
+    scope = validate_scope!(scope)
+
+    pass_through(scope, opts, fn ->
+      AshVault.KeyProvider.current_key(opts.provider, scope, purpose)
+    end)
+  end
+
+  @doc """
+  Fetch one key version for a scope and purpose. `:data` is `get_key/3`; any other
+  purpose passes through uncached.
+  """
+  @spec get_key(
+          AshVault.KeyProvider.scope(),
+          AshVault.KeyProvider.version(),
+          AshVault.KeyProvider.purpose(),
+          opts()
+        ) :: {:ok, AshVault.Key.t()} | {:error, term()}
+  def get_key(scope, version, :data, opts), do: get_key(scope, version, opts)
+
+  def get_key(scope, version, purpose, opts) do
+    scope = validate_scope!(scope)
+
+    pass_through(scope, opts, fn ->
+      AshVault.KeyProvider.get_key(opts.provider, scope, version, purpose)
+    end)
+  end
+
+  @doc """
+  Rotate a scope's keyring for a purpose. `:data` is `rotate/2`; any other purpose has
+  nothing cached to evict.
+  """
+  @spec rotate(AshVault.KeyProvider.scope(), AshVault.KeyProvider.purpose(), opts()) ::
+          {:ok, AshVault.KeyProvider.version()} | {:error, term()}
+  def rotate(scope, :data, opts), do: rotate(scope, opts)
+
+  def rotate(scope, purpose, opts) do
+    scope = validate_scope!(scope)
+
+    pass_through(scope, opts, fn ->
+      AshVault.KeyProvider.rotate(opts.provider, scope, purpose)
+    end)
+  end
+
+  @doc """
+  The purposes the wrapped provider serves.
+  """
+  @spec purposes(opts()) :: [AshVault.KeyProvider.purpose()]
+  def purposes(opts), do: AshVault.KeyProvider.purposes(opts.provider)
+
+  # A cached tombstone is always right, so it answers without a round trip. Anything else
+  # is the wrapped provider's answer, uncached — except `:destroyed`, which is remembered.
+  defp pass_through(scope, opts, fun) do
+    case cached_tombstone(scope, opts) do
+      :destroyed ->
+        {:error, :destroyed}
+
+      :absent ->
+        case fun.() do
+          {:error, :destroyed} = destroyed ->
+            remember_tombstone(scope, opts)
+            destroyed
+
+          other ->
+            other
+        end
     end
   end
 
@@ -572,6 +660,35 @@ defmodule AshVault.KeyProviders.Cached do
               {:ok, AshVault.KeyProvider.key_info()} | {:error, term()}
       def current_key(scope),
         do: AshVault.KeyProviders.Cached.current_key(scope, @ash_vault_cached_opts)
+
+      @doc "The purposes the wrapped provider serves."
+      @impl AshVault.KeyProvider
+      @spec purposes() :: [AshVault.KeyProvider.purpose()]
+      def purposes, do: AshVault.KeyProviders.Cached.purposes(@ash_vault_cached_opts)
+
+      @doc "Fetch the current key for a scope and purpose; `:mac` passes through uncached."
+      @impl AshVault.KeyProvider
+      @spec current_key(AshVault.KeyProvider.scope(), AshVault.KeyProvider.purpose()) ::
+              {:ok, AshVault.KeyProvider.key_info()} | {:error, term()}
+      def current_key(scope, purpose),
+        do: AshVault.KeyProviders.Cached.current_key(scope, purpose, @ash_vault_cached_opts)
+
+      @doc "Fetch one key version for a scope and purpose; `:mac` passes through uncached."
+      @impl AshVault.KeyProvider
+      @spec get_key(
+              AshVault.KeyProvider.scope(),
+              AshVault.KeyProvider.version(),
+              AshVault.KeyProvider.purpose()
+            ) :: {:ok, AshVault.Key.t()} | {:error, term()}
+      def get_key(scope, version, purpose),
+        do: AshVault.KeyProviders.Cached.get_key(scope, version, purpose, @ash_vault_cached_opts)
+
+      @doc "Rotate a scope's keyring for a purpose."
+      @impl AshVault.KeyProvider
+      @spec rotate(AshVault.KeyProvider.scope(), AshVault.KeyProvider.purpose()) ::
+              {:ok, AshVault.KeyProvider.version()} | {:error, term()}
+      def rotate(scope, purpose),
+        do: AshVault.KeyProviders.Cached.rotate(scope, purpose, @ash_vault_cached_opts)
 
       @doc "Fetch a specific key version for a scope, through the cache."
       @impl AshVault.KeyProvider
