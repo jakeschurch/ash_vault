@@ -31,9 +31,9 @@
           clippy
           rustfmt
 
-          # `pg_dump` and `psql`. The acceptance suite currently shells into
-          # the postgres container for pg_dump because the host has neither;
-          # with these on PATH it can talk to localhost:5432 directly.
+          # `pg_dump` and `psql`. The acceptance suite's backup/restore runs
+          # these against the repo's own host and port (localhost:5432), so it
+          # needs them on PATH.
           postgresql_16
 
           # OpenBao CLI, for inspecting transit keys and tombstones by hand.

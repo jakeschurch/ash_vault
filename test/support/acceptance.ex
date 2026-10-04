@@ -111,10 +111,11 @@ defmodule AshVault.Test.Backup do
   Real `pg_dump` / `psql` backup and restore of the `ash_vault_test` database, for the
   §27 acceptance test.
 
-  `pg_dump` is only available inside the PostgreSQL container here, so the dump is taken
-  with `docker exec` and its stdout written to a genuine file on the host. `psql` is on
-  the host PATH, so the restore runs directly. Both halves shell out to real tools — no
-  savepoints, no in-transaction trickery.
+  Both halves run the real `pg_dump` and `psql` from the dev shell (`nix develop`), against
+  the same host, port and credentials as `AshVault.Test.Repo` — no savepoints, no
+  in-transaction trickery. The dump used to be taken with `docker exec` into a hardcoded
+  container, which was a *different* server from the one the repo writes to: the dump came
+  back without the test's rows, or failed outright under `ASHVAULT_TEST_DB`.
 
   It only ever names the database from `config/test.exs` — `ash_vault_test`, or whatever
   `ASHVAULT_TEST_DB` overrides it to. Never `foundry_dev`.
@@ -136,55 +137,43 @@ defmodule AshVault.Test.Backup do
     name
   end
 
-  @container "foundrybox-postgres-1"
-
-  @doc "Whether `docker exec` into the PostgreSQL container works at all."
-  @spec available?() :: boolean()
-  def available? do
-    case System.cmd("docker", ["exec", @container, "pg_dump", "--version"],
-           stderr_to_stdout: true
-         ) do
-      {_out, 0} -> true
-      _ -> false
-    end
-  rescue
-    ErlangError -> false
-  end
-
   @doc """
   `pg_dump` the test database to `path`. Returns the dump's bytes.
   """
   @spec dump!(Path.t()) :: binary()
   def dump!(path) do
+    pg_dump =
+      System.find_executable("pg_dump") ||
+        raise "pg_dump is not on PATH; run the suite inside `nix develop`"
+
+    File.mkdir_p!(Path.dirname(path))
+
     {out, status} =
       System.cmd(
-        "docker",
+        pg_dump,
         [
-          "exec",
-          "-e",
-          "PGPASSWORD=" <> password(),
-          @container,
-          "pg_dump",
           "-h",
-          "localhost",
+          host(),
+          "-p",
+          port(),
           "-U",
           username(),
           "-d",
           database(),
           "--no-owner",
-          "--no-privileges"
+          "--no-privileges",
+          "-f",
+          path
         ],
-        stderr_to_stdout: false
+        env: [{"PGPASSWORD", password()}],
+        stderr_to_stdout: true
       )
 
     if status != 0 do
-      raise "pg_dump exited #{status}: #{out}"
+      raise "pg_dump of #{database()} exited #{status}:\n#{out}"
     end
 
-    File.mkdir_p!(Path.dirname(path))
-    File.write!(path, out)
-
-    out
+    File.read!(path)
   end
 
   @doc """
