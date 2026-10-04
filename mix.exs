@@ -75,6 +75,8 @@ defmodule AshVault.MixProject do
           AshVault.Macaroon,
           AshVault.Macaroon.Caveat,
           AshVault.Macaroon.Caveats.ActionIn,
+          AshVault.Macaroon.Ttl,
+          AshVault.Macaroon.KeyWindow,
           AshVault.Macaroon.CheckContext,
           AshVault.Macaroon.Verified,
           AshVault.Checks.MacaroonAllows,

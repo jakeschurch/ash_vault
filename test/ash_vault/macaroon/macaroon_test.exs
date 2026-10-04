@@ -59,6 +59,36 @@ defmodule AshVault.Macaroon.MacaroonTest do
     |> Ash.read()
   end
 
+  defp capture_rejections(fun) do
+    ref = make_ref()
+    parent = self()
+    id = "rejections-#{inspect(ref)}"
+
+    :telemetry.attach(
+      id,
+      [:ash_vault, :macaroon, :rejected],
+      fn _, _, metadata, _ ->
+        send(parent, {ref, metadata.reason})
+      end,
+      nil
+    )
+
+    try do
+      result = fun.()
+      {result, collect(ref, [])}
+    after
+      :telemetry.detach(id)
+    end
+  end
+
+  defp collect(ref, acc) do
+    receive do
+      {^ref, reason} -> collect(ref, [reason | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
   defp advance(seconds),
     do: :persistent_term.put(@clock, DateTime.add(DateTime.utc_now(), seconds, :second))
 
@@ -74,7 +104,8 @@ defmodule AshVault.Macaroon.MacaroonTest do
 
     test "a macaroon is not an encrypted field" do
       assert AshVault.Info.encrypted_fields(ApiClient) == []
-      assert [%{name: :api, prefix: "avtest"}] = AshVault.Info.macaroons(ApiClient)
+      assert [:api, :nilrev, :strict] = Enum.map(AshVault.Info.macaroons(ApiClient), & &1.name)
+      assert %{prefix: "avtest"} = AshVault.Info.macaroon(ApiClient, :api)
     end
   end
 
@@ -217,7 +248,7 @@ defmodule AshVault.Macaroon.MacaroonTest do
                {:invalid, :bad_signature}
     end
 
-    test "re-pointing at another record or scope fails", %{env: env} do
+    test "re-pointing at another record fails", %{env: env} do
       other =
         Ash.create!(ApiClient, %{name: "other", org_id: "acme"},
           tenant: "acme",
@@ -225,16 +256,76 @@ defmodule AshVault.Macaroon.MacaroonTest do
         )
 
       assert reason(verify(reencode(%{env | id: other.id}))) == {:invalid, :bad_signature}
-
-      Ash.create!(ApiClient, %{name: "evil", org_id: "evil"}, tenant: "evil", authorize?: false)
-      assert reason(verify(reencode(%{env | scope: "evil"}))) == {:invalid, :unknown_key_version}
-      assert Memory.get_key("evil", 1, :mac) == {:error, :not_found}
-
-      assert reason(verify(reencode(%{env | key_version: 7}))) == {:invalid, :unknown_key_version}
     end
 
-    test "a token for another macaroon is refused by prefix", %{env: env} do
-      assert reason(verify(reencode(%{env | prefix: "avsvc"}))) == {:invalid, :wrong_prefix}
+    test "every pre-signature failure looks the same to the caller; telemetry has the detail",
+         %{env: env, client: client} do
+      {:ok, erased_token} =
+        ApiClient.mint_api(
+          Ash.create!(ApiClient, %{name: "gone", org_id: "gone"},
+            tenant: "gone",
+            authorize?: false
+          ).id,
+          %{},
+          tenant: "gone",
+          authorize?: false
+        )
+
+      {:ok, erased} = Envelope.decode(erased_token)
+      :ok = AshVault.destroy_keys!(AshVault.Test.Vault, "gone")
+      _ = client
+
+      cases = [
+        {"avtest_garbage", :malformed},
+        {reencode(%{env | prefix: "avsvc"}), :wrong_prefix},
+        {reencode(%{env | scope: "nosuchtenant"}), :unknown_key_version},
+        {reencode(%{env | key_version: 7}), :unknown_key_version},
+        {reencode(%{erased | id: env.id}), :scope_destroyed},
+        {reencode(%{env | sig: <<0::256>>}), :bad_signature}
+      ]
+
+      for {token, internal} <- cases do
+        {result, reasons} = capture_rejections(fn -> verify(token) end)
+        assert reason(result) == {:invalid, :bad_signature}
+        assert reasons == [internal]
+      end
+
+      assert Memory.get_key("nosuchtenant", 1, :mac) == {:error, :not_found}
+    end
+
+    test "a request tenant that disagrees is checked only after the signature", %{
+      env: env,
+      token: token
+    } do
+      assert reason(verify(token, tenant: "other")) == {:invalid, :scope_mismatch}
+
+      assert reason(verify(reencode(%{env | sig: <<0::256>>}), tenant: "other")) ==
+               {:invalid, :bad_signature}
+    end
+
+    test "a forged maximum-length scope is invalid, not an outage", %{env: env} do
+      long = String.duplicate("a", 180)
+      assert reason(verify(reencode(%{env | scope: long}))) == {:invalid, :bad_signature}
+      assert Envelope.encode(%{env | scope: String.duplicate("a", 181)}) == {:error, :malformed}
+    end
+
+    test "the root signature uses a reserved vault field, so mac! on a field is no oracle",
+         %{env: env} do
+      ctx = fn field ->
+        %AshVault.Context{
+          resource: ApiClient,
+          field: field,
+          ash_context: %{tenant: "acme", actor: nil, source_context: %{}}
+        }
+      end
+
+      data = AshVault.Macaroon.Chain.root_data(env)
+      root = AshVault.Test.Vault.mac_at!(data, env.key_version, ctx.(:"macaroon:api"))
+      assert AshVault.Macaroon.Chain.extend(root, env.caveats) == env.sig
+
+      {1, oracle} = AshVault.Test.Vault.mac!(data, ctx.(:api))
+      forged = %{env | sig: AshVault.Macaroon.Chain.extend(oracle, env.caveats)}
+      assert reason(verify(reencode(forged))) == {:invalid, :bad_signature}
     end
 
     test "errors carry no token material", %{token: token, env: env} do
@@ -387,9 +478,52 @@ defmodule AshVault.Macaroon.MacaroonTest do
       {:ok, token} = mint(client)
       :ok = AshVault.destroy_keys!(AshVault.Test.Vault, "acme")
 
-      assert reason(verify(token)) == {:revoked, :scope_destroyed}
+      {result, reasons} = capture_rejections(fn -> verify(token) end)
+      assert reason(result) == {:invalid, :bad_signature}
+      assert reasons == [:scope_destroyed]
       assert sign_in(token) == {:ok, []}
       assert {:error, _} = mint(client)
+    end
+  end
+
+  describe "revoked_when that evaluates to nil" do
+    test "fails closed: nil is not false", %{client: client} do
+      assert {:error, error} =
+               ApiClient.mint_nilrev(client.id, %{}, tenant: "acme", authorize?: false)
+
+      assert Exception.message(error) =~ "revoked"
+
+      client =
+        Ash.update!(client, %{revoked_at: DateTime.add(DateTime.utc_now(), 3600)},
+          tenant: "acme",
+          authorize?: false
+        )
+
+      {:ok, token} = ApiClient.mint_nilrev(client.id, %{}, tenant: "acme", authorize?: false)
+      assert {:ok, _} = ApiClient.nilrev_by_token(token)
+
+      Ash.update!(client, %{revoked_at: nil}, tenant: "acme", authorize?: false)
+      assert reason(ApiClient.nilrev_by_token(token)) == {:revoked, :record}
+    end
+  end
+
+  describe "require_authorize_enforcement?" do
+    test "refuses tokens with authorize caveats unless enforcement is asserted", %{client: client} do
+      {:ok, plain} = ApiClient.mint_strict(client.id, %{}, tenant: "acme", authorize?: false)
+
+      {:ok, scoped} =
+        ApiClient.mint_strict(client.id, %{caveats: %{actions: ["read"]}},
+          tenant: "acme",
+          authorize?: false
+        )
+
+      assert {:ok, _} = ApiClient.strict_by_token(plain)
+      assert reason(ApiClient.strict_by_token(scoped)) == {:invalid, :unenforced_caveats}
+
+      assert {:ok, _} =
+               ApiClient.strict_by_token(scoped,
+                 context: %{ash_vault: %{authorize_caveats_enforced?: true}}
+               )
     end
   end
 
@@ -411,6 +545,14 @@ defmodule AshVault.Macaroon.MacaroonTest do
                FlakyApiClient
                |> Ash.Query.for_read(:sign_in, %{token: token})
                |> Ash.read()
+    end
+
+    test "a current-version lookup that says not_found is invalid, not a crash", %{token: token} do
+      FlakyMacProvider.lose_current!()
+
+      assert {:error,
+              %Ash.Error.Invalid{errors: [%InvalidMacaroon{reason: :unknown_key_version}]}} =
+               FlakyApiClient.flaky_by_token(token)
     end
 
     test "after recovery the same token verifies", %{token: token} do

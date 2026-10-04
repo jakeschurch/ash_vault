@@ -28,6 +28,12 @@ defmodule AshVault.Macaroon.Preparations.Verify do
 
     * `:macaroon` — required, the macaroon's name
     * `:argument` — the token argument, default `:token`
+    * `:require_enforcement?` — refuse a token that carries `phase: :authorize` caveats
+      (`InvalidMacaroon`, `:unenforced_caveats`) unless the caller asserts they will be
+      enforced with `context: %{ash_vault: %{authorize_caveats_enforced?: true}}`.
+      Defaults to the macaroon's `require_authorize_enforcement?`. Turn it on where a
+      verified actor may reach code whose policies do not use
+      `AshVault.Checks.MacaroonAllows`.
     * `:mode` — `:error` (default) returns every failure as an error. `:sign_in` follows
       AshAuthentication's sign-in convention: an invalid or revoked token reads as **no
       record** (`[]`), so a plug answers 401. An outage
@@ -54,6 +60,9 @@ defmodule AshVault.Macaroon.Preparations.Verify do
       not is_atom(opts[:macaroon]) or is_nil(opts[:macaroon]) ->
         {:error, "AshVault.Macaroon.Preparations.Verify requires a `:macaroon` name"}
 
+      not is_boolean(Keyword.get(opts, :require_enforcement?, false)) ->
+        {:error, "`:require_enforcement?` must be a boolean"}
+
       Keyword.get(opts, :mode, :error) not in [:error, :sign_in] ->
         {:error, "`:mode` must be :error or :sign_in"}
 
@@ -70,13 +79,20 @@ defmodule AshVault.Macaroon.Preparations.Verify do
     token = Ash.Query.get_argument(query, Keyword.get(opts, :argument, :token))
     actor = Map.get(context, :actor)
 
+    require? = Keyword.get(opts, :require_enforcement?, definition.require_authorize_enforcement?)
+
     case Runtime.verify(resource, definition, token,
            tenant: query.tenant,
            actor: actor,
            source_context: query.context
          ) do
       {:ok, verified} ->
-        load(query, resource, definition, verified, mode, actor)
+        if require? and verified.authorize_caveats != [] and
+             not enforcement_asserted?(query.context) do
+          fail(query, Runtime.invalid(resource, definition, :unenforced_caveats), mode)
+        else
+          load(query, resource, definition, verified, mode, actor)
+        end
 
       {:error, error} ->
         fail(query, error, mode)
@@ -99,6 +115,10 @@ defmodule AshVault.Macaroon.Preparations.Verify do
       :error ->
         fail(query, Runtime.invalid(resource, definition, :not_found), mode)
     end
+  end
+
+  defp enforcement_asserted?(context) do
+    match?(%{ash_vault: %{authorize_caveats_enforced?: true}}, context)
   end
 
   defp maybe_set_tenant(query, nil), do: query
@@ -151,7 +171,7 @@ defmodule AshVault.Macaroon.Preparations.Verify do
     query
     |> Ash.Query.set_result({:ok, []})
     |> Ash.Query.filter(false)
-    |> Ash.Query.set_context(%{private: %{multitenancy: :bypass}})
+    |> Ash.Query.set_context(%{private: %{multitenancy: :allow_global}})
   end
 
   defp fail(query, error, _mode), do: Ash.Query.add_error(query, error)

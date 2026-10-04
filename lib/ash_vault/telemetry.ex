@@ -21,6 +21,12 @@ defmodule AshVault.Telemetry do
   | `[:ash_vault, :mac, :sign]` | a vault's `mac!/2` — a tag is minted |
   | `[:ash_vault, :mac, :verify]` | a vault's `verify_mac!/4` — a tag is checked |
 
+  One further event is a plain `:telemetry.execute/3`, not a span:
+  `[:ash_vault, :macaroon, :rejected]`, with `%{count: 1}` and `:resource`, `:macaroon` and
+  the precise `:reason` a macaroon was refused for (see [Macaroons](macaroons.md)). It is
+  the only place the pre-signature reasons — which the caller sees collapsed into
+  `:bad_signature` — are visible.
+
   `[:ash_vault, :key, :destroy]` is the compliance-critical one: it is the record that an
   erasure request was actually executed, and it is the only event whose absence is itself
   a finding.

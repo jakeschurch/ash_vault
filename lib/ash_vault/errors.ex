@@ -421,14 +421,17 @@ defmodule AshVault.Errors.InvalidMacaroon do
 
   `:reason` says which check failed, and is safe to log:
 
-    * `:malformed` — not a well-formed token: bad prefix shape, bad base64, trailing or
-      missing bytes, oversized fields or caveat list, a non-canonical encoding
-    * `:unsupported_version` — an envelope version this build does not know
-    * `:wrong_prefix` — a token minted for a different macaroon
-    * `:scope_mismatch` — the token belongs to a different tenant than the request
-    * `:unknown_key_version` — the token names a `:mac` key version that does not exist
-    * `:bad_signature` — the signature chain does not verify: forged, tampered,
-      reordered, truncated, or a caveat appended without extending the chain
+    * `:bad_signature` — the token did not verify. This is the **only** reason given for
+      any failure before the signature has verified: malformed bytes, an unknown envelope
+      version, a token for another macaroon, a scope with no key, a crypto-erased scope,
+      or a forged, tampered, reordered, truncated or appended-without-signature chain. A
+      forged token must not learn which tenants exist or were erased; the precise reason
+      is on the `[:ash_vault, :macaroon, :rejected]` telemetry event instead
+    * `:scope_mismatch` — a genuine token for a different tenant than the request's
+    * `:unknown_key_version` — a genuine token whose keyring the provider can no longer
+      find (an inconsistent key store)
+    * `:unenforced_caveats` — the token carries `phase: :authorize` caveats and the
+      verifying read requires the caller to assert they are enforced
     * `:unknown_caveat` — a caveat this macaroon does not declare
     * `:caveat_type` — a caveat value whose encoded type disagrees with the declaration
     * `:expired` — an `expires_at` caveat has passed
@@ -451,9 +454,9 @@ defmodule AshVault.Errors.InvalidMacaroon do
     """
   end
 
-  defp describe(:malformed), do: "the token is malformed"
-  defp describe(:unsupported_version), do: "unsupported envelope version"
-  defp describe(:wrong_prefix), do: "the token was minted for a different macaroon"
+  defp describe(:unenforced_caveats),
+    do: "it carries authorize-phase caveats and their enforcement was not asserted"
+
   defp describe(:scope_mismatch), do: "the token belongs to a different tenant"
   defp describe(:unknown_key_version), do: "the token names an unknown key version"
   defp describe(:bad_signature), do: "the signature does not verify"
@@ -473,8 +476,11 @@ defmodule AshVault.Errors.MacaroonRevoked do
     * `:record` — the record's `revoked_when` expression is not `false`
     * `:key_retired` — the token's `:mac` key version has fallen outside the macaroon's
       `accepted_key_versions` window after the scope's `:mac` keyring was rotated
-    * `:scope_destroyed` — the scope was crypto-erased (`destroy!`), so every token it
-      ever issued is revoked, permanently
+    * `:scope_destroyed` — the scope was crypto-erased between the signature check and the
+      key-window check. A token presented *after* erasure cannot have its signature
+      checked at all, and is reported as `AshVault.Errors.InvalidMacaroon`
+      (`:bad_signature`) like any other unverifiable token — telling it apart would tell
+      a forger which tenants were erased
 
   Not an outage and not a forgery. Like `AshVault.Errors.InvalidMacaroon` it carries no
   token material.

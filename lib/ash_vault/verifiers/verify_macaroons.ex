@@ -11,6 +11,9 @@ defmodule AshVault.Verifiers.VerifyMacaroons do
       back to a tenant, so it is refused
     * the vault (a plain module) exports `mac_at!/3` and `mac_key_version!/1`, and its key
       provider serves the `:mac` purpose
+    * warns when a macaroon declares `phase: :authorize` caveats and none of the
+      resource's own policies reference `AshVault.Checks.MacaroonAllows` (unless the
+      macaroon sets `require_authorize_enforcement? true`)
     * the resource has a primary read action, which the mint action loads through
     * every caveat has a type with a stable encoding (`AshVault.Macaroon.CaveatCodec`), a
       name other than the reserved `:expires_at`, and a check module that is compiled
@@ -38,22 +41,129 @@ defmodule AshVault.Verifiers.VerifyMacaroons do
     macaroons = AshVault.Info.macaroons(dsl)
 
     with :ok <- verify_unique_prefixes(module, macaroons),
-         :ok <- verify_vault(dsl, module, macaroons) do
-      Enum.reduce_while(macaroons, :ok, fn definition, :ok ->
-        case verify_one(dsl, module, definition) do
-          :ok -> {:cont, :ok}
-          error -> {:halt, error}
-        end
-      end)
+         :ok <- verify_vault(dsl, module, macaroons),
+         :ok <-
+           Enum.reduce_while(macaroons, :ok, fn definition, :ok ->
+             case verify_one(dsl, module, definition) do
+               :ok -> {:cont, :ok}
+               error -> {:halt, error}
+             end
+           end) do
+      warn_unenforced(dsl, module, macaroons)
     end
   end
+
+  # Authorize-phase caveats are enforced only by `AshVault.Checks.MacaroonAllows`. If the
+  # declaring resource's own policies never reference it, the most likely place for a
+  # macaroon actor to act is unguarded — say so at compile time. Other resources'
+  # policies cannot be seen from here, so silence is not proof of enforcement.
+  defp warn_unenforced(dsl, module, macaroons) do
+    unenforced =
+      for definition <- macaroons,
+          Enum.any?(definition.caveats, &(&1.phase == :authorize)),
+          not definition.require_authorize_enforcement?,
+          do: definition.name
+
+    if unenforced == [] or references_macaroon_allows?(dsl) do
+      :ok
+    else
+      {:warn,
+       "#{inspect(module)}: macaroon(s) #{inspect(unenforced)} declare `phase: :authorize` " <>
+         "caveats, but no policy on this resource uses AshVault.Checks.MacaroonAllows. " <>
+         "Those caveats are enforced only by that check: wherever it is absent, a macaroon " <>
+         "actor is not restricted by them. Add the check, or set " <>
+         "`require_authorize_enforcement? true` to refuse such tokens unless the caller " <>
+         "asserts enforcement."}
+    end
+  end
+
+  defp references_macaroon_allows?(dsl) do
+    dsl
+    |> Spark.Dsl.Extension.get_entities([:policies])
+    |> mentions?(AshVault.Checks.MacaroonAllows)
+  end
+
+  defp mentions?(term, target) when is_atom(term), do: term == target
+  defp mentions?(term, target) when is_list(term), do: Enum.any?(term, &mentions?(&1, target))
+
+  defp mentions?(term, target) when is_tuple(term),
+    do: term |> Tuple.to_list() |> mentions?(target)
+
+  defp mentions?(%_{} = term, target),
+    do: term |> Map.from_struct() |> Map.values() |> mentions?(target)
+
+  defp mentions?(term, target) when is_map(term), do: term |> Map.values() |> mentions?(target)
+  defp mentions?(_term, _target), do: false
 
   defp verify_one(dsl, module, definition) do
     with :ok <- verify_prefix(module, definition),
          :ok <- verify_identity(dsl, module, definition),
          :ok <- verify_scope(dsl, module, definition),
-         :ok <- verify_primary_read(dsl, module, definition) do
+         :ok <- verify_primary_read(dsl, module, definition),
+         :ok <- verify_ttl(module, definition),
+         :ok <- verify_key_window(module, definition) do
       verify_caveats(module, definition)
+    end
+  end
+
+  defp verify_ttl(module, definition) do
+    case {definition.default_ttl, definition.max_ttl} do
+      {{_module, _opts}, max} when max in [nil, :infinity] ->
+        error(
+          module,
+          path(definition, :max_ttl),
+          "a function `default_ttl` requires a finite `max_ttl`, so a computed lifetime " <>
+            "can never mint a near-permanent token"
+        )
+
+      {{ttl_module, _opts}, _max} ->
+        verify_callback(module, definition, :default_ttl, ttl_module, :ttl, 2)
+
+      {ttl, max} when is_integer(max) and (ttl == :infinity or ttl > max) ->
+        error(module, path(definition, :default_ttl), "`default_ttl` exceeds `max_ttl`")
+
+      _static ->
+        :ok
+    end
+  end
+
+  defp verify_key_window(module, definition) do
+    case definition.accepted_key_versions do
+      {window_module, function, args} when is_atom(function) and is_list(args) ->
+        verify_callback(
+          module,
+          definition,
+          :accepted_key_versions,
+          window_module,
+          function,
+          length(args) + 1
+        )
+
+      {window_module, opts} when is_list(opts) ->
+        verify_callback(
+          module,
+          definition,
+          :accepted_key_versions,
+          window_module,
+          :accepted_key_versions,
+          2
+        )
+
+      _static ->
+        :ok
+    end
+  end
+
+  defp verify_callback(module, definition, key, callback_module, function, arity) do
+    if match?({:module, _}, Code.ensure_compiled(callback_module)) and
+         function_exported?(callback_module, function, arity) do
+      :ok
+    else
+      error(
+        module,
+        path(definition, key),
+        "#{inspect(callback_module)} is not a compiled module exporting #{function}/#{arity}"
+      )
     end
   end
 

@@ -8,7 +8,10 @@ defmodule AshVault.Macaroon.Actions.Mint do
 
     * the identity attribute (`identity` in the DSL) — which record the token names
     * `:caveats` — a map of declared caveat names to values, cast to each caveat's type
-    * `:ttl` — seconds, overriding `default_ttl`
+    * `:ttl` — seconds, overriding `default_ttl`; refused above `max_ttl`
+
+  A function `default_ttl` is called with this action's input, and its answer clamped to
+  `max_ttl`.
 
   Returns the token string. The token is a bearer credential: it is returned once and
   never stored by AshVault.
@@ -33,7 +36,8 @@ defmodule AshVault.Macaroon.Actions.Mint do
         tenant: input.tenant,
         actor: context.actor,
         source_context: input.context,
-        ttl: Ash.ActionInput.get_argument(input, :ttl)
+        ttl: Ash.ActionInput.get_argument(input, :ttl),
+        input: input
       )
     end
   end

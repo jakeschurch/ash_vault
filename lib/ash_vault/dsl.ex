@@ -159,17 +159,50 @@ defmodule AshVault.Dsl do
             "to exactly `false`; `true`, `nil` or an error all revoke."
       ],
       default_ttl: [
-        type: {:or, [:pos_integer, {:in, [:infinity]}]},
+        type:
+          {:or,
+           [
+             :pos_integer,
+             {:in, [:infinity]},
+             {:spark_function_behaviour, AshVault.Macaroon.Ttl,
+              {AshVault.Macaroon.Ttl.Function, 1}}
+           ]},
         required: true,
-        doc: "Lifetime of a minted token in seconds, or `:infinity` for no expiry caveat."
+        doc:
+          "Lifetime of a minted token in seconds, `:infinity` for no expiry caveat, or an " <>
+            "`AshVault.Macaroon.Ttl` module / `fn input -> seconds end` evaluated at mint. " <>
+            "A function requires `max_ttl`."
+      ],
+      max_ttl: [
+        type: {:or, [:pos_integer, {:in, [:infinity]}]},
+        doc:
+          "The longest lifetime any token of this macaroon may have, in seconds. Every " <>
+            "minted TTL — static, computed or passed as `:ttl` — is held to it. Required " <>
+            "when `default_ttl` is a function."
       ],
       accepted_key_versions: [
-        type: {:or, [:pos_integer, {:in, [:all]}]},
+        type:
+          {:or,
+           [
+             :pos_integer,
+             {:in, [:all]},
+             :mfa,
+             {:spark_behaviour, AshVault.Macaroon.KeyWindow}
+           ]},
         default: 1,
         doc:
-          "How many of the most recent `:mac` key versions are accepted. With the " <>
-            "default `1`, rotating the scope's `:mac` keyring revokes every outstanding " <>
-            "token of this macaroon in that scope."
+          "How many of the most recent `:mac` key versions are accepted: an integer, " <>
+            "`:all`, or an `AshVault.Macaroon.KeyWindow` module / MFA evaluated per scope " <>
+            "at verify (failing closed to `1`). With `1`, rotating the scope's `:mac` " <>
+            "keyring revokes every outstanding token of this macaroon in that scope."
+      ],
+      require_authorize_enforcement?: [
+        type: :boolean,
+        default: false,
+        doc:
+          "Refuse, in the verifying read, any token carrying `phase: :authorize` caveats " <>
+            "unless the caller asserts they will be enforced, with " <>
+            "`context: %{ash_vault: %{authorize_caveats_enforced?: true}}`."
       ],
       mint_action: [type: :atom, doc: "Name of the generated mint action. `:mint_<name>`."],
       read_action: [

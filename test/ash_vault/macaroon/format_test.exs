@@ -9,7 +9,7 @@ defmodule AshVault.Macaroon.FormatTest do
   alias AshVault.Macs.HmacSha256
 
   @key <<1::256>>
-  @aad "ashvault:v1|acme|AshVault.Test.ApiClient|api"
+  @aad "ashvault:v1|acme|AshVault.Test.ApiClient|macaroon:api"
   @expires ~U[2030-01-01 00:00:00.000000Z]
 
   defp vector_token do
@@ -82,8 +82,8 @@ defmodule AshVault.Macaroon.FormatTest do
       {:ok, token} = Envelope.encode(vector_token())
 
       assert token ==
-               "avtest_AQRhY21lAAAAAQZ1c2VyLTECABQKZXhwaXJlc19hdAQABroWlEcgAAANAmlwAQAHMS4yLjMuNN" <>
-                 "jE1wM1c242N9kVvaANyY-IwRpcZ5MvzcXpV97RCPxx"
+               "avtest_AQRhY21lAAAAAQZ1c2VyLTECABQKZXhwaXJlc19hdAQABroWlEcgAAANAmlwAQAHMS4yLjMuNM" <>
+                 "gGX9Oll80VPil-b54aRqqj3__8z0WZRRqs041GmxV3"
 
       assert {:ok, %Envelope{} = decoded} = Envelope.decode(token)
       assert decoded == vector_token()

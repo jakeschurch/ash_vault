@@ -27,7 +27,22 @@ defmodule AshVault.Checks.MacaroonAllows do
   >
   > The verifying read runs `phase: :verify` checks. A `phase: :authorize` caveat is
   > enforced by this check and nowhere else: a resource whose policies never use it
-  > does not restrict a macaroon actor by those caveats.
+  > does not restrict a macaroon actor by those caveats. A token holder — or a third
+  > party handed an attenuated token — cannot tell which resources enforce them, so an
+  > `actions: ["read"]` caveat is a promise only as good as your policy coverage.
+  > `AshVault.Verifiers.VerifyMacaroons` warns when the declaring resource itself never
+  > uses this check; `require_authorize_enforcement? true` on the macaroon refuses such
+  > tokens unless the verifying caller asserts enforcement.
+
+  > #### `when_absent: true` and reloaded actors {: .warning}
+  >
+  > The macaroon lives in the actor's `__metadata__`. Anything that re-reads the actor —
+  > `Ash.reload/2`, `Ash.get/3`, a session that stores only the id and loads the record
+  > per request — returns a record **without** it, and with `when_absent: true` that
+  > record passes as an actor that never used a macaroon: every authorize-phase caveat
+  > silently stops applying. Keep the record the verifying read returned as the actor
+  > (`Ash.load/3` on it preserves metadata), or use the default `when_absent: false` on
+  > resources only macaroon actors should reach.
   """
 
   use Ash.Policy.SimpleCheck

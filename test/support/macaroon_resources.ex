@@ -9,6 +9,7 @@ defmodule AshVault.Test.MacaroonDomain do
     resource AshVault.Test.FlakyApiClient
     resource AshVault.Test.Widget
     resource AshVault.Test.TransitApiClient
+    resource AshVault.Test.DynamicApiClient
   end
 end
 
@@ -30,7 +31,11 @@ defmodule AshVault.Test.Support.FlakyMacProvider do
   @doc "Stop failing."
   def recover!, do: :persistent_term.erase(@flag)
 
-  defp down?, do: :persistent_term.get(@flag, false)
+  @doc "Keep serving stated versions, but answer `:not_found` for the current one."
+  def lose_current!, do: :persistent_term.put(@flag, :current_not_found)
+
+  defp down?, do: :persistent_term.get(@flag, false) == true
+  defp current_lost?, do: :persistent_term.get(@flag, false) == :current_not_found
 
   @impl AshVault.KeyProvider
   def purposes, do: [:data, :mac]
@@ -39,8 +44,13 @@ defmodule AshVault.Test.Support.FlakyMacProvider do
   def current_key(scope), do: if(down?(), do: {:error, :timeout}, else: Memory.current_key(scope))
 
   @impl AshVault.KeyProvider
-  def current_key(scope, purpose),
-    do: if(down?(), do: {:error, :timeout}, else: Memory.current_key(scope, purpose))
+  def current_key(scope, purpose) do
+    cond do
+      down?() -> {:error, :timeout}
+      current_lost?() -> {:error, :not_found}
+      true -> Memory.current_key(scope, purpose)
+    end
+  end
 
   @impl AshVault.KeyProvider
   def get_key(scope, version),
@@ -118,6 +128,24 @@ defmodule AshVault.Test.ApiClient do
       caveat :ports, {:array, :integer},
         check: fn ports, ctx -> Map.get(ctx.context, :port) in ports end
     end
+
+    macaroon :nilrev do
+      prefix "avnil"
+      identity :id
+      revoked_when expr(revoked_at <= now())
+      default_ttl 3600
+    end
+
+    macaroon :strict do
+      prefix "avstrict"
+      identity :id
+      default_ttl 3600
+      require_authorize_enforcement? true
+
+      caveat :actions, {:array, :string},
+        phase: :authorize,
+        check: AshVault.Macaroon.Caveats.ActionIn
+    end
   end
 
   ets do
@@ -150,11 +178,12 @@ defmodule AshVault.Test.ApiClient do
   end
 
   policies do
-    bypass action([:api_by_token, :sign_in_with_api_key]) do
+    bypass action([:api_by_token, :sign_in_with_api_key, :nilrev_by_token, :strict_by_token]) do
       authorize_if always()
     end
 
     policy action_type(:read) do
+      forbid_unless {AshVault.Checks.MacaroonAllows, macaroon: :api, when_absent: true}
       authorize_if actor_present()
     end
 
@@ -313,6 +342,75 @@ defmodule AshVault.Test.TransitApiClient do
   attributes do
     uuid_primary_key :id
     attribute :org_id, :string, allow_nil?: false, public?: true
+  end
+
+  actions do
+    defaults [:read, :destroy, create: :*]
+  end
+end
+
+defmodule AshVault.Test.Support.Windows do
+  @moduledoc "An `accepted_key_versions` MFA whose answer a test sets."
+
+  @key {__MODULE__, :answer}
+
+  @doc "Set what `window/1` returns (`{:raise, message}` raises)."
+  def set!(answer), do: :persistent_term.put(@key, answer)
+
+  @doc "Reset to the default answer, 1."
+  def reset!, do: :persistent_term.erase(@key)
+
+  @doc false
+  def window(_scope) do
+    case :persistent_term.get(@key, 1) do
+      {:raise, message} -> raise message
+      answer -> answer
+    end
+  end
+end
+
+defmodule AshVault.Test.DynamicApiClient do
+  @moduledoc "Macaroons with a computed TTL, a computed key window and inline-fn caveats."
+
+  use Ash.Resource,
+    domain: AshVault.Test.MacaroonDomain,
+    data_layer: Ash.DataLayer.Ets,
+    extensions: [AshVault]
+
+  ash_vault do
+    vault AshVault.Test.GlobalVault
+    scope :global
+
+    macaroon :dyn do
+      prefix "avdyn"
+      identity :id
+
+      default_ttl fn input ->
+        case Map.get(input.context, :plan) do
+          "long" -> 10_000
+          "forever" -> :infinity
+          "bad" -> -5
+          "raise" -> raise "boom"
+          _ -> 30
+        end
+      end
+
+      max_ttl 100
+      accepted_key_versions {AshVault.Test.Support.Windows, :window, []}
+
+      caveat :tier, :string,
+        check: fn tier, ctx ->
+          if Map.get(ctx.context, :tier) == tier, do: :ok, else: {:error, :wrong_tier}
+        end
+    end
+  end
+
+  ets do
+    private? true
+  end
+
+  attributes do
+    uuid_primary_key :id
   end
 
   actions do

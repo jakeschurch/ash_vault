@@ -98,7 +98,7 @@ defmodule AshVault.Macaroon.OpenBaoTransitTest do
     :ok = TransitVault.destroy!(ctx.tenant)
 
     assert reason(TransitApiClient.transit_by_token(ctx.token)) ==
-             {MacaroonRevoked, :scope_destroyed}
+             {InvalidMacaroon, :bad_signature}
   end
 
   defp put_config do

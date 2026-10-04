@@ -666,7 +666,7 @@ defmodule AshVault.KeyProviders.Local do
       {:ok, key} ->
         with :ok <- validate_key_size(state, key, scope, version, purpose), do: {:ok, key}
 
-      {:error, reason} when reason in [:enoent, :enotdir] ->
+      {:error, reason} when reason in [:enoent, :enotdir, :enametoolong] ->
         {:error, :not_found}
 
       {:error, reason} ->
@@ -832,6 +832,11 @@ defmodule AshVault.KeyProviders.Local do
       # unreadable tombstone must still mean destroyed.
       {:ok, _stat} -> {:error, :destroyed}
       {:error, :enoent} -> :absent
+      # A path component longer than the filesystem allows can never have been written,
+      # so a tombstone at it cannot exist: this is a positive answer, not a failed read.
+      # Reporting it as an outage would let a caller-supplied scope (a forged macaroon)
+      # manufacture a `ProviderUnavailable` at will.
+      {:error, :enametoolong} -> :absent
       {:error, reason} -> {:error, unavailable({:tombstone_unreadable, path, reason})}
     end
   end

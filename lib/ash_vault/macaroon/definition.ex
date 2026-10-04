@@ -10,10 +10,12 @@ defmodule AshVault.Macaroon.Definition do
     :identity,
     :revoked_when,
     :default_ttl,
+    :max_ttl,
     :mint_action,
     :read_action,
     :__identifier__,
     accepted_key_versions: 1,
+    require_authorize_enforcement?: false,
     caveats: [],
     __spark_metadata__: nil
   ]
@@ -23,8 +25,10 @@ defmodule AshVault.Macaroon.Definition do
           prefix: binary(),
           identity: atom(),
           revoked_when: term(),
-          default_ttl: pos_integer() | :infinity,
-          accepted_key_versions: pos_integer() | :all,
+          default_ttl: pos_integer() | :infinity | {module(), keyword()},
+          max_ttl: pos_integer() | :infinity | nil,
+          accepted_key_versions: pos_integer() | :all | mfa() | {module(), keyword()},
+          require_authorize_enforcement?: boolean(),
           mint_action: atom() | nil,
           read_action: atom() | nil,
           caveats: [AshVault.Macaroon.CaveatDefinition.t()]
@@ -34,6 +38,19 @@ defmodule AshVault.Macaroon.Definition do
   @spec mint_action(t()) :: atom()
   def mint_action(%__MODULE__{mint_action: nil, name: name}), do: :"mint_#{name}"
   def mint_action(%__MODULE__{mint_action: action}), do: action
+
+  @doc """
+  The `field` of the vault context a macaroon's root signature is computed under:
+  `:"macaroon:<name>"`.
+
+  A reserved label rather than the bare name, so that no ordinary `Vault.mac!/2` call
+  for an attribute or field of the same resource — whose field is an attribute name and
+  never contains `:` — shares associated data with the root signature. Otherwise code
+  that MACs caller-chosen bytes for a field named like the macaroon would be an oracle
+  for forging root signatures.
+  """
+  @spec vault_field(t()) :: atom()
+  def vault_field(%__MODULE__{name: name}), do: :"macaroon:#{name}"
 
   @doc "The generated verifying read action's name: `read_action`, or `:<name>_by_token`."
   @spec read_action(t()) :: atom()

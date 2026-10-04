@@ -4,7 +4,7 @@ defmodule AshVault.Macaroon.Envelope do
 
       token   := prefix "_" base64url(payload)        (no padding)
       payload := version::8 = 1
-                 scope_len::8        scope            1..255 bytes, UTF-8, no control chars
+                 scope_len::8        scope            1..180 bytes, UTF-8, no control chars
                  key_version::32                      >= 1
                  id_len::8           id               1..255 bytes
                  caveat_count::8                      0..#{32}
@@ -34,6 +34,7 @@ defmodule AshVault.Macaroon.Envelope do
   @max_caveats 32
   @max_caveat_bytes AshVault.Macaroon.CaveatCodec.max_caveat_bytes()
   @max_prefix 32
+  @max_scope 180
 
   @max_payload 1 + 1 + @max_field + 4 + 1 + @max_field + 1 +
                  @max_caveats * (2 + @max_caveat_bytes) + @sig_bytes
@@ -72,12 +73,17 @@ defmodule AshVault.Macaroon.Envelope do
   def valid_prefix?(_prefix), do: false
 
   @doc """
-  Whether `scope` can be carried in a token: 1–255 bytes of UTF-8 without control
-  characters. Checked on mint and on decode, before any key provider sees it.
+  Whether `scope` can be carried in a token: 1–#{@max_scope} bytes of UTF-8 without
+  control characters. Checked on mint and on decode, before any key provider sees it.
+
+  #{@max_scope} rather than the field's 255 because a scope becomes a file or key name in
+  a provider: `AshVault.KeyProviders.Local` names a scope directory with its base64url
+  encoding plus `.tombstone`, which for 180 bytes is 250 characters — inside every common
+  filesystem's 255-byte name limit.
   """
   @spec valid_scope?(term()) :: boolean()
   def valid_scope?(scope) when is_binary(scope) do
-    byte_size(scope) in 1..@max_field and String.valid?(scope) and
+    byte_size(scope) in 1..@max_scope and String.valid?(scope) and
       not String.match?(scope, ~r/[[:cntrl:]]/u)
   end
 

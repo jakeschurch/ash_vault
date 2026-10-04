@@ -14,6 +14,7 @@ defmodule AshVault.Macaroon.VerifierTest do
           domain: nil,
           validate_domain_inclusion?: false,
           data_layer: Ash.DataLayer.Ets,
+          #{if Keyword.get(opts, :authorizers), do: "authorizers: [Ash.Policy.Authorizer],", else: ""}
           extensions: [AshVault]
 
         ash_vault do
@@ -129,5 +130,77 @@ defmodule AshVault.Macaroon.VerifierTest do
       )
 
     assert_error(result, "cannot serve :mac")
+  end
+
+  describe "authorize-phase caveats without MacaroonAllows" do
+    @authorize "caveat :actions, {:array, :string}, phase: :authorize, check: AshVault.Macaroon.Caveats.ActionIn"
+
+    test "warn when the resource's own policies never use the check" do
+      assert {:warn, warning} = define(AshVault.Test.MacVerifyWarn, block(caveats: @authorize))
+      assert warning =~ "MacaroonAllows"
+    end
+
+    test "do not warn when a policy uses it" do
+      policies = """
+      policies do
+        policy always() do
+          forbid_unless {AshVault.Checks.MacaroonAllows, macaroon: :m}
+        end
+      end
+      """
+
+      result =
+        define(AshVault.Test.MacVerifyEnforced, block(caveats: @authorize),
+          extra: policies,
+          authorizers: true
+        )
+
+      assert result == :ok
+    end
+
+    test "do not warn when the macaroon requires asserted enforcement" do
+      caveats = @authorize <> "\n      require_authorize_enforcement? true"
+      assert :ok = define(AshVault.Test.MacVerifyStrict, block(caveats: caveats))
+    end
+  end
+
+  describe "dynamic options" do
+    test "a function default_ttl without a finite max_ttl is rejected" do
+      macaroon = """
+          macaroon :m do
+            prefix "avver"
+            identity :id
+            default_ttl fn _input -> 60 end
+          end
+      """
+
+      assert_error(define(AshVault.Test.MacVerifyTtlFn, macaroon), "requires a finite `max_ttl`")
+    end
+
+    test "a static default_ttl above max_ttl is rejected" do
+      macaroon = """
+          macaroon :m do
+            prefix "avver"
+            identity :id
+            default_ttl 120
+            max_ttl 60
+          end
+      """
+
+      assert_error(define(AshVault.Test.MacVerifyTtlMax, macaroon), "exceeds `max_ttl`")
+    end
+
+    test "an accepted_key_versions MFA must exist" do
+      macaroon = """
+          macaroon :m do
+            prefix "avver"
+            identity :id
+            default_ttl 60
+            accepted_key_versions {AshVault.Test.NoSuchWindow, :window, []}
+          end
+      """
+
+      assert_error(define(AshVault.Test.MacVerifyWindow, macaroon), "window/1")
+    end
   end
 end
