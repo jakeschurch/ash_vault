@@ -1,16 +1,6 @@
 # Agent Instructions
 
-This project uses **bd** (beads) for issue tracking. Run `bd prime` for full workflow context.
-
-## Quick Reference
-
-```bash
-bd ready              # Find available work
-bd show <id>          # View issue details
-bd update <id> --claim  # Claim work atomically
-bd close <id>         # Complete work
-bd dolt push          # Push beads data to remote
-```
+This project uses **bd** (beads) for issue tracking — see the Beads section at the end.
 
 ## Non-Interactive Shell Commands
 
@@ -54,10 +44,19 @@ nix develop .#full --command bash -c '<cmd>'   # pinned Elixir/OTP, differs from
 
 ```bash
 mix test                                    # no services needed
-mix test --include postgres --include openbao
+mix test test/ash_vault/lookup_test.exs:42  # one file / one test
+mix test.all                                # alias: --include postgres --include openbao
 cd ash_vault_rustler && mix test            # the Rust NIF package
+mix format                                  # Spark DSL locals come from .formatter.exs
 mix docs                                    # must stay at zero warnings
 ```
+
+Adding a DSL option means adding it to `spark_locals_without_parens` in
+`.formatter.exs`. A new guide or public module must also be listed in `docs/0`
+(`extras` / `groups_for_modules`) in `mix.exs`. A change to public behavior must also
+update `usage-rules.md` / `usage-rules/*.md`, which ship to consumers via `usage_rules`. In `ash_vault_rustler`,
+`ASH_VAULT_RUSTLER_BUILD=1` builds the NIF from source instead of downloading the
+precompiled artifact.
 
 Services the tagged suites expect: PostgreSQL on `localhost:5432` (`postgres`/`postgres`)
 and OpenBao on `127.0.0.1:8200`.
@@ -78,6 +77,35 @@ Ash resource --> AshVault extension --> AshVault.Vault --> KeyProvider
 The property the whole library exists for: destroying a scope's keys makes its
 ciphertext permanently undecryptable, and **restoring a database backup cannot undo
 that**, because the keys were never in the database.
+
+How it fits together:
+
+- **Compile time.** `Transformers.SetupEncryption` deletes each encrypted attribute and
+  replaces it with a private `encrypted_<name>` binary column, a same-named calculation
+  backed by `Calculations.Decrypt`, and an action argument that `Changes.Encrypt`
+  consumes. Removing the attribute is what keeps plaintext out of the database. It must
+  run after Ash's `DefaultAccept`; otherwise it rewrites no actions and nothing gets
+  encrypted, with no error.
+- **Runtime.** `use AshVault.Vault` generates thin delegations to `Vault.Runtime`. The
+  `Scope` (default: the Ash tenant) selects the keyring. AEAD associated data binds
+  `scope | resource | field`. `Envelope.V1` (`"AV", 1, ...`) records the cipher and key
+  version, so rotation needs no re-encryption.
+- **Searchable fields** add a deterministic `<name>_lookup` HMAC column and a
+  `:by_<name>` read. The token key comes from `KeyProvider.lookup_key/1`, a separate
+  per-scope secret that never rotates, HKDF'd per resource and field. Deriving it from the
+  rotating DEK would make lookups stop matching after a rotation, and nothing would raise.
+- **Key purposes.** Data keys, `:mac` keys (`Vault.mac!/2`) and the lookup key are
+  separate keyrings. `destroy/1` erases all of them under one tombstone.
+- **Macaroons.** A `macaroon` entity generates `:mint_<name>` and `:<name>_by_token`
+  actions for attenuable bearer tokens signed under the scope's `:mac` keyring
+  (`lib/ash_vault/macaroon/`). Authorize-phase caveats are enforced only by
+  `AshVault.Checks.MacaroonAllows`.
+- **`KeyProviders.Cached`** (vault `cache:` option) is off by default on purpose, because
+  a cache weakens erasure. `ash_vault_rustler` is an optional sibling Mix project. It
+  provides a NIF key cache and cipher that keep keys off the BEAM heap so eviction can
+  zero them.
+- **Operator tooling** lives in `lib/mix/tasks/ash_vault.*` (rotate, destroy_keys,
+  backfill, verify, key_info, local.init).
 
 ## Conventions
 
