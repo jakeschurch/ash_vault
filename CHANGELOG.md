@@ -28,6 +28,18 @@ All notable changes to AshVault are recorded here. The format follows
 - Telemetry: `[:ash_vault, :mac, :sign]` and `[:ash_vault, :mac, :verify]` spans, and
   `:purpose` on `[:ash_vault, :key, :rotate]`.
 - Guide: [Key purposes and MACs](documentation/topics/key-purposes-and-macs.md).
+- Kubernetes auth for the OpenBao providers: `auth: {:kubernetes, role: ..., mount:
+  ..., jwt_path: ...}` in place of `:token`. A token holder supervised by AshVault
+  (`AshVault.KeyProviders.OpenBao.KubernetesAuth`) logs in with the service-account JWT,
+  caches the client token, and logs in again, re-reading the rotated JWT, at two thirds
+  of the lease. Failures back off exponentially and are `ProviderUnavailable` with
+  reason `{:kubernetes_auth, reason}`. Neither the token nor the JWT is logged or put
+  in process status.
+- TLS options for the OpenBao providers: `:cacertfile` trusts a private CA with peer and
+  hostname verification on, and `:connect_options` passes through to Req. A missing CA
+  file is `ProviderUnavailable` with reason `{:cacertfile_unreadable, path}`, and
+  `verify: :verify_none` is refused.
+- Guide: [Running against OpenBao in Kubernetes](documentation/how-to/openbao-in-kubernetes.md).
 
 ### Compatibility
 

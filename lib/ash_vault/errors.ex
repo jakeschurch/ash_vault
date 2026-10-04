@@ -218,6 +218,28 @@ defmodule AshVault.Errors.ProviderUnavailable do
     """
   end
 
+  def message(%{provider: provider, reason: {:kubernetes_auth, reason}}) do
+    """
+    Key provider #{inspect(provider)} could not log in to OpenBao with Kubernetes auth: \
+    #{inspect(reason)}.
+
+    Retryable: the token holder backs off and logs in again. If it persists, check the
+    `auth: {:kubernetes, ...}` role and mount, that the service-account token file is
+    mounted at `:jwt_path`, and that the role binds this pod's service account and
+    namespace.
+    """
+  end
+
+  def message(%{provider: provider, reason: {:cacertfile_unreadable, path}}) do
+    """
+    Key provider #{inspect(provider)} cannot reach OpenBao: :cacertfile #{inspect(path)} is \
+    not a readable file.
+
+    No connection was attempted. Mount the CA bundle that signed the OpenBao server
+    certificate at that path, or correct `:cacertfile`.
+    """
+  end
+
   def message(%{provider: provider, reason: reason}) do
     """
     Key provider #{inspect(provider)} is unavailable: #{inspect(reason)}.
