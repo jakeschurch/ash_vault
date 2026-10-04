@@ -24,7 +24,7 @@ defmodule AshVault.Transformers.ExpandAttributes do
   @doc false
   @impl Spark.Dsl.Transformer
   def transform(dsl) do
-    existing = MapSet.new(AshVault.Info.ash_vault(dsl), & &1.name)
+    existing = MapSet.new(AshVault.Info.encrypt_entities(dsl), & &1.name)
 
     dsl
     |> AshVault.Info.ash_vault_attributes!()

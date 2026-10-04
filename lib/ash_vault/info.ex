@@ -30,7 +30,7 @@ defmodule AshVault.Info do
   """
   @spec encrypted_fields(module() | Spark.Dsl.t()) :: [Encrypted.t()]
   def encrypted_fields(resource_or_dsl) do
-    entities = ash_vault(resource_or_dsl)
+    entities = encrypt_entities(resource_or_dsl)
     known = MapSet.new(entities, & &1.name)
 
     sugar =
@@ -41,6 +41,29 @@ defmodule AshVault.Info do
       |> Enum.map(&%Encrypted{name: &1})
 
     entities ++ sugar
+  end
+
+  @doc """
+  The `encrypt` entities of a resource, without the `attributes` sugar.
+
+  `ash_vault/1` returns every entity in the section — `macaroon`s too — so anything that
+  wants encrypted fields reads them through here.
+  """
+  @spec encrypt_entities(module() | Spark.Dsl.t()) :: [Encrypted.t()]
+  def encrypt_entities(resource_or_dsl) do
+    resource_or_dsl |> ash_vault() |> Enum.filter(&match?(%Encrypted{}, &1))
+  end
+
+  @doc "Every `macaroon` declared on a resource."
+  @spec macaroons(module() | Spark.Dsl.t()) :: [AshVault.Macaroon.Definition.t()]
+  def macaroons(resource_or_dsl) do
+    resource_or_dsl |> ash_vault() |> Enum.filter(&match?(%AshVault.Macaroon.Definition{}, &1))
+  end
+
+  @doc "One `macaroon` by name, or `nil`."
+  @spec macaroon(module() | Spark.Dsl.t(), atom()) :: AshVault.Macaroon.Definition.t() | nil
+  def macaroon(resource_or_dsl, name) do
+    resource_or_dsl |> macaroons() |> Enum.find(&(&1.name == name))
   end
 
   @doc """

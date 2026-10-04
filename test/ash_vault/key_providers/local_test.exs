@@ -727,4 +727,15 @@ defmodule AshVault.KeyProviders.LocalTest do
       refute File.exists?(tombstone_path(root, kept))
     end
   end
+
+  describe "a scope whose name is too long for the filesystem" do
+    # A caller-supplied scope (a forged macaroon) must not be able to manufacture an
+    # outage: no key or tombstone can exist at a path the filesystem cannot name.
+    test "get_key is :not_found, not ProviderUnavailable", %{name: name} do
+      scope = String.duplicate("a", 255)
+
+      assert Local.get_key(name, scope, 1) == {:error, :not_found}
+      assert Local.get_key(name, scope, 1, :mac) == {:error, :not_found}
+    end
+  end
 end

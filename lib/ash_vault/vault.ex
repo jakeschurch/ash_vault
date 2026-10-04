@@ -161,6 +161,19 @@ defmodule AshVault.Vault do
   @doc "Crypto-erase every key for a scope."
   @callback destroy!(scope :: term()) :: :ok
 
+  @doc """
+  Compute a MAC over `data` under a stated `:mac` key version, returning the raw tag.
+
+  Optional, so a hand-written vault that predates it keeps compiling; every vault built
+  with `use AshVault.Vault` has it, and `AshVault.Macaroon` requires it.
+  """
+  @callback mac_at!(binary(), pos_integer(), AshVault.Context.t()) :: binary()
+
+  @doc "The current `:mac` key version for a context's scope. Optional, like `c:mac_at!/3`."
+  @callback mac_key_version!(AshVault.Context.t()) :: pos_integer()
+
+  @optional_callbacks mac_at!: 3, mac_key_version!: 1
+
   @doc "Introspect the vault's compile-time configuration."
   @callback __ash_vault__(:key_provider | :cipher | :mac | :envelope | :scope | :rotation_policy) ::
               module()
@@ -544,6 +557,25 @@ defmodule AshVault.Vault do
       @spec verify_mac!(binary(), term(), term(), AshVault.Context.t()) :: :ok
       def verify_mac!(data, key_version, tag, ctx),
         do: AshVault.Vault.Runtime.verify_mac!(data, key_version, tag, ctx, @ash_vault_opts)
+
+      @doc """
+      Compute a MAC over `data` under the stated `:mac` key version, returning the tag.
+
+      See `AshVault.Vault.Runtime.mac_at!/4`.
+      """
+      @impl AshVault.Vault
+      @spec mac_at!(binary(), pos_integer(), AshVault.Context.t()) :: binary()
+      def mac_at!(data, key_version, ctx),
+        do: AshVault.Vault.Runtime.mac_at!(data, key_version, ctx, @ash_vault_opts)
+
+      @doc """
+      The current `:mac` key version for a context's scope, minting the keyring on first
+      use. See `AshVault.Vault.Runtime.current_mac_version!/2`.
+      """
+      @impl AshVault.Vault
+      @spec mac_key_version!(AshVault.Context.t()) :: pos_integer()
+      def mac_key_version!(ctx),
+        do: AshVault.Vault.Runtime.current_mac_version!(ctx, @ash_vault_opts)
 
       @doc "Crypto-erase every key for a scope."
       @impl AshVault.Vault

@@ -32,6 +32,10 @@ defmodule AshVault.Errors do
       and key version. Not an outage, not erasure
     * `AshVault.Errors.PurposeUnsupported` — the key provider cannot serve keys for a
       purpose (such as `:mac`); a configuration fault, not retryable
+    * `AshVault.Errors.InvalidMacaroon` — a macaroon is malformed, forged, tampered,
+      expired, fails a caveat, or names a record that does not exist
+    * `AshVault.Errors.MacaroonRevoked` — a macaroon was valid once and has been revoked:
+      by its record, by retiring its `:mac` key version, or by destroying its scope
 
   For MACs the taxonomy reads: `KeyDestroyed` — the scope was erased, so every tag it
   ever issued is revoked; `KeyNotFound` — the tag names a key version that does not exist;
@@ -409,4 +413,90 @@ defmodule AshVault.Errors.PurposeUnsupported do
     or use a provider that ships them (`Memory`, `Local`, `OpenBao`, `OpenBaoTransit`).
     """
   end
+end
+
+defmodule AshVault.Errors.InvalidMacaroon do
+  @moduledoc """
+  Raised or returned when a macaroon does not verify, and the reason is the token itself.
+
+  `:reason` says which check failed, and is safe to log:
+
+    * `:bad_signature` — the token did not verify. This is the **only** reason given for
+      any failure before the signature has verified: malformed bytes, an unknown envelope
+      version, a token for another macaroon, a scope with no key, a crypto-erased scope,
+      or a forged, tampered, reordered, truncated or appended-without-signature chain. A
+      forged token must not learn which tenants exist or were erased; the precise reason
+      is on the `[:ash_vault, :macaroon, :rejected]` telemetry event instead
+    * `:scope_mismatch` — a genuine token for a different tenant than the request's
+    * `:unknown_key_version` — a genuine token whose keyring the provider can no longer
+      find (an inconsistent key store)
+    * `:unenforced_caveats` — the token carries `phase: :authorize` caveats and the
+      verifying read requires the caller to assert they are enforced
+    * `:unknown_caveat` — a caveat this macaroon does not declare
+    * `:caveat_type` — a caveat value whose encoded type disagrees with the declaration
+    * `:expired` — an `expires_at` caveat has passed
+    * `{:caveat_failed, name}` — a declared caveat's check refused the request
+    * `:not_found` — the signature is good but no record has the token's identity
+
+  It is deliberately distinct from `AshVault.Errors.MacaroonRevoked` (the token was good
+  and has been withdrawn) and from `AshVault.Errors.ProviderUnavailable` (nothing was
+  decided; retry). An outage is never reported as an invalid token.
+
+  The struct carries no token bytes, no identity and no signature: a macaroon is a bearer
+  credential, and Ash logs errors verbatim.
+  """
+
+  use Splode.Error, fields: [:resource, :macaroon, :reason], class: :invalid
+
+  def message(%{resource: resource, macaroon: macaroon, reason: reason}) do
+    """
+    Invalid #{inspect(macaroon)} macaroon for #{inspect(resource)}: #{describe(reason)}.
+    """
+  end
+
+  defp describe(:unenforced_caveats),
+    do: "it carries authorize-phase caveats and their enforcement was not asserted"
+
+  defp describe(:scope_mismatch), do: "the token belongs to a different tenant"
+  defp describe(:unknown_key_version), do: "the token names an unknown key version"
+  defp describe(:bad_signature), do: "the signature does not verify"
+  defp describe(:unknown_caveat), do: "the token carries an undeclared caveat"
+  defp describe(:caveat_type), do: "a caveat value has the wrong type"
+  defp describe(:expired), do: "the token has expired"
+  defp describe({:caveat_failed, name}), do: "caveat #{inspect(name)} refused the request"
+  defp describe(:not_found), do: "no record has this token's identity"
+  defp describe(other), do: inspect(other)
+end
+
+defmodule AshVault.Errors.MacaroonRevoked do
+  @moduledoc """
+  Returned when a macaroon verified once and has since been revoked. `:reason` names the
+  level that revoked it:
+
+    * `:record` — the record's `revoked_when` expression is not `false`
+    * `:key_retired` — the token's `:mac` key version has fallen outside the macaroon's
+      `accepted_key_versions` window after the scope's `:mac` keyring was rotated
+    * `:scope_destroyed` — the scope was crypto-erased between the signature check and the
+      key-window check. A token presented *after* erasure cannot have its signature
+      checked at all, and is reported as `AshVault.Errors.InvalidMacaroon`
+      (`:bad_signature`) like any other unverifiable token — telling it apart would tell
+      a forger which tenants were erased
+
+  Not an outage and not a forgery. Like `AshVault.Errors.InvalidMacaroon` it carries no
+  token material.
+  """
+
+  use Splode.Error, fields: [:resource, :macaroon, :reason], class: :invalid
+
+  def message(%{resource: resource, macaroon: macaroon, reason: reason}) do
+    """
+    The #{inspect(macaroon)} macaroon for #{inspect(resource)} has been revoked \
+    (#{describe(reason)}).
+    """
+  end
+
+  defp describe(:record), do: "its record is revoked"
+  defp describe(:key_retired), do: "its key version was retired by rotation"
+  defp describe(:scope_destroyed), do: "its scope was crypto-erased"
+  defp describe(other), do: inspect(other)
 end

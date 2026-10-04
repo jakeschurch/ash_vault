@@ -3,8 +3,8 @@
 A vault encrypts, and it can also **authenticate**: compute a message authentication
 code (MAC) over some bytes so that anyone holding the vault can later check that the
 bytes are exactly what was signed, for exactly this tenant, resource and field. Signed
-URLs, opaque API tokens, unforgeable record references and (later) macaroons are all
-built from that one operation.
+URLs, opaque API tokens, unforgeable record references and [macaroons](macaroons.md)
+are all built from that one operation.
 
 MACs get their own keys. This guide covers the keyring split that makes that safe, the
 vault API, and what each error means.
@@ -135,3 +135,5 @@ Comparison is constant-time: `HmacSha256` uses `:crypto.hash_equals/2`, and
 * `AshVault.KeyProvider` — the *Purposes* section
 * [Crypto-erasure](crypto-erasure.md) — what `destroy!/1` promises, now for tags too
 * [Rotation](rotation.md)
+* [Macaroons](macaroons.md) — attenuable tokens built on the `:mac` keyring, and
+  `mac_at!/3`, the version-pinned MAC they verify with
