@@ -98,6 +98,7 @@ defmodule AshVault.Macaroon.Runtime do
       KeyDestroyed,
       KeyNotFound,
       AshVault.Errors.ProviderUnavailable,
+      AshVault.Errors.ProviderForbidden,
       AshVault.Errors.PurposeUnsupported,
       AshVault.Errors.KeySizeMismatch,
       AshVault.Errors.OpaqueKeyUnsupported,
@@ -264,6 +265,7 @@ defmodule AshVault.Macaroon.Runtime do
   rescue
     error in [
       AshVault.Errors.ProviderUnavailable,
+      AshVault.Errors.ProviderForbidden,
       AshVault.Errors.PurposeUnsupported,
       AshVault.Errors.KeySizeMismatch,
       AshVault.Errors.OpaqueKeyUnsupported,

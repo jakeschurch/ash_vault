@@ -210,7 +210,7 @@ Semantics worth knowing:
   from an error message.
 * `rotate/1` on a scope with no key mints version 1 and returns `{:ok, 1}`.
 * A wrong or expired token yields `403 permission denied` on every endpoint, which is
-  always `ProviderUnavailable` — never `:destroyed`.
+  always `AshVault.Errors.ProviderForbidden` — never `:destroyed`.
 
 > #### The token can reach your APM through Finch telemetry {: .warning}
 >
@@ -303,9 +303,9 @@ See [Migrating from plaintext](migrating-from-plaintext.md).
 
 ## The error taxonomy
 
-Eleven errors. Every one of them is a Splode error with `class: :invalid`, so Ash wraps
+Twelve errors. Every one of them is a Splode error with `class: :invalid`, so Ash wraps
 them correctly and they arrive from `Ash.read/2` and `Ash.create/2` as ordinary Ash errors
-rather than 500s. The whole point of having eleven rather than one is that the response
+rather than 500s. The whole point of having twelve rather than one is that the response
 differs.
 
 | Error | What it means | First response |
@@ -313,6 +313,7 @@ differs.
 | `KeyDestroyed` | the key was crypto-erased; the data is gone by design | close the ticket |
 | `KeyNotFound` | no key and no tombstone for this scope/version | investigate the key store |
 | `ProviderUnavailable` | the key backend could not be reached | retry, then page |
+| `ProviderForbidden` | the key backend answered `403`: policy, token or address | fix the configuration; retrying cannot help |
 | `CiphertextIntegrityFailed` | **ciphertext integrity, not access control.** The stored bytes failed their AEAD tag check: modified, or read under a different key/tenant/resource/field. Nothing to do with actors, policies or `AshAuthentication` — AshVault authorizes nothing | treat as tampering unless a deploy explains it |
 | `KeySizeMismatch` | the provider's key size disagrees with the cipher | fix the config; retrying cannot help |
 | `MissingScope` | no tenant reached a tenant-scoped field | pass a tenant |
@@ -363,13 +364,33 @@ Key provider AshVault.KeyProviders.OpenBao is unavailable: %Req.TransportError{r
 **Meaning:** transport or backend failure. **This is the only retryable error in the list.**
 
 **Do:** retry. If it persists: check the key store is up and reachable, the token is valid
-and unexpired (a `403` shows up here, as `reason: :forbidden`), the KV mount exists for
+and unexpired, the KV mount exists for
 OpenBao, the volume is mounted for `Local`. It also covers *corrupt or unreadable* state —
 a truncated `meta.json`, an unreadable tombstone — which is deliberate: a tombstone read
 that cannot complete is never answered with "not destroyed".
 
 **Do not** conclude anything about erasure from this. An outage must never look like
 erasure, and erasure must never look like an outage.
+
+### `AshVault.Errors.ProviderForbidden` — fix the configuration, do not retry
+
+```
+Key provider AshVault.KeyProviders.OpenBaoTransit was refused by OpenBao (403) on encrypt.
+```
+
+**Meaning:** the key store is up and refused the request. `:operation` names which one
+(`:encrypt`, `:hmac`, `:create_key`, `:read_key`, `:read_tombstone`, ...). Retrying the
+same request with the same token gets the same answer.
+
+**Do:** compare the token's policy with the paths the provider documents, and check the
+token has not been revoked. A `403` on `:encrypt` against an HA OpenBao usually
+means `:address` reaches standby nodes: they serve reads and policy checks from their own,
+briefly lagging, copy of the data, so an encrypt issued right after AshVault creates a
+scope's key can find no key there, and OpenBao treats encrypting with a missing key as
+creating it. Point `:address` at the active node only (the Helm chart's `<release>-active`
+Service).
+
+A `403` on a tombstone read still fails closed: the scope is never reported intact.
 
 ### `AshVault.Errors.CiphertextIntegrityFailed` — the bytes do not verify
 
@@ -705,6 +726,8 @@ make sure its retention window is one you can defend to the same subject.
 At minimum, alert differently on these three, because the correct human response differs:
 
 * `ProviderUnavailable` → page. Encryption and decryption are both down.
+* `ProviderForbidden` → page the owner of the key store's policy. Nothing is down; the
+  application is not allowed to do what it is asking.
 * `CiphertextIntegrityFailed` → investigate. Either a deploy changed a module name or a scope
   key, or someone is writing to your database.
 * `KeyDestroyed` → do not page. Expected after an erasure; a spike of it for a scope not in

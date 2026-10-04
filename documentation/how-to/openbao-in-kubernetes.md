@@ -14,10 +14,27 @@ those two read the `OpenBaoTransit` block.
 ```elixir
 # config/runtime.exs
 config :my_app, AshVault.KeyProviders.OpenBaoTransit,
-  address: "https://openbao.foundry.svc:8200",
+  address: "https://openbao-active.openbao.svc:8200",
   cacertfile: "/etc/openbao-ca/ca.crt",
   auth: {:kubernetes, role: "ashvault-foundry"}
 ```
+
+### Address the active node
+
+With HA (`server.ha.enabled`), point `:address` at the chart's `<release>-active` Service,
+not the `<release>` Service that spans every pod. OpenBao standbys answer reads and run
+policy checks against their own copy of the data, which lags the active node slightly.
+AshVault creates a scope's key explicitly and then encrypts with it straight away; a
+standby that has not yet seen the new key treats that encrypt as a request to create the
+key, and a policy that withholds `create` on `transit/encrypt/*` (as recommended) refuses
+it with `403`. Verified against openbao 2.6.3 in a three-node Raft cluster: through the
+all-pods Service, encrypt immediately after create was refused every time on a standby,
+and succeeded a few hundred milliseconds later; through the active Service it never failed.
+A standby can equally serve a tombstone read from before a `destroy/1` landed. The
+connection pool reuses connections, so one standby can serve a node's requests for a long
+time.
+
+The server certificate must name the address you configure (see below).
 
 Use `auth:` **or** `token:`, never both. AshVault raises `ArgumentError` if both are set
 rather than guess which one you meant. The static `token:` forms (a binary,
@@ -64,8 +81,8 @@ details.
   as `:redacted`.
 
 A token revoked out of band (for example with `bao token revoke`) is not noticed
-until the next scheduled login. Until then, requests fail with `ProviderUnavailable` and
-reason `:forbidden`.
+until the next scheduled login. Until then, requests fail with
+`AshVault.Errors.ProviderForbidden`.
 
 ### OpenBao side
 

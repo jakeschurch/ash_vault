@@ -118,6 +118,7 @@ always wins:
 | `AshVault.Errors.KeyNotFound` | the claimed key version does not exist | **invalid** |
 | `AshVault.Errors.InvalidMac` | key found, tag wrong: tampered, forged, wrong version, or another scope/resource/field | **invalid** |
 | `AshVault.Errors.ProviderUnavailable` | the provider could not answer | **retry**; nothing was decided |
+| `AshVault.Errors.ProviderForbidden` | the provider refused the request (`403`) | configuration fault; nothing was decided |
 | `AshVault.Errors.PurposeUnsupported` | the provider has no `:mac` keyring | configuration fault |
 
 An outage is never reported as a bad tag, and a bad tag is never reported as an outage.

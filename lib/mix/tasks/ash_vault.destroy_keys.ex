@@ -104,6 +104,9 @@ defmodule Mix.Tasks.AshVault.DestroyKeys do
             "Nothing has ever been encrypted under it."
         )
 
+      {:error, %AshVault.Errors.ProviderForbidden{} = error} ->
+        Shared.abort!(Exception.message(error))
+
       {:error, reason} ->
         Shared.abort!(
           Exception.message(

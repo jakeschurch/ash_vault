@@ -5,6 +5,36 @@ All notable changes to AshVault are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- `AshVault.Errors.ProviderForbidden`: the key store answered `403`. It carries the
+  refused `:operation` (`:encrypt`, `:hmac`, `:create_key`, `:read_key`,
+  `:read_tombstone`, ...) and never the transit key name.
+  `AshVault.KeyProviders.OpenBao.Transport.operation/3` derives that operation from a
+  request path.
+- Tests covering a scope's first write under the recommended OpenBao policy, which
+  grants `create` on `transit/keys` but not on `transit/encrypt`. They run against a
+  stub and against a live server (`:openbao`).
+
+### Changed
+
+- **Breaking:** an OpenBao `403` is now `AshVault.Errors.ProviderForbidden`. It was
+  `ProviderUnavailable` with `reason: :forbidden`, which callers and metrics treated as
+  a transient outage and retried. A `403` is a policy, credential or addressing fault,
+  and retrying cannot fix it. Match the new struct wherever you matched
+  `reason: :forbidden`. A `403` on a tombstone read still fails closed. A Kubernetes
+  auth login refused with `403` is still `ProviderUnavailable` with reason
+  `{:kubernetes_auth, :forbidden}`, because the token holder retries the login itself.
+
+### Documentation
+
+- An HA OpenBao must be addressed through its active node. Standbys serve reads and
+  policy checks from a lagging copy of the data. An encrypt sent right after AshVault
+  explicitly creates a scope's key can reach a standby that has not seen the key yet.
+  The standby treats the encrypt as an implicit create and returns `403`. Verified
+  against openbao 2.6.3. The `OpenBaoTransit` policy example now matches what the
+  provider needs: `create` on `transit/keys`, and nothing more on the encrypt path.
+
 ## 0.1.0 - 2026-10-04
 
 First release, published together with `ash_vault_rustler` 0.1.0.

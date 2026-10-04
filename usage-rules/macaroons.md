@@ -104,6 +104,8 @@ into a 401.
 - `AshVault.Errors.InvalidMacaroon`: the token is bad. Reject it.
 - `AshVault.Errors.MacaroonRevoked`: the token was valid but is revoked. Reject it.
 - `AshVault.Errors.ProviderUnavailable`: retry. **Never** report it as an invalid token.
+- `AshVault.Errors.ProviderForbidden`: the key store refused (`403`); a configuration
+  fault. Alert, do not retry, and **never** report it as an invalid token.
 
 Never log tokens. Never return the precise rejection reason to the holder. For operators,
 attach a handler to `[:ash_vault, :macaroon, :rejected]` telemetry, which carries the

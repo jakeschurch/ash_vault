@@ -334,7 +334,7 @@ defmodule AshVault.KeyProviders.OpenBaoTransitTest do
   end
 
   describe "error discrimination" do
-    test "a wrong token is ProviderUnavailable, never :destroyed", %{scope: scope} do
+    test "a wrong token is ProviderForbidden, never :destroyed", %{scope: scope} do
       scope = scope.()
       assert {:ok, _} = Transit.current_key(scope)
 
@@ -346,7 +346,7 @@ defmodule AshVault.KeyProviders.OpenBaoTransitTest do
             Transit.rotate(scope),
             Transit.destroy(scope)
           ] do
-        assert {:error, %ProviderUnavailable{reason: :forbidden}} = result
+        assert {:error, %AshVault.Errors.ProviderForbidden{}} = result
       end
 
       put_config(token: @token)
@@ -358,7 +358,7 @@ defmodule AshVault.KeyProviders.OpenBaoTransitTest do
       sentinel = "sentinel-bad-token-do-not-log"
       put_config(token: sentinel)
 
-      assert {:error, %ProviderUnavailable{} = error} = Transit.current_key(scope)
+      assert {:error, %AshVault.Errors.ProviderForbidden{} = error} = Transit.current_key(scope)
 
       refute inspect(error, structs: false, limit: :infinity) =~ sentinel
       refute Exception.message(error) =~ sentinel
@@ -378,6 +378,103 @@ defmodule AshVault.KeyProviders.OpenBaoTransitTest do
       put_config(token: @token, address: "http://127.0.0.1:1", max_retries: 0)
 
       assert {:error, %ProviderUnavailable{provider: Transit}} = Transit.current_key(scope)
+    end
+  end
+
+  describe "under a policy that forbids implicit key creation" do
+    # The `ashvault-foundry` production policy: `create` on `transit/keys`, but only
+    # `update` on encrypt and hmac. OpenBao treats an encrypt against a missing key as a
+    # create, so it refuses that with 403. A scope's first write must still succeed,
+    # because the provider creates its keys explicitly first.
+    @restricted_policy """
+    path "transit/keys/ashvault_*" { capabilities = ["create", "read", "update", "delete"] }
+    path "transit/encrypt/ashvault_*" { capabilities = ["update"] }
+    path "transit/decrypt/ashvault_*" { capabilities = ["update"] }
+    path "transit/hmac/ashvault_*" { capabilities = ["update"] }
+    path "transit/verify/ashvault_*" { capabilities = ["update"] }
+    path "ashvault/data/tombstones/*" { capabilities = ["create", "read", "update"] }
+    """
+
+    setup do
+      assert %{status: status} =
+               raw(:put, "/v1/sys/policies/acl/ashvault-test-restricted", %{
+                 policy: @restricted_policy
+               })
+
+      assert status in 200..299
+
+      assert %{status: 200, body: %{"auth" => %{"client_token" => token}}} =
+               raw(:post, "/v1/auth/token/create", %{
+                 policies: ["ashvault-test-restricted"],
+                 no_default_policy: true,
+                 ttl: "10m"
+               })
+
+      put_config(token: token, max_retries: 0)
+      {:ok, restricted_token: token}
+    end
+
+    test "the policy really denies an implicit create", %{scope: scope, restricted_token: token} do
+      name = Transit.key_name(scope.())
+
+      response =
+        Req.request!(
+          method: :post,
+          base_url: @address,
+          url: "/v1/#{@transit_mount}/encrypt/#{name}",
+          headers: [{"x-vault-token", token}],
+          json: %{plaintext: Base.encode64("x")},
+          retry: false
+        )
+
+      assert response.status == 403
+      assert %{status: 404} = raw(:get, "/v1/#{@transit_mount}/keys/#{name}")
+    end
+
+    test "a new scope's first write and read succeed", %{scope: scope} do
+      tenant = scope.()
+
+      ctx = %AshVault.Context{
+        resource: __MODULE__,
+        field: :secret,
+        ash_context: %{tenant: tenant}
+      }
+
+      blob = AshVault.Test.Support.TransitVault.encrypt!("first write", ctx)
+      assert AshVault.Test.Support.TransitVault.decrypt!(blob, ctx) == "first write"
+      assert %{status: 200} = raw(:get, "/v1/#{@transit_mount}/keys/#{Transit.key_name(tenant)}")
+    end
+
+    test "a new scope's first MAC succeeds", %{scope: scope} do
+      tenant = scope.()
+
+      assert {:ok, %{version: 1, key: key}} = Transit.current_key(tenant, :mac)
+      assert {:ok, tag} = AshVault.Macs.OpenBaoTransit.mac("data", key, "aad")
+      assert :ok = AshVault.Macs.OpenBaoTransit.verify("data", tag, key, "aad")
+    end
+
+    test "an encrypt against a key that is gone is ProviderForbidden(:encrypt)",
+         %{scope: scope} do
+      tenant = scope.()
+      assert {:ok, %{key: key}} = Transit.current_key(tenant)
+
+      name = Transit.key_name(tenant)
+      raw(:post, "/v1/#{@transit_mount}/keys/#{name}/config", %{deletion_allowed: true})
+      raw(:delete, "/v1/#{@transit_mount}/keys/#{name}")
+
+      assert {:error, %AshVault.Errors.ProviderForbidden{provider: Transit, operation: :encrypt}} =
+               AshVault.Ciphers.OpenBaoTransit.encrypt("x", key, "aad")
+    end
+
+    test "a destroyed scope is never re-created", %{scope: scope} do
+      tenant = scope.()
+      assert {:ok, _} = Transit.current_key(tenant)
+      put_config(token: @token)
+      assert :ok = Transit.destroy(tenant)
+
+      assert {:error, :destroyed} = Transit.current_key(tenant)
+      assert {:error, :destroyed} = Transit.current_key(tenant, :mac)
+      assert %{status: 404} = raw(:get, "/v1/#{@transit_mount}/keys/#{Transit.key_name(tenant)}")
     end
   end
 

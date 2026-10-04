@@ -78,6 +78,9 @@ defmodule Mix.Tasks.AshVault.Rotate do
             "scope #{Shared.format(scope)} has been destroyed; its keys can never be re-minted."
           )
 
+        {:error, %AshVault.Errors.ProviderForbidden{} = error} ->
+          Shared.abort!(Exception.message(error))
+
         {:error, reason} ->
           Shared.abort!(
             Exception.message(

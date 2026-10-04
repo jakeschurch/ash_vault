@@ -128,7 +128,7 @@ The tombstone read **fails closed**. A read that cannot complete is never answer
 * `OpenBao` requires a positive identification of the response body in both directions:
   `200` means destroyed only with a map at `"data"`; `404` means absent only with an
   `"errors"` key holding an empty list. An HTML error page from an ingress mid-reload is
-  `ProviderUnavailable`.
+  `ProviderUnavailable`, and a `403` is `ProviderForbidden`. Neither is "not destroyed".
 * `OpenBao` never creates the KV mount that holds tombstones on a **read** path. A
   missing mount answers `404 "no handler for route ..."`, status-identical to "no
   tombstone here"; mounting it and retrying would find an empty store and report every
@@ -277,7 +277,8 @@ Before you rely on this in production:
       app's token has transit *and* the `transit/export` capability, and nothing else does.
 - [ ] **Your monitoring distinguishes `KeyDestroyed` from `ProviderUnavailable` from
       `CiphertextIntegrityFailed`.** They mean close the ticket, page someone, and investigate
-      an attack, respectively. See [Operations](operations.md).
+      an attack, respectively. `ProviderForbidden` is its own alert: the key store refused
+      the request, so fix its policy, token or address rather than retrying. See [Operations](operations.md).
 - [ ] **You have inventoried every path plaintext takes out of the application** — logs,
       warehouse, CDC, integrations, caches, search — and either stopped them or included
       them in the deletion runbook.

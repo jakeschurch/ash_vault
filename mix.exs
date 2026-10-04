@@ -150,6 +150,7 @@ defmodule AshVault.MixProject do
           AshVault.Errors.KeySizeMismatch,
           AshVault.Errors.MissingScope,
           AshVault.Errors.ProviderUnavailable,
+          AshVault.Errors.ProviderForbidden,
           AshVault.Errors.SerializationFailed,
           AshVault.Errors.UnsupportedCipher,
           AshVault.Errors.UnsupportedEnvelope,

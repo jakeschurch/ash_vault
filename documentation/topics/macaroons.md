@@ -307,6 +307,7 @@ Know what is shared:
 | `AshVault.Errors.InvalidMacaroon` | the token is wrong. Before the signature verifies there is one reason, `:bad_signature`; after it, `:scope_mismatch`, `:unknown_key_version`, `:unknown_caveat`, `:caveat_type`, `:expired`, `{:caveat_failed, name}`, `:unenforced_caveats`, `:not_found` |
 | `AshVault.Errors.MacaroonRevoked` | the token was good and is revoked: `:record`, `:key_retired` (or `:scope_destroyed` if erasure races the check) |
 | `AshVault.Errors.ProviderUnavailable` | the key provider could not answer. Retry. Never reported as invalid, never as valid |
+| `AshVault.Errors.ProviderForbidden` | the key provider refused the request (`403`). A configuration fault; do not retry. Never reported as invalid, never as valid |
 
 Errors never carry the token, its signature or its identity.
 
