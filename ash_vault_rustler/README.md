@@ -306,6 +306,15 @@ either needs `--force`.
 
 ### Releasing a precompiled NIF
 
+> #### Normally automated {: .info}
+>
+> `.github/workflows/release.yml` publishes `ash_vault` and `ash_vault_rustler` to Hex
+> together from one `v<version>` tag, with both `mix.exs` versions bumped to match. It
+> builds the NIF release when missing, regenerates the checksum against it, publishes the
+> parent, then this package against the parent *from Hex* (`ASH_VAULT_RUSTLER_HEX=1`),
+> and opens a PR committing any new checksum file. The manual steps below are what it
+> does, for when it cannot.
+
 For the maintainer, in order. Steps 1-3 are mechanical; **step 5 is the irreversible
 one**, and it is last on purpose.
 

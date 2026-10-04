@@ -25,6 +25,15 @@ on:
         description: "Version to build artifacts for, without the leading v (e.g. 0.1.0)"
         required: true
         type: string
+  # Called by `release.yml`, which publishes both Hex packages from one `v*` tag. The
+  # caller's ref is `v<version>`, not `ash_vault_rustler-v<version>`, so the version
+  # cannot be parsed from the ref and the release tag has to be named explicitly.
+  workflow_call:
+    inputs:
+      version:
+        description: "Version to build artifacts for, without the leading v"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -57,9 +66,10 @@ jobs:
         id: version
         shell: bash
         run: |
-          # ash_vault_rustler-v1.2.3 -> 1.2.3; workflow_dispatch passes it directly.
-          if [ -n "${{ github.event.inputs.version }}" ]; then
-            version="${{ github.event.inputs.version }}"
+          # ash_vault_rustler-v1.2.3 -> 1.2.3; workflow_dispatch and workflow_call pass it
+          # directly.
+          if [ -n "${{ inputs.version }}" ]; then
+            version="${{ inputs.version }}"
           else
             version="${GITHUB_REF_NAME#ash_vault_rustler-v}"
           fi
@@ -128,4 +138,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
+          # Explicit, not the triggering ref: `AshVaultRustler.Native`'s `base_url`
+          # downloads from `ash_vault_rustler-v<version>` whichever tag started the run.
+          tag_name: ash_vault_rustler-v${{ steps.version.outputs.version }}
           files: artifacts/${{ steps.package.outputs.artifact }}

@@ -1,0 +1,232 @@
+# Publish `ash_vault` and `ash_vault_rustler` to Hex together, from one tag:
+#
+#     git tag v0.1.0 && git push origin v0.1.0
+#
+# The two packages are versioned in lockstep. The tag, `version:` in `mix.exs` and
+# `@version` in `ash_vault_rustler/mix.exs` must all agree, or nothing is published.
+#
+# Order matters, and every step gates the next:
+#
+#   1. prepare — check the versions; see whether the NIF release already exists
+#   2. test    — both packages, no services
+#   3. nif     — build and attach the six NIF artifacts, only if the release is missing.
+#                Never rebuild an existing one: builds are not bit-reproducible, so new
+#                artifacts would silently invalidate the published checksums.
+#   4. publish — ash_vault, then regenerate the NIF checksum against the live release,
+#                then ash_vault_rustler against ash_vault *from Hex*
+#
+# `workflow_dispatch` is a dry run by default: it tests and builds `ash_vault` with
+# `mix hex.publish --dry-run`. The rustler half cannot be dry-run before `ash_vault`
+# exists on Hex, because its Hex dependency does not resolve yet.
+#
+# Needs the `HEX_API_KEY` repository secret (`mix hex.user key generate`).
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and check only; publish nothing"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  OTP_VERSION: "28"
+  ELIXIR_VERSION: "1.18"
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      nif_release_exists: ${{ steps.nif.outputs.exists }}
+      dry_run: ${{ steps.mode.outputs.dry_run }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read and check the versions
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          parent=$(sed -nE 's/^ *version: "([^"]+)",?$/\1/p' mix.exs | head -1)
+          rustler=$(sed -nE 's/^ *@version "([^"]+)"$/\1/p' ash_vault_rustler/mix.exs | head -1)
+          echo "ash_vault=${parent} ash_vault_rustler=${rustler}"
+          if [ -z "$parent" ] || [ "$parent" != "$rustler" ]; then
+            echo "::error::versions disagree: ash_vault=${parent}, ash_vault_rustler=${rustler}"
+            exit 1
+          fi
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "v${parent}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match version ${parent}"
+            exit 1
+          fi
+          echo "version=${parent}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish or dry run
+        id: mode
+        shell: bash
+        run: |
+          # A tag push publishes. A manual run publishes only when dry_run is unticked.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.dry_run }}" != "false" ]; then
+            echo "dry_run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "dry_run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Does the NIF release already exist?
+        id: nif
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="ash_vault_rustler-v${{ steps.version.outputs.version }}"
+          count=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets | length' 2>/dev/null || echo 0)
+          echo "${tag}: ${count} assets"
+          if [ "$count" -ge 6 ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          elif [ "$count" -gt 0 ]; then
+            # A partial release is a failed earlier run. Rebuilding into it would mix
+            # artifacts from two builds; a human has to look.
+            echo "::error::${tag} has ${count} of 6 assets; fix or delete it by hand"
+            exit 1
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  test:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: ash_vault
+        run: |
+          mix deps.get
+          mix test
+
+      - name: ash_vault_rustler
+        working-directory: ash_vault_rustler
+        env:
+          # Build the NIF from source: the release for this version may not exist yet.
+          ASH_VAULT_RUSTLER_BUILD: "1"
+        run: |
+          mix deps.get
+          mix test
+
+  nif:
+    needs: [prepare, test]
+    if: needs.prepare.outputs.nif_release_exists != 'true' && needs.prepare.outputs.dry_run != 'true'
+    uses: ./.github/workflows/nif-release.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+    secrets: inherit
+
+  publish:
+    needs: [prepare, test, nif]
+    # `nif` is skipped when the release already exists or on a dry run; both are fine.
+    if: >-
+      always() &&
+      needs.prepare.result == 'success' &&
+      needs.test.result == 'success' &&
+      (needs.nif.result == 'success' || needs.nif.result == 'skipped')
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      DRY_RUN: ${{ needs.prepare.outputs.dry_run }}
+      HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Check the Hex key
+        if: env.DRY_RUN != 'true'
+        run: |
+          if [ -z "$HEX_API_KEY" ]; then
+            echo "::error::HEX_API_KEY secret is not set"
+            exit 1
+          fi
+
+      - name: Publish ash_vault
+        run: |
+          mix deps.get
+          if [ "$DRY_RUN" = "true" ]; then
+            mix hex.publish --dry-run --yes
+          else
+            mix hex.publish --yes
+          fi
+
+      - name: Regenerate the NIF checksum against the live release
+        if: env.DRY_RUN != 'true'
+        id: checksum
+        working-directory: ash_vault_rustler
+        env:
+          # Compile from source so a stale checksum file cannot fail the compile that
+          # the checksum task itself needs.
+          ASH_VAULT_RUSTLER_BUILD: "1"
+        run: |
+          set -euo pipefail
+          mix deps.get
+          mix nif.checksum
+          if git diff --quiet -- checksum-Elixir.AshVaultRustler.Native.exs; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          elif [ "${{ needs.prepare.outputs.nif_release_exists }}" = "true" ]; then
+            # The artifacts were already published and checksummed. A different
+            # checksum now means the release assets changed underneath consumers.
+            echo "::error::NIF release assets no longer match the committed checksums"
+            git diff -- checksum-Elixir.AshVaultRustler.Native.exs
+            exit 1
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish ash_vault_rustler
+        if: env.DRY_RUN != 'true'
+        working-directory: ash_vault_rustler
+        env:
+          # Depend on ash_vault from Hex, not `path: ".."`; Hex refuses path deps.
+          ASH_VAULT_RUSTLER_HEX: "1"
+        run: |
+          set -euo pipefail
+          rm -rf deps _build mix.lock
+          # The Hex index can lag a fresh publish by a little.
+          for attempt in 1 2 3 4 5 6; do
+            if mix deps.get; then break; fi
+            [ "$attempt" = 6 ] && exit 1
+            echo "ash_vault ${VERSION} not resolvable yet; retrying in 20s"
+            sleep 20
+          done
+          mix hex.publish --yes
+
+      - name: Commit the new checksum file
+        if: env.DRY_RUN != 'true' && steps.checksum.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          branch="release/nif-checksum-v${VERSION}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add ash_vault_rustler/checksum-Elixir.AshVaultRustler.Native.exs
+          git commit -m "chore: NIF checksums for v${VERSION}"
+          git push origin "$branch"
+          gh pr create --base main --head "$branch" \
+            --title "chore: NIF checksums for v${VERSION}" \
+            --body "Checksums of the \`ash_vault_rustler-v${VERSION}\` release assets, as shipped in the \`ash_vault_rustler\` ${VERSION} Hex package."

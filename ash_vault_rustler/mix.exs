@@ -34,9 +34,24 @@ defmodule AshVaultRustler.MixProject do
   defp elixirc_paths(:test), do: ["lib", "test/support", "test/parent_support"]
   defp elixirc_paths(_env), do: ["lib"]
 
+  # Inside this repository the parent sits at `..`, so develop against it directly.
+  # Anywhere else — including a consumer's `deps/ash_vault_rustler`, where Mix evaluates
+  # this file too — take it from Hex. Hex refuses to publish a path dependency, so the
+  # release workflow sets `ASH_VAULT_RUSTLER_HEX=1` to force the Hex form in-repo. Both
+  # packages are released in lockstep from one `v*` tag, hence the patch-level pin.
+  defp ash_vault_dep do
+    in_repo? = File.exists?(Path.expand("../mix.exs", __DIR__))
+
+    if in_repo? and System.get_env("ASH_VAULT_RUSTLER_HEX") not in ["1", "true"] do
+      {:ash_vault, path: ".."}
+    else
+      {:ash_vault, "~> #{@version}"}
+    end
+  end
+
   defp deps do
     [
-      {:ash_vault, path: ".."},
+      ash_vault_dep(),
       # Not `optional: true` even though only one of the two is used per build: the
       # `use` in `AshVaultRustler.Native` is chosen at COMPILE time from an environment
       # variable, so whichever one the switch picks has to already be there. See
