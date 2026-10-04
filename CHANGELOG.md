@@ -34,3 +34,8 @@ All notable changes to AshVault are recorded here. The format follows
 - Existing key providers, vaults and configuration keep working unchanged. The
   arity-1 `current_key/1`, `get_key/2` and `rotate/1` callbacks are the `:data` purpose.
   A third-party provider without `purposes/0` serves `:data` only.
+- A provider that already defines a `current_key/2`, `get_key/3` or `rotate/2` helper
+  (such as a named-server form) and uses `@impl` elsewhere will now get a missing-`@impl`
+  warning for it, because those arities are now optional callbacks. Mark them
+  `@impl AshVault.KeyProvider`, or rename them. Unless the provider also defines
+  `purposes/0`, AshVault never calls them as purpose callbacks.
