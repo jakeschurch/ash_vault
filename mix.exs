@@ -15,7 +15,24 @@ defmodule AshVault.MixProject do
       description:
         "Per-tenant encrypted attributes for Ash resources, with cryptographic erasure.",
       source_url: "https://github.com/jakeschurch/ash_vault",
+      package: package(),
       docs: docs()
+    ]
+  end
+
+  defp package do
+    [
+      links: %{
+        "Source" => "https://github.com/jakeschurch/ash_vault",
+        "Changelog" => "https://github.com/jakeschurch/ash_vault/blob/main/CHANGELOG.md"
+      },
+      # `documentation/internal/` is deliberately absent: design specs and review notes,
+      # not shipped guides.
+      files: ~w(
+        lib .formatter.exs mix.exs README* LICENSE* CHANGELOG*
+        usage-rules.md usage-rules
+        documentation/tutorials documentation/topics documentation/how-to documentation/adr
+      )
     ]
   end
 
@@ -177,7 +194,8 @@ defmodule AshVault.MixProject do
       {:cloak, "~> 1.1", only: [:dev, :test]},
       {:req, "~> 0.5"},
       {:telemetry, "~> 1.0"},
-      {:ex_doc, ">= 0.0.0", only: :dev, runtime: false}
+      {:ex_doc, ">= 0.0.0", only: :dev, runtime: false},
+      {:usage_rules, "~> 1.2", only: :dev, runtime: false}
     ]
   end
 end
