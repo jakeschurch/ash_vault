@@ -5,7 +5,16 @@ All notable changes to AshVault are recorded here. The format follows
 
 ## Unreleased
 
+## 0.1.0 - 2026-10-04
+
+First release, published together with `ash_vault_rustler` 0.1.0.
+
 ### Added
+
+- Usage rules for coding agents: `usage-rules.md` and `usage-rules/*.md`, shipped in the
+  package for [`usage_rules`](https://hex.pm/packages/usage_rules) to sync into an
+  application's agent instructions.
+- Released under the MIT license.
 
 - Macaroons. A `macaroon` entity in the `ash_vault` section declares an attenuable
   bearer token naming one record (`prefix`, `identity`, `revoked_when`, `default_ttl`,
