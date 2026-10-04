@@ -36,17 +36,11 @@ defmodule AshVaultRustler.ClusterEvictionPeerTest do
         :ok
 
       {:error, reason} ->
-        # Never a silent skip: if distribution cannot start here, the four lines stay
-        # uncovered and whoever reads this output has to know that.
-        {:ok, skip_reason: reason}
-    end
-  end
-
-  setup context do
-    if reason = context[:skip_reason] do
-      {:ok, skip: "distribution unavailable: #{inspect(reason)}"}
-    else
-      :ok
+        # Fail, never skip: if distribution cannot start here, the four lines stay
+        # uncovered and whoever reads this output has to know that. (ExUnit has no way
+        # to skip from a setup callback; returning `skip:` there used to run every test
+        # on a dead node, which failed with a bare `:not_alive` and no explanation.)
+        raise "distribution unavailable, cannot run the cluster suite: #{inspect(reason)}"
     end
   end
 
@@ -58,6 +52,12 @@ defmodule AshVaultRustler.ClusterEvictionPeerTest do
     else
       name = :"ashvault_primary_#{System.unique_integer([:positive])}@127.0.0.1"
 
+      # `:net_kernel.start/1` registers with epmd but, unlike `elixir --sname`, never
+      # starts it. On a machine where nothing else has, registration fails and this
+      # suite could not run under a plain `mix test`. `-daemon` is a no-op if epmd is
+      # already up.
+      start_epmd()
+
       case :net_kernel.start([name, :longnames]) do
         {:ok, _pid} ->
           Node.set_cookie(:ashvault_cluster_eviction_cookie)
@@ -67,6 +67,15 @@ defmodule AshVaultRustler.ClusterEvictionPeerTest do
           {:error, reason}
       end
     end
+  end
+
+  defp start_epmd do
+    epmd =
+      System.find_executable("epmd") ||
+        Path.join([:code.root_dir(), "erts-#{:erlang.system_info(:version)}", "bin", "epmd"])
+
+    {_output, 0} = System.cmd(epmd, ["-daemon"], stderr_to_stdout: true)
+    :ok
   end
 
   # The stub is the only module the peer needs. Pushing the loaded beam directly avoids
