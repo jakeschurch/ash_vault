@@ -7,6 +7,21 @@ All notable changes to AshVault are recorded here. The format follows
 
 ### Added
 
+- `encrypt :field, legacy: Type | {Type, constraints}`: expand mode for an attribute
+  already stored by another Ash type. The attribute keeps its column (retyped to the
+  legacy type); AshVault adds the copy `encrypted_<stored_as>` (default `vault_<field>`),
+  dual-writes it from a global change on every create and update that changes the
+  attribute (atomic paths included), adds it to upserts that rewrite the attribute, and
+  backfills it from the attribute. Values are normalized through the legacy type. See
+  [Migrating with `legacy:`](documentation/topics/legacy-expand.md).
+- `decrypt_for: [...]` on `encrypt`: SimpleCheck modules, `{check, opts}` (with optional
+  `only: [actions]`) or remote `&Mod.fun/1` predicates. With `legacy:`, admitted actors
+  read the decrypted copy (fail-closed) and everyone else the legacy value. Without it,
+  the decrypt calculation returns `%Ash.ForbiddenField{}` to everyone it does not admit.
+- Verifier errors for `atomic_update/2` on a `legacy:` attribute, for an upsert that
+  rewrites a `legacy:` attribute but keeps its ciphertext, and for `stored_as:` without
+  `legacy:`.
+
 - `AshVault.Errors.ProviderForbidden`: the key store answered `403`. It carries the
   refused `:operation` (`:encrypt`, `:hmac`, `:create_key`, `:read_key`,
   `:read_tombstone`, ...) and never the transit key name.

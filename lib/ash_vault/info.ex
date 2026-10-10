@@ -40,7 +40,41 @@ defmodule AshVault.Info do
       |> Enum.uniq()
       |> Enum.map(&%Encrypted{name: &1})
 
-    entities ++ sugar
+    Enum.map(entities, &storage_field/1) ++ sugar
+  end
+
+  @doc """
+  The `encrypt ..., legacy: ...` entities of a resource, as declared (named after the
+  legacy attribute).
+  """
+  @spec legacy_fields(module() | Spark.Dsl.t()) :: [Encrypted.t()]
+  def legacy_fields(resource_or_dsl) do
+    resource_or_dsl |> encrypt_entities() |> Enum.reject(&is_nil(&1.legacy))
+  end
+
+  @doc "The name a `legacy:` field's AshVault copy is stored under."
+  @spec stored_as(Encrypted.t()) :: atom()
+  def stored_as(%Encrypted{stored_as: nil, name: name}), do: :"vault_#{name}"
+  def stored_as(%Encrypted{stored_as: stored_as}), do: stored_as
+
+  @doc "A `legacy:` field's legacy type and constraints."
+  @spec legacy_type(Encrypted.t()) :: {module(), keyword()}
+  def legacy_type(%Encrypted{legacy: {type, constraints}}), do: {type, constraints}
+  def legacy_type(%Encrypted{legacy: type}), do: {type, []}
+
+  defp storage_field(%Encrypted{legacy: nil} = field), do: field
+
+  defp storage_field(%Encrypted{} = field) do
+    %Encrypted{
+      field
+      | name: stored_as(field),
+        backfill_from: field.name,
+        legacy_of: field.name,
+        legacy: nil,
+        stored_as: nil,
+        searchable?: false,
+        unique?: false
+    }
   end
 
   @doc """

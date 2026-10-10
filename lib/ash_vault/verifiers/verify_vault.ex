@@ -94,7 +94,8 @@ defmodule AshVault.Verifiers.VerifyVault do
          :ok <- verify_backfill_from(dsl, module),
          :ok <- verify_searchable(dsl, module),
          :ok <- verify_no_plaintext_identity(dsl, module),
-         :ok <- verify_no_plaintext_custom_index(dsl, module) do
+         :ok <- verify_no_plaintext_custom_index(dsl, module),
+         :ok <- verify_legacy(dsl, module) do
       verify_key_lifecycle(dsl, module)
     end
   end
@@ -416,6 +417,90 @@ defmodule AshVault.Verifiers.VerifyVault do
       :ok
     end
   end
+
+  # `legacy:` (expand) fields. The dual-write is a global change on every create and
+  # update, so the remaining ways an action could move the legacy column without moving
+  # the AshVault copy are the ones it cannot see: an expression write (`atomic_update/2`)
+  # and an upsert that overwrites one column on conflict but not the other.
+  defp verify_legacy(dsl, module) do
+    with :ok <- verify_legacy_options(dsl, module) do
+      dsl
+      |> AshVault.Info.legacy_fields()
+      |> Enum.reduce_while(:ok, fn field, :ok ->
+        case verify_legacy_actions(dsl, module, field) do
+          :ok -> {:cont, :ok}
+          error -> {:halt, error}
+        end
+      end)
+    end
+  end
+
+  defp verify_legacy_options(dsl, module) do
+    dsl
+    |> AshVault.Info.encrypt_entities()
+    |> Enum.find(&(is_nil(&1.legacy) and not is_nil(&1.stored_as)))
+    |> case do
+      nil ->
+        :ok
+
+      field ->
+        error(
+          module,
+          [:ash_vault, :encrypt, field.name],
+          "`stored_as:` is only supported together with `legacy:`."
+        )
+    end
+  end
+
+  defp verify_legacy_actions(dsl, module, field) do
+    encrypted = AshVault.encrypted_field_name(AshVault.Info.stored_as(field))
+
+    dsl
+    |> Ash.Resource.Info.actions()
+    |> Enum.find_value(:ok, fn action ->
+      cond do
+        expression_write?(action, field.name) ->
+          error(
+            module,
+            [:actions, action.name],
+            "#{inspect(action.name)} writes #{inspect(field.name)} with `atomic_update/2`. " <>
+              "Its AshVault copy cannot be encrypted from an expression; set a value instead."
+          )
+
+        stale_upsert?(action, field.name, encrypted) ->
+          error(
+            module,
+            [:actions, action.name],
+            "#{inspect(action.name)} upserts #{inspect(field.name)} but keeps " <>
+              "#{inspect(encrypted)} on conflict, so the AshVault copy would go stale. " <>
+              "List #{inspect(encrypted)} wherever #{inspect(field.name)} is upserted."
+          )
+
+        true ->
+          nil
+      end
+    end)
+  end
+
+  defp expression_write?(%{changes: changes}, name) when is_list(changes) do
+    Enum.any?(changes, fn
+      %{change: {Ash.Resource.Change.Atomic, opts}} -> opts[:attribute] == name
+      _ -> false
+    end)
+  end
+
+  defp expression_write?(_action, _name), do: false
+
+  defp stale_upsert?(%{type: :create, upsert?: true, upsert_fields: fields}, name, encrypted) do
+    case fields do
+      list when is_list(list) -> name in list and encrypted not in list
+      {:replace, list} -> name in list and encrypted not in list
+      {:replace_all_except, list} -> name not in list and encrypted in list
+      _ -> false
+    end
+  end
+
+  defp stale_upsert?(_action, _name, _encrypted), do: false
 
   defp error(module, path, message) do
     {:error, Spark.Error.DslError.exception(module: module, path: path, message: message)}

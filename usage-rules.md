@@ -54,6 +54,24 @@ Add `:ash_vault` to `import_deps` in `.formatter.exs`.
   Identities or custom indexes naming an encrypted field are a compile-time DSL error.
 - **Do not** reference `:email` in `upsert_fields`; use `:encrypted_email` or omit it.
 
+## Migrating an already-encrypted attribute: `legacy:`
+
+```elixir
+attribute :api_key, :binary, public?: true, sensitive?: true
+
+encrypt :api_key, legacy: MyApp.Encrypted.Binary, decrypt_for: [MyApp.Checks.System]
+```
+
+- Declare the attribute with the type of the AshVault copy; `legacy:` names the type its
+  existing column is stored with. Do NOT declare the `vault_<field>` sibling yourself.
+- Never add per-action dual-write changes: every create/update that changes the field is
+  mirrored automatically, atomically where the action is atomic.
+- Do not write the field with `atomic_update/2`, and do not exclude
+  `encrypted_vault_<field>` from an upsert that rewrites the field; both are compile errors.
+- `decrypt_for` decides who reads the AshVault copy; use `{check, only: [action]}` to
+  confine a broad actor (a system actor) to one read action.
+- Backfill/verify the copy by its stored name: `--field vault_<field>`.
+
 ## Looking up by value: searchable fields
 
 The only way to find rows by an encrypted value is opting in per field:
