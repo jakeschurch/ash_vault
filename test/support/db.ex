@@ -109,6 +109,19 @@ defmodule AshVault.Test.Db do
       ON dedupe_users (org_id, email_lookup)
     """,
     """
+    CREATE TABLE IF NOT EXISTS legacy_accounts (
+      id uuid PRIMARY KEY,
+      org_id uuid NOT NULL,
+      name text NOT NULL,
+      token bytea,
+      encrypted_vault_token bytea
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS legacy_accounts_unique_name_index
+      ON legacy_accounts (org_id, name)
+    """,
+    """
     CREATE TABLE IF NOT EXISTS acceptance_users (
       id uuid PRIMARY KEY,
       org_id uuid NOT NULL,
@@ -161,7 +174,7 @@ defmodule AshVault.Test.Db do
     _ = database()
 
     AshVault.Test.Repo.query!(
-      "TRUNCATE users, contacts, legacy_users, organizations, acceptance_users, search_users, dedupe_users"
+      "TRUNCATE users, contacts, legacy_users, legacy_accounts, organizations, acceptance_users, search_users, dedupe_users"
     )
 
     :ok

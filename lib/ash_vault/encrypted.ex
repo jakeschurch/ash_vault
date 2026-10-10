@@ -18,6 +18,12 @@ defmodule AshVault.Encrypted do
   `:pre_check_with` is the domain to check that identity against in a `before_action`
   hook, for a data layer that cannot enforce uniqueness itself. Required there, refused
   nowhere, and off by default everywhere — it costs a read on every write.
+
+  `:legacy`, `:stored_as` and `:decrypt_for` describe expand mode; see `AshVault.Dsl`.
+  `AshVault.Info.encrypted_fields/1` presents a `legacy:` entity as the field that is
+  actually encrypted — named `stored_as`, with `backfill_from` the legacy attribute and
+  `:legacy_of` naming it — so the write path, the backfill and the key tooling treat it
+  like any other encrypted field.
   """
 
   defstruct [
@@ -25,6 +31,10 @@ defmodule AshVault.Encrypted do
     :encrypt_nil?,
     :backfill_from,
     :pre_check_with,
+    :legacy,
+    :stored_as,
+    :decrypt_for,
+    :legacy_of,
     searchable?: false,
     unique?: false,
     normalize: :none,
@@ -36,6 +46,10 @@ defmodule AshVault.Encrypted do
           encrypt_nil?: boolean() | nil,
           backfill_from: atom() | nil,
           pre_check_with: module() | nil,
+          legacy: module() | {module(), keyword()} | nil,
+          stored_as: atom() | nil,
+          decrypt_for: [term()] | nil,
+          legacy_of: atom() | nil,
           searchable?: boolean(),
           unique?: boolean(),
           normalize: AshVault.Lookup.normalize()

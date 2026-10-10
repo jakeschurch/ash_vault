@@ -37,6 +37,26 @@ defmodule AshVault.Calculations.Decrypt do
   def calculate([], _opts, _context), do: {:ok, []}
 
   def calculate([%resource{} | _] = records, opts, context) do
+    if decrypt_allowed?(opts[:decrypt_for], context) do
+      decrypt(records, resource, opts, context)
+    else
+      {:ok, Enum.map(records, fn _ -> forbidden(opts[:plain_field]) end)}
+    end
+  end
+
+  # `decrypt_for:` on a field without `legacy:`: everyone it does not admit gets the
+  # field redacted, never decrypted. An unauthorized internal read (`authorize?: false`)
+  # is admitted, as Ash admits it everywhere else.
+  defp decrypt_allowed?(nil, _context), do: true
+
+  defp decrypt_allowed?(decrypt_for, context) do
+    Map.get(context, :authorize?) == false or
+      AshVault.DecryptFor.allowed?(decrypt_for, Map.get(context, :actor), nil)
+  end
+
+  defp forbidden(field), do: %Ash.ForbiddenField{field: field, type: :calculation}
+
+  defp decrypt(records, resource, opts, context) do
     plain_field = opts[:plain_field]
     encrypted_field = opts[:field]
 

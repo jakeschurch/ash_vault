@@ -47,6 +47,7 @@ defmodule AshVault.MixProject do
         "documentation/topics/rotation.md",
         "documentation/topics/crypto-erasure.md",
         "documentation/topics/migrating-from-plaintext.md",
+        "documentation/topics/legacy-expand.md",
         "documentation/topics/two-vaults.md",
         "documentation/topics/searchable-fields.md",
         "documentation/topics/key-purposes-and-macs.md",
@@ -80,6 +81,9 @@ defmodule AshVault.MixProject do
         ],
         "Extension internals": [
           AshVault.Changes.Encrypt,
+          AshVault.Changes.MirrorLegacy,
+          AshVault.Preparations.PreferVaultCopy,
+          AshVault.DecryptFor,
           AshVault.Calculations.Decrypt,
           AshVault.Actions.RotateKey,
           AshVault.Actions.DestroyKeys,

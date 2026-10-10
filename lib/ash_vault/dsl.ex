@@ -62,6 +62,40 @@ defmodule AshVault.Dsl do
       backfill_from: [
         type: :atom,
         doc: "Existing plaintext attribute to read during a migration backfill."
+      ],
+      legacy: [
+        type: {:or, [:atom, {:tuple, [:atom, :keyword_list]}]},
+        doc: """
+        Expand mode for migrating an attribute that is already stored by another Ash type
+        (an app-level encrypted type, say) to AshVault without a data migration. The
+        attribute keeps its column, now typed with this `legacy` type (`Type` or
+        `{Type, constraints}`); the type the attribute was *declared* with becomes the type
+        of its AshVault copy, stored beside it in `encrypted_<stored_as>`. Every create and
+        update that changes the attribute writes both copies, reads by `decrypt_for` actors
+        prefer the AshVault copy, and `AshVault.Backfill` fills old rows. See
+        [Migrating with `legacy:`](legacy-expand.md).
+        """
+      ],
+      stored_as: [
+        type: :atom,
+        doc: """
+        With `legacy:`, the name the AshVault copy is stored and bound under: the
+        ciphertext column is `encrypted_<stored_as>` and the AEAD associated data names
+        `stored_as`. Defaults to `vault_<name>`. Changing it after rows exist makes them
+        undecryptable.
+        """
+      ],
+      decrypt_for: [
+        type: {:list, :any},
+        doc: """
+        Who may have the field decrypted: `Ash.Policy.SimpleCheck` modules, `{check,
+        opts}`, or a remote `&Mod.fun/1` actor predicate. An entry `{check, only: [actions]}` matches
+        only on those read actions. With `legacy:`, matching actors read the AshVault copy
+        in place of the legacy value; everyone else keeps the legacy value (subject to field
+        policies). Without `legacy:`, the decrypt calculation answers
+        `%Ash.ForbiddenField{}` to everyone else. Unset: no restriction (and, with
+        `legacy:`, no swap).
+        """
       ]
     ]
   }

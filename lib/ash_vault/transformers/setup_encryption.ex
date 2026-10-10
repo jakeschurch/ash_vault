@@ -64,6 +64,16 @@ defmodule AshVault.Transformers.SetupEncryption do
   @impl Spark.Dsl.Transformer
   def transform(dsl) do
     module = Transformer.get_persisted(dsl, :module)
+
+    verify_no_duplicates!(module, AshVault.Info.encrypt_entities(dsl))
+
+    case setup_legacy(dsl, module) do
+      {:ok, dsl} -> setup_fields(dsl, module)
+      {:error, error} -> {:error, error}
+    end
+  end
+
+  defp setup_fields(dsl, module) do
     fields = AshVault.Info.encrypted_fields(dsl)
 
     verify_no_duplicates!(module, fields)
@@ -83,8 +93,7 @@ defmodule AshVault.Transformers.SetupEncryption do
       |> Builder.add_calculation(
         attribute.name,
         attribute.type,
-        {AshVault.Calculations.Decrypt,
-         [field: AshVault.encrypted_field_name(attribute.name), plain_field: attribute.name]},
+        {AshVault.Calculations.Decrypt, decrypt_opts(field, attribute)},
         [
           public?: attribute.public?,
           constraints: attribute.constraints,
@@ -104,6 +113,166 @@ defmodule AshVault.Transformers.SetupEncryption do
     end)
     |> add_decrypt_by_default()
     |> add_key_lifecycle_actions()
+  end
+
+  defp decrypt_opts(%{legacy_of: nil, decrypt_for: [_ | _] = decrypt_for}, attribute) do
+    decrypt_opts(%{}, attribute) ++ [decrypt_for: decrypt_for]
+  end
+
+  defp decrypt_opts(_field, attribute) do
+    [field: AshVault.encrypted_field_name(attribute.name), plain_field: attribute.name]
+  end
+
+  # -- legacy (expand) fields --------------------------------------------------
+
+  # A `legacy:` field keeps its attribute — retyped to the legacy type, so its column and
+  # every reader stay exactly as they were — and gains a private sibling attribute named
+  # `stored_as`, of the type the attribute was declared with. `setup_fields/2` then
+  # encrypts that sibling like any other field (`AshVault.Info.encrypted_fields/1` presents
+  # it under its own name), which is what keeps the ciphertext column and the AEAD binding
+  # identical to a hand-built sibling of the same name. Dual-write and dual-read are a
+  # global change and a global preparation, so no action can opt out of them.
+  defp setup_legacy(dsl, module) do
+    dsl
+    |> AshVault.Info.legacy_fields()
+    |> Enum.reduce_while({:ok, dsl}, fn field, {:ok, dsl} ->
+      case setup_legacy_field(dsl, module, field) do
+        {:ok, dsl} -> {:cont, {:ok, dsl}}
+        {:error, error} -> {:halt, {:error, error}}
+      end
+    end)
+  end
+
+  defp setup_legacy_field(dsl, module, field) do
+    attribute = fetch_legacy_attribute!(module, dsl, field)
+    stored_as = AshVault.Info.stored_as(field)
+    {legacy_type, legacy_constraints} = AshVault.Info.legacy_type(field)
+    legacy_type = Ash.Type.get_type(legacy_type)
+
+    legacy_constraints =
+      case Ash.Type.init(legacy_type, legacy_constraints) do
+        {:ok, constraints} ->
+          constraints
+
+        {:error, error} ->
+          raise_legacy!(module, field, "invalid legacy constraints: #{inspect(error)}")
+      end
+
+    dsl
+    |> Transformer.replace_entity(
+      [:attributes],
+      %{attribute | type: legacy_type, constraints: legacy_constraints},
+      &(&1.name == attribute.name)
+    )
+    |> Builder.add_attribute(stored_as, attribute.type,
+      constraints: attribute.constraints,
+      allow_nil?: true,
+      sensitive?: true,
+      public?: false,
+      description: "AshVault copy of #{attribute.name}"
+    )
+    |> Builder.add_change(
+      {AshVault.Changes.MirrorLegacy, field: attribute.name, vault_field: stored_as},
+      on: [:create, :update]
+    )
+    |> add_prefer_vault_copy(field, stored_as)
+    |> add_upsert_fields(attribute.name, AshVault.encrypted_field_name(stored_as))
+  end
+
+  defp add_prefer_vault_copy({:ok, dsl}, %{decrypt_for: [_ | _] = decrypt_for} = field, stored_as) do
+    Builder.add_preparation(
+      dsl,
+      {AshVault.Preparations.PreferVaultCopy,
+       field: field.name, vault_field: stored_as, decrypt_for: decrypt_for}
+    )
+  end
+
+  defp add_prefer_vault_copy(other, _field, _stored_as), do: other
+
+  # An upsert lists the columns it overwrites on conflict. One that rewrites the legacy
+  # column but not the ciphertext would leave the AshVault copy holding the previous
+  # value while the legacy column moves on — the stale-copy bug this mode exists to make
+  # impossible — so the ciphertext column is added wherever the legacy one is listed.
+  defp add_upsert_fields({:ok, dsl}, name, encrypted) do
+    dsl
+    |> Ash.Resource.Info.actions()
+    |> Enum.filter(&(&1.type == :create and &1.upsert?))
+    |> Enum.reduce({:ok, dsl}, fn action, {:ok, dsl} ->
+      case with_ciphertext(action.upsert_fields, name, encrypted) do
+        :unchanged ->
+          {:ok, dsl}
+
+        upsert_fields ->
+          {:ok,
+           Transformer.replace_entity(
+             dsl,
+             [:actions],
+             %{action | upsert_fields: upsert_fields},
+             &(&1.name == action.name)
+           )}
+      end
+    end)
+  end
+
+  defp add_upsert_fields(other, _name, _encrypted), do: other
+
+  defp with_ciphertext(fields, name, encrypted) when is_list(fields) do
+    if name in fields and encrypted not in fields, do: fields ++ [encrypted], else: :unchanged
+  end
+
+  defp with_ciphertext({:replace, fields}, name, encrypted) when is_list(fields) do
+    case with_ciphertext(fields, name, encrypted) do
+      :unchanged -> :unchanged
+      fields -> {:replace, fields}
+    end
+  end
+
+  defp with_ciphertext(_fields, _name, _encrypted), do: :unchanged
+
+  defp fetch_legacy_attribute!(module, dsl, field) do
+    attribute = Ash.Resource.Info.attribute(dsl, field.name)
+    stored_as = AshVault.Info.stored_as(field)
+
+    cond do
+      is_nil(attribute) ->
+        raise_legacy!(module, field, "No attribute called #{inspect(field.name)} found")
+
+      attribute.primary_key? ->
+        raise_legacy!(
+          module,
+          field,
+          "cannot encrypt primary key attribute #{inspect(field.name)}"
+        )
+
+      field.searchable? or field.unique? ->
+        raise_legacy!(module, field, "`legacy:` fields cannot be `searchable?` or `unique?`")
+
+      not is_nil(field.backfill_from) ->
+        raise_legacy!(
+          module,
+          field,
+          "`legacy:` already backfills from #{inspect(field.name)}; drop `backfill_from:`"
+        )
+
+      Ash.Resource.Info.attribute(dsl, stored_as) || Ash.Resource.Info.calculation(dsl, stored_as) ->
+        raise_legacy!(
+          module,
+          field,
+          "#{inspect(stored_as)} already exists. With `legacy:`, AshVault owns the " <>
+            "AshVault copy of #{inspect(field.name)}; remove the hand-declared " <>
+            "#{inspect(stored_as)} attribute."
+        )
+
+      true ->
+        attribute
+    end
+  end
+
+  defp raise_legacy!(module, field, message) do
+    raise Spark.Error.DslError,
+      module: module,
+      path: [:ash_vault, :encrypt, field.name],
+      message: message
   end
 
   defp verify_no_duplicates!(module, fields) do

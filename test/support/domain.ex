@@ -21,5 +21,9 @@ defmodule AshVault.Test.Domain do
     resource(AshVault.Test.DedupeUser)
     resource(AshVault.Test.EtsNoLookupDoc)
     resource(AshVault.Test.EtsNonBinaryScopeDoc)
+    resource(AshVault.Test.EtsLegacyAccount)
+    resource(AshVault.Test.EtsLegacyUpsert)
+    resource(AshVault.Test.PgLegacyAccount)
+    resource(AshVault.Test.EtsDecryptForDoc)
   end
 end
