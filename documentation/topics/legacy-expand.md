@@ -53,6 +53,15 @@ copies, and `mix ash_vault.verify` compares like with like.
 - Everyone else reads the legacy value, subject to your field policies.
 - An entry `{check, only: [actions]}` matches only on those read actions, so a broadly
   read resource can decrypt for its system actor on one dedicated action only.
+- The sibling load uses that same action and its arguments, actor, tenant and public
+  context on a fresh query. Native preparations and field authorization run again;
+  existing hooks and private execution state are not reused. The dual-read preparation
+  suppresses its own nested reload, so each selected field loads its sibling once per
+  tenant chunk. Keep preparations safe to repeat.
+- The sibling load remains `query_for: :load`, operating over already fetched records.
+  Policies that require a fresh data-layer read can deny that lifecycle. Requesting the
+  sibling calculation on the outer query does not avoid this nested load: runtime
+  calculations finish after the legacy preparation's read hook.
 - Skipped: actor-less reads (so verify compares the real legacy column), the row query
   of a bulk update or destroy, and queries that do not select the attribute.
 

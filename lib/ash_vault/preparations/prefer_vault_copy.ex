@@ -10,6 +10,11 @@ defmodule AshVault.Preparations.PreferVaultCopy do
   never answered from the legacy copy. Every other actor keeps the legacy value, subject
   to the resource's field policies.
 
+  Sibling loads use a fresh query for the original read action and arguments, preserving
+  the actor, tenant and public context. Preparations and field authorization run again;
+  private execution state and existing hooks are not copied. The context marker below
+  bounds this preparation to one sibling load per selected legacy field and tenant chunk.
+
   Skipped:
 
     * for actor-less reads, so `AshVault.Backfill` verify compares the ciphertext with
@@ -75,12 +80,16 @@ defmodule AshVault.Preparations.PreferVaultCopy do
 
   defp load_chunk(chunk, {:ok, acc}, query, opts, actor) do
     vault_field = opts[:vault_field]
+    tenant = tenant_of(query, hd(chunk))
 
-    case Ash.load(chunk, [vault_field],
-           actor: actor,
-           tenant: tenant_of(query, hd(chunk)),
-           context: %{@loading => true}
-         ) do
+    load_query =
+      query.resource
+      |> Ash.Query.set_context(Map.drop(query.context, [:private]))
+      |> Ash.Query.set_context(%{@loading => true})
+      |> Ash.Query.for_read(query.action.name, query.arguments, actor: actor, tenant: tenant)
+      |> Ash.Query.load(vault_field)
+
+    case Ash.load(chunk, load_query) do
       {:ok, loaded} ->
         {:cont, {:ok, acc ++ Enum.map(loaded, &swap(&1, opts[:field], vault_field))}}
 

@@ -76,6 +76,13 @@ encrypt :api_key, legacy: MyApp.Encrypted.Binary, decrypt_for: [MyApp.Checks.Sys
   so an `only:` entry never admits them. Existing `DecryptFor.allowed?/3` callers retain
   action-only context; `allowed?/4` accepts additional context.
 - Backfill/verify the copy by its stored name: `--field vault_<field>`.
+- Legacy sibling loads use the original read action, arguments, actor, tenant and public
+  context on a fresh query. Native preparations and field authorization run again; keep
+  preparations safe to repeat and do not bypass policies to make a sibling load work.
+- The sibling is still a native `Ash.load` over fetched records (`query_for: :load`).
+  Policies that require a fresh data-layer read can intentionally deny it. Requesting
+  the sibling calculation on the outer query does not eliminate this nested load:
+  runtime calculations run after the legacy preparation's read hook.
 
 ## Looking up by value: searchable fields
 
