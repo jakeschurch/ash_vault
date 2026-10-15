@@ -79,10 +79,12 @@ defmodule AshVault.Dsl do
       stored_as: [
         type: :atom,
         doc: """
-        With `legacy:`, the name the AshVault copy is stored and bound under: the
-        ciphertext column is `encrypted_<stored_as>` and the AEAD associated data names
-        `stored_as`. Defaults to `vault_<name>`. Changing it after rows exist makes them
-        undecryptable.
+        Stable storage and cryptographic binding name. The ciphertext column is
+        `encrypted_<stored_as>` and AEAD associated data names `stored_as`, while the
+        logical field, calculation and action argument keep `name`. Defaults to `name`
+        for ordinary encryption and `vault_<name>` with `legacy:`. Preserve this value
+        when contracting a legacy migration. Changing it after rows exist makes them
+        undecryptable. Lookup token names and derivation still use the logical name.
         """
       ],
       decrypt_for: [

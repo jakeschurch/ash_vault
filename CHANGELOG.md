@@ -7,6 +7,11 @@ All notable changes to AshVault are recorded here. The format follows
 
 ### Added
 
+- `stored_as:` on ordinary `encrypt`: retain an existing ciphertext column and immutable
+  AEAD field binding while keeping the logical public calculation and write argument.
+  Supports native normal/atomic writes and backfill planning without legacy siblings,
+  dual writes or preference reads. Duplicate storage/binding identities are refused.
+
 - Decryption checks receive normalized tenant, resource, field, phase and source
   context. `AshVault.DecryptFor.allowed?/4` accepts that context while the existing
   three-argument API and action restrictions retain their behavior.

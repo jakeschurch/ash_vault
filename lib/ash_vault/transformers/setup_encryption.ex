@@ -77,6 +77,7 @@ defmodule AshVault.Transformers.SetupEncryption do
     fields = AshVault.Info.encrypted_fields(dsl)
 
     verify_no_duplicates!(module, fields)
+    verify_no_duplicates!(module, Enum.map(fields, &%{name: AshVault.Info.stored_as(&1)}))
 
     fields
     |> Enum.reduce_while({:ok, dsl}, fn field, {:ok, dsl} ->
@@ -84,7 +85,7 @@ defmodule AshVault.Transformers.SetupEncryption do
 
       dsl
       |> Transformer.remove_entity([:attributes], &(&1.name == attribute.name))
-      |> Builder.add_attribute(AshVault.encrypted_field_name(attribute.name), :binary,
+      |> Builder.add_attribute(AshVault.encrypted_field_name(dsl, attribute.name), :binary,
         allow_nil?: true,
         sensitive?: true,
         public?: false,
@@ -115,12 +116,15 @@ defmodule AshVault.Transformers.SetupEncryption do
     |> add_key_lifecycle_actions()
   end
 
-  defp decrypt_opts(%{legacy_of: nil, decrypt_for: [_ | _] = decrypt_for}, attribute) do
-    decrypt_opts(%{}, attribute) ++ [decrypt_for: decrypt_for]
+  defp decrypt_opts(%{legacy_of: nil, decrypt_for: [_ | _] = decrypt_for} = field, attribute) do
+    decrypt_opts(%{field | decrypt_for: nil}, attribute) ++ [decrypt_for: decrypt_for]
   end
 
-  defp decrypt_opts(_field, attribute) do
-    [field: AshVault.encrypted_field_name(attribute.name), plain_field: attribute.name]
+  defp decrypt_opts(field, attribute) do
+    [
+      field: AshVault.encrypted_field_name(AshVault.Info.stored_as(field)),
+      plain_field: attribute.name
+    ]
   end
 
   # -- legacy (expand) fields --------------------------------------------------
@@ -306,13 +310,13 @@ defmodule AshVault.Transformers.SetupEncryption do
           path: [:ash_vault, :encrypt],
           message: "cannot encrypt primary key attribute #{inspect(field.name)}"
 
-      Ash.Resource.Info.attribute(dsl, AshVault.encrypted_field_name(field.name)) ->
+      Ash.Resource.Info.attribute(dsl, AshVault.encrypted_field_name(dsl, field.name)) ->
         raise Spark.Error.DslError,
           module: module,
           path: [:ash_vault, :encrypt],
           message:
             "#{inspect(field.name)} already has an " <>
-              "#{inspect(AshVault.encrypted_field_name(field.name))} sibling attribute"
+              "#{inspect(AshVault.encrypted_field_name(dsl, field.name))} sibling attribute"
 
       field.searchable? and
           Ash.Resource.Info.attribute(dsl, AshVault.lookup_field_name(field.name)) ->
@@ -332,7 +336,7 @@ defmodule AshVault.Transformers.SetupEncryption do
 
           Uniqueness is enforced on the lookup token, not on the ciphertext: AES-GCM
           draws a fresh nonce per write, so two rows holding the same plaintext have
-          completely different `#{AshVault.encrypted_field_name(field.name)}` bytes and a
+          completely different `#{AshVault.encrypted_field_name(dsl, field.name)}` bytes and a
           unique index on that column constrains nothing at all.
 
               encrypt #{inspect(field.name)}, searchable?: true, unique?: true

@@ -33,6 +33,9 @@ defmodule AshVault.Context.Builder do
   There is no `context \\\\ nil` default anywhere: a missing tenant is not a fallback, it
   is `AshVault.Errors.MissingScope`.
 
+  `Context.field` resolves the immutable `stored_as` binding identity. Logical field
+  names remain on calculations, arguments and decryption policy callback context.
+
   > #### Deviation from the spec {: .info}
   >
   > EXTENSION_SPEC §4 puts these constructors on `AshVault.Context` itself. They live here
@@ -49,7 +52,7 @@ defmodule AshVault.Context.Builder do
   def from_changeset(changeset, field, ash_context) do
     %Context{
       resource: changeset.resource,
-      field: field,
+      field: AshVault.Info.stored_as(changeset.resource, field),
       ash_context: %{
         tenant: changeset.tenant || Map.get(ash_context, :tenant),
         actor: Map.get(ash_context, :actor),
@@ -68,7 +71,7 @@ defmodule AshVault.Context.Builder do
 
     %Context{
       resource: resource,
-      field: field,
+      field: AshVault.Info.stored_as(resource, field),
       ash_context: %{
         tenant: Map.get(ash_context, :tenant) || private_tenant(source_context),
         actor: Map.get(ash_context, :actor),
@@ -94,7 +97,7 @@ defmodule AshVault.Context.Builder do
 
     %Context{
       resource: query.resource,
-      field: field,
+      field: AshVault.Info.stored_as(query.resource, field),
       ash_context: %{
         tenant: query.tenant || Map.get(ash_context, :tenant) || private_tenant(source_context),
         actor: Map.get(ash_context, :actor),

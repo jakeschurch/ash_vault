@@ -39,6 +39,7 @@ constraints, `allow_nil?` and `public?` are preserved on the decrypt calculation
 | Option | Default | Meaning |
 |---|---|---|
 | `encrypt_nil?` | section value | Per-field override |
+| `stored_as` | logical name (`vault_<name>` with `legacy:`) | Immutable ciphertext storage and AEAD binding name; public calculation and write argument retain the logical name. Backing attribute is `encrypted_<stored_as>`. Does not rename lookup tokens or their derivation domain. |
 | `searchable?` | `false` | Also store `<name>_lookup` HMAC token and generate `:by_<name>` |
 | `unique?` | `false` | Unique identity `<name>_lookup_unique` on the token, per tenant. Requires `searchable?` |
 | `pre_check_with` | none | Ash domain to pre-check the unique identity against. Required for `unique?` on ETS/Mnesia; costs a read per write |

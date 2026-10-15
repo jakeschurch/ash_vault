@@ -19,7 +19,9 @@ defmodule AshVault.Encrypted do
   hook, for a data layer that cannot enforce uniqueness itself. Required there, refused
   nowhere, and off by default everywhere — it costs a read on every write.
 
-  `:legacy`, `:stored_as` and `:decrypt_for` describe expand mode; see `AshVault.Dsl`.
+  `:stored_as` fixes the ciphertext storage and cryptographic binding identity without
+  changing the logical name. It defaults to the logical name for ordinary encryption.
+  `:legacy` and `:decrypt_for` also support expand mode; see `AshVault.Dsl`.
   `AshVault.Info.encrypted_fields/1` presents a `legacy:` entity as the field that is
   actually encrypted — named `stored_as`, with `backfill_from` the legacy attribute and
   `:legacy_of` naming it — so the write path, the backfill and the key tooling treat it
