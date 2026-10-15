@@ -30,6 +30,10 @@ defmodule AshVault.UniqueOnEtsTest do
       data_layer: Ash.DataLayer.Ets,
       extensions: [AshVault]
 
+    ets do
+      private? true
+    end
+
     ash_vault do
       vault AshVault.Test.Support.GlobalVault
       scope :global
@@ -54,7 +58,6 @@ defmodule AshVault.UniqueOnEtsTest do
 
   setup do
     start_supervised!({Memory, name: Memory})
-    Ash.DataLayer.Ets.stop(EtsUniqueUser)
     :ok
   end
 
@@ -65,6 +68,15 @@ defmodule AshVault.UniqueOnEtsTest do
   end
 
   describe "with pre_check_with" do
+    test "storage is isolated between test processes" do
+      task = Task.async(fn -> create("isolated@example.com") end)
+      assert {:ok, _} = Task.await(task)
+
+      assert [] = Ash.read!(EtsUniqueUser)
+      assert {:ok, _} = create("isolated@example.com")
+      assert {:error, %Ash.Error.Invalid{}} = create("isolated@example.com")
+    end
+
     test "the option lands on the generated identity" do
       assert %Ash.Resource.Identity{keys: [:email_lookup], pre_check_with: Domain} =
                Ash.Resource.Info.identity(EtsUniqueUser, :email_lookup_unique)
