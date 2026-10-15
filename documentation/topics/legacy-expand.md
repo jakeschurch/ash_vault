@@ -58,10 +58,15 @@ copies, and `mix ash_vault.verify` compares like with like.
   existing hooks and private execution state are not reused. The dual-read preparation
   suppresses its own nested reload, so each selected field loads its sibling once per
   tenant chunk. Keep preparations safe to repeat.
-- The sibling load remains `query_for: :load`, operating over already fetched records.
-  Policies that require a fresh data-layer read can deny that lifecycle. Requesting the
-  sibling calculation on the outer query does not avoid this nested load: runtime
-  calculations finish after the legacy preparation's read hook.
+- Siblings are fetched with a native read bounded to the chunk's primary keys, retaining
+  the original filter and lock. Offset/keyset pagination selects the chunk once; its
+  offset/cursor is not repeated on the sibling query. Results are matched by the complete
+  primary key and returned in the original order. Missing, duplicate or changed rows fail
+  the read; they never trigger legacy fallback. Keyless resources and combined queries
+  are refused because correspondence cannot be established safely.
+- Caller-supplied record loads keep their `query_for: :load` context on the sibling query.
+  Fresh-read field policies still deny them, including stale or fabricated records and
+  caller-supplied recursion markers. The marker grants no authority.
 - Skipped: actor-less reads (so verify compares the real legacy column), the row query
   of a bulk update or destroy, and queries that do not select the attribute.
 

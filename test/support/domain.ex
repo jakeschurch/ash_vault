@@ -28,5 +28,6 @@ defmodule AshVault.Test.Domain do
     resource(AshVault.Test.TenantDecryptDoc)
     resource(AshVault.Test.TenantLegacyDecryptDoc)
     resource(AshVault.Test.ScopedLegacyCredential)
+    resource(AshVault.Test.CompositeLegacyCredential)
   end
 end

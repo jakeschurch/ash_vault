@@ -79,10 +79,12 @@ encrypt :api_key, legacy: MyApp.Encrypted.Binary, decrypt_for: [MyApp.Checks.Sys
 - Legacy sibling loads use the original read action, arguments, actor, tenant and public
   context on a fresh query. Native preparations and field authorization run again; keep
   preparations safe to repeat and do not bypass policies to make a sibling load work.
-- The sibling is still a native `Ash.load` over fetched records (`query_for: :load`).
-  Policies that require a fresh data-layer read can intentionally deny it. Requesting
-  the sibling calculation on the outer query does not eliminate this nested load:
-  runtime calculations run after the legacy preparation's read hook.
+- Siblings use a native read bounded to the selected rows' primary keys, retaining the
+  original filter and lock. Pagination selects the chunk once; the sibling read does not
+  repeat its offset/cursor. Missing, duplicate or changed rows fail the read, never fall
+  back to legacy. Keyless resources and combined queries are refused. Keep preparations
+  and action hooks safe to repeat. Caller-supplied record loads retain `query_for: :load`;
+  their context is never relabeled as a fresh read to bypass field policies.
 
 ## Looking up by value: searchable fields
 

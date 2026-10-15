@@ -5,6 +5,13 @@ All notable changes to AshVault are recorded here. The format follows
 
 ## Unreleased
 
+### Fixed
+
+- Legacy sibling retrieval now uses a bounded native read, preserving fresh-read field
+  authority without bypassing supplied-record load restrictions. Original filters,
+  locks, pagination selection and complete primary keys are retained; missing,
+  duplicate or changed sibling rows fail closed.
+
 ### Added
 
 - Decryption checks receive normalized tenant, resource, field, phase and source

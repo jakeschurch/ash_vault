@@ -233,6 +233,7 @@ defmodule AshVault.Test.PgLegacyAccount do
   use Ash.Resource,
     domain: AshVault.Test.Domain,
     data_layer: AshPostgres.DataLayer,
+    authorizers: [Ash.Policy.Authorizer],
     extensions: [AshVault]
 
   ash_vault do
@@ -292,6 +293,24 @@ defmodule AshVault.Test.PgLegacyAccount do
     update :clear_token do
       accept([])
       change(set_attribute(:token, nil))
+    end
+  end
+
+  policies do
+    policy always() do
+      authorize_if always()
+    end
+  end
+
+  field_policies do
+    private_fields :include
+
+    field_policy [:token, :vault_token, :encrypted_vault_token] do
+      authorize_if AshVault.Test.Checks.FreshSecretRead
+    end
+
+    field_policy :* do
+      authorize_if always()
     end
   end
 end
