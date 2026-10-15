@@ -54,6 +54,19 @@ Add `:ash_vault` to `import_deps` in `.formatter.exs`.
   Identities or custom indexes naming an encrypted field are a compile-time DSL error.
 - **Do not** reference `:email` in `upsert_fields`; use `:encrypted_email` or omit it.
 
+`encrypt :email, stored_as: :vault_email` keeps the public calculation and write input
+named `email`, but stores only `encrypted_vault_email` and retains `vault_email` in its
+cryptographic binding. Use this to contract a verified legacy migration without
+renaming/re-encrypting its ciphertext. There is no sibling calculation, dual-write or
+legacy read fallback. Keep `stored_as` immutable once ciphertext exists. Use
+`AshVault.encrypted_field_name(Resource, :email)` to resolve the backing attribute;
+the one-argument helper only applies the default naming convention. Lookup-token names
+and derivation remain logical, so this option does not migrate lookup tokens.
+
+AAD binds tenant scope, resource module and the stable field identity, not record IDs.
+Corruption and cross-scope/resource/field substitution fail authentication; replay within
+one scope/resource/field is not prevented. Do not claim row identity binding.
+
 ## Migrating an already-encrypted attribute: `legacy:`
 
 ```elixir

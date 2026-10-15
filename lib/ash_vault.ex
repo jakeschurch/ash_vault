@@ -152,6 +152,12 @@ defmodule AshVault do
   @spec encrypted_field_name(atom()) :: atom()
   def encrypted_field_name(field) when is_atom(field), do: :"encrypted_#{field}"
 
+  @doc "The backing ciphertext attribute, resolving a field's `stored_as` alias."
+  @spec encrypted_field_name(module() | Spark.Dsl.t(), atom()) :: atom()
+  def encrypted_field_name(resource_or_dsl, field) do
+    encrypted_field_name(AshVault.Info.stored_as(resource_or_dsl, field))
+  end
+
   @doc """
   The name of the deterministic lookup-token attribute for a searchable field.
 
@@ -214,7 +220,7 @@ defmodule AshVault do
     with {:ok, value} <- maybe_normalize(resource, field, value, searchable?),
          {:ok, blob} <- encrypt_value(resource, field, value, context),
          {:ok, token} <- maybe_token(resource, field, value, context, searchable?) do
-      attributes = %{encrypted_field_name(field) => blob}
+      attributes = %{encrypted_field_name(resource, field) => blob}
 
       if searchable? do
         {:ok, Map.put(attributes, lookup_field_name(field), token)}

@@ -52,10 +52,24 @@ defmodule AshVault.Info do
     resource_or_dsl |> encrypt_entities() |> Enum.reject(&is_nil(&1.legacy))
   end
 
-  @doc "The name a `legacy:` field's AshVault copy is stored under."
+  @doc "The stable storage and cryptographic binding name of an encrypted field."
   @spec stored_as(Encrypted.t()) :: atom()
+  def stored_as(%Encrypted{stored_as: nil, legacy: nil, name: name}), do: name
   def stored_as(%Encrypted{stored_as: nil, name: name}), do: :"vault_#{name}"
   def stored_as(%Encrypted{stored_as: stored_as}), do: stored_as
+
+  @doc "Resolve a logical field to its stable storage and binding name."
+  @spec stored_as(module() | Spark.Dsl.t(), atom()) :: atom()
+  def stored_as(resource_or_dsl, name) do
+    configured =
+      encrypted_field(resource_or_dsl, name) ||
+        Enum.find(encrypt_entities(resource_or_dsl), &(&1.name == name))
+
+    case configured do
+      nil -> name
+      field -> stored_as(field)
+    end
+  end
 
   @doc "A `legacy:` field's legacy type and constraints."
   @spec legacy_type(Encrypted.t()) :: {module(), keyword()}

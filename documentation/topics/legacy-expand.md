@@ -86,6 +86,21 @@ column to `NULL` and backfill, or the copy may be older than the legacy value.
 
 ## Contract
 
-Once every row verifies, drop the legacy column and replace the declaration with the
-end-state form. `stored_as:` is not yet available without `legacy:`; until it is, the
-contract step keeps the field named after its ciphertext column.
+Once every row verifies, replace the declaration with ordinary encryption and preserve
+its storage/binding name explicitly:
+
+```elixir
+encrypt :api_key, stored_as: :vault_api_key
+```
+
+The native public calculation and write argument remain `api_key`; ciphertext stays in
+`encrypted_vault_api_key` under the same resource/scope/`vault_api_key` AAD. No sibling,
+dual-write change or preference preparation is generated. Remove the old encrypted type
+and legacy attribute column after verifying the deployed readers and writers use this
+single native path. Never change the resource module or stored binding identity without
+an explicit ciphertext migration.
+
+The direct calculation has no trusted action name: an action-only `decrypt_for` entry
+remains denied. Preserve authorization with native resource/field policies and normalized
+actor/scope checks, or address action lifecycle context separately. Caller-supplied
+source context is not authority.

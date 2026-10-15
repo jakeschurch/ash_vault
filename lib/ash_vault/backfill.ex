@@ -116,7 +116,7 @@ defmodule AshVault.Backfill do
        %{
          resource: resource,
          field: field,
-         encrypted_field: AshVault.encrypted_field_name(field),
+         encrypted_field: AshVault.encrypted_field_name(resource, field),
          # Resolved whenever the field is searchable, not only in `--lookup` mode: an
          # ordinary backfill writes this column too, and `verify/1` checks it.
          lookup_field: searchable? && AshVault.lookup_field_name(field),
@@ -762,7 +762,7 @@ defmodule AshVault.Backfill do
 
       source ->
         cond do
-          source == AshVault.encrypted_field_name(field) ->
+          source == AshVault.encrypted_field_name(resource, field) ->
             {:error,
              ArgumentError.exception(
                message:
@@ -870,7 +870,12 @@ defmodule AshVault.Backfill do
     ash_context = %{tenant: tenant, actor: nil, source_context: %{}, phase: :write}
     vault = AshVault.Info.vault!(resource, ash_context)
 
-    context = %AshVault.Context{resource: resource, field: field, ash_context: ash_context}
+    context = %AshVault.Context{
+      resource: resource,
+      field: AshVault.Info.stored_as(resource, field),
+      ash_context: ash_context
+    }
+
     scope = vault.__ash_vault__(:scope).resolve!(context)
 
     {:ok, vault, scope}

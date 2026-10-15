@@ -97,15 +97,50 @@ defmodule AshVault.Legacy.LegacyDslTest do
 
     assert Ash.Resource.Info.action(AshVault.LegacyDsl.Upsert, :upsert).upsert_fields ==
              [:token, :encrypted_vault_token]
+
+    assert AshVault.encrypted_field_name(AshVault.LegacyDsl.Upsert, :token) ==
+             :encrypted_vault_token
+
+    assert AshVault.encrypted_field_name(AshVault.LegacyDsl.Upsert, :vault_token) ==
+             :encrypted_vault_token
   end
 
-  test "stored_as without legacy is refused" do
-    assert_verifier_error(
-      AshVault.LegacyDsl.StoredAsAlone,
-      "encrypt :token, stored_as: :vault_token",
-      "",
-      "only supported together with `legacy:`"
-    )
+  test "stored_as preserves the native logical field without legacy machinery" do
+    assert :ok =
+             verify(
+               AshVault.LegacyDsl.StoredAsAlone,
+               "encrypt :token, stored_as: :vault_token",
+               "",
+               ""
+             )
+
+    resource = AshVault.LegacyDsl.StoredAsAlone
+    assert Ash.Resource.Info.calculation(resource, :token)
+    assert Ash.Resource.Info.attribute(resource, :encrypted_vault_token)
+    refute Ash.Resource.Info.attribute(resource, :token)
+    refute Ash.Resource.Info.attribute(resource, :encrypted_token)
+    refute Ash.Resource.Info.calculation(resource, :vault_token)
+  end
+
+  test "two logical fields cannot share a storage and binding alias" do
+    error =
+      assert_raise Spark.Error.DslError, fn ->
+        ExUnit.CaptureIO.capture_io(:stderr, fn ->
+          Code.eval_string(
+            source(
+              AshVault.LegacyDsl.SharedAlias,
+              """
+              encrypt :token, stored_as: :vault_token
+              encrypt :other, stored_as: :vault_token
+              """,
+              "",
+              "attribute :other, :binary"
+            )
+          )
+        end)
+      end
+
+    assert Exception.message(error) =~ "duplicate `encrypt` entries"
   end
 
   test "a hand-declared AshVault copy is refused: AshVault owns it" do

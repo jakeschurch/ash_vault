@@ -125,7 +125,12 @@ defmodule AshVault.Mix.Shared do
       end
 
     scope_module = vault.__ash_vault__(:scope)
-    context = %AshVault.Context{resource: resource, field: field, ash_context: ash_context}
+
+    context = %AshVault.Context{
+      resource: resource,
+      field: AshVault.Info.stored_as(resource, field),
+      ash_context: ash_context
+    }
 
     scope =
       try do

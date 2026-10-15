@@ -21,6 +21,7 @@ spark_locals_without_parens = [
   encrypt: 1,
   encrypt: 2,
   encrypt_nil?: 1,
+  stored_as: 1,
   normalize: 1,
   pre_check_with: 1,
   rotate: 1,

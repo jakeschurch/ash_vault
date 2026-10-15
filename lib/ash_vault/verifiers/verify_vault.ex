@@ -423,33 +423,14 @@ defmodule AshVault.Verifiers.VerifyVault do
   # the AshVault copy are the ones it cannot see: an expression write (`atomic_update/2`)
   # and an upsert that overwrites one column on conflict but not the other.
   defp verify_legacy(dsl, module) do
-    with :ok <- verify_legacy_options(dsl, module) do
-      dsl
-      |> AshVault.Info.legacy_fields()
-      |> Enum.reduce_while(:ok, fn field, :ok ->
-        case verify_legacy_actions(dsl, module, field) do
-          :ok -> {:cont, :ok}
-          error -> {:halt, error}
-        end
-      end)
-    end
-  end
-
-  defp verify_legacy_options(dsl, module) do
     dsl
-    |> AshVault.Info.encrypt_entities()
-    |> Enum.find(&(is_nil(&1.legacy) and not is_nil(&1.stored_as)))
-    |> case do
-      nil ->
-        :ok
-
-      field ->
-        error(
-          module,
-          [:ash_vault, :encrypt, field.name],
-          "`stored_as:` is only supported together with `legacy:`."
-        )
-    end
+    |> AshVault.Info.legacy_fields()
+    |> Enum.reduce_while(:ok, fn field, :ok ->
+      case verify_legacy_actions(dsl, module, field) do
+        :ok -> {:cont, :ok}
+        error -> {:halt, error}
+      end
+    end)
   end
 
   defp verify_legacy_actions(dsl, module, field) do
