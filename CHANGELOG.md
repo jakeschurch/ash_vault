@@ -36,6 +36,9 @@ All notable changes to AshVault are recorded here. The format follows
 
 ### Changed
 
+- Legacy vault sibling loads retain the original read action, arguments, actor,
+  tenant and public context instead of switching to the primary read. Native field
+  policies still apply; the sibling remains a load over fetched records.
 - **Breaking:** an OpenBao `403` is now `AshVault.Errors.ProviderForbidden`. It was
   `ProviderUnavailable` with `reason: :forbidden`, which callers and metrics treated as
   a transient outage and retried. A `403` is a policy, credential or addressing fault,
