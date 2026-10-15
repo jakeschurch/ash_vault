@@ -37,8 +37,15 @@ defmodule AshVault.Calculations.Decrypt do
   def calculate([], _opts, _context), do: {:ok, []}
 
   def calculate([%resource{} | _] = records, opts, context) do
-    if decrypt_allowed?(opts[:decrypt_for], context) do
-      decrypt(records, resource, opts, context)
+    ctx = AshVault.Context.Builder.from_calculation(resource, opts[:plain_field], context)
+
+    policy_context =
+      ctx.ash_context
+      |> Map.put(:resource, resource)
+      |> Map.put(:field, opts[:plain_field])
+
+    if decrypt_allowed?(opts[:decrypt_for], context, policy_context) do
+      decrypt(records, resource, opts, ctx)
     else
       {:ok, Enum.map(records, fn _ -> forbidden(opts[:plain_field]) end)}
     end
@@ -47,21 +54,20 @@ defmodule AshVault.Calculations.Decrypt do
   # `decrypt_for:` on a field without `legacy:`: everyone it does not admit gets the
   # field redacted, never decrypted. An unauthorized internal read (`authorize?: false`)
   # is admitted, as Ash admits it everywhere else.
-  defp decrypt_allowed?(nil, _context), do: true
+  defp decrypt_allowed?(nil, _context, _policy_context), do: true
 
-  defp decrypt_allowed?(decrypt_for, context) do
+  defp decrypt_allowed?(decrypt_for, context, policy_context) do
     Map.get(context, :authorize?) == false or
-      AshVault.DecryptFor.allowed?(decrypt_for, Map.get(context, :actor), nil)
+      AshVault.DecryptFor.allowed?(decrypt_for, Map.get(context, :actor), nil, policy_context)
   end
 
   defp forbidden(field), do: %Ash.ForbiddenField{field: field, type: :calculation}
 
-  defp decrypt(records, resource, opts, context) do
+  defp decrypt(records, resource, opts, ctx) do
     plain_field = opts[:plain_field]
     encrypted_field = opts[:field]
 
     %{type: type, constraints: constraints} = Ash.Resource.Info.calculation(resource, plain_field)
-    ctx = AshVault.Context.Builder.from_calculation(resource, plain_field, context)
     # Always resolve the vault against the *normalized* ash_context, so a `fun/2` or MFA
     # vault sees the same shape on the read path as it does on the write path.
     vault = AshVault.Info.vault!(resource, ctx.ash_context)

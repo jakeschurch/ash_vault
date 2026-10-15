@@ -70,6 +70,11 @@ encrypt :api_key, legacy: MyApp.Encrypted.Binary, decrypt_for: [MyApp.Checks.Sys
   `encrypted_vault_<field>` from an upsert that rewrites the field; both are compile errors.
 - `decrypt_for` decides who reads the AshVault copy; use `{check, only: [action]}` to
   confine a broad actor (a system actor) to one read action.
+- Check modules receive normalized `tenant`, `resource`, `field`, `phase`, and
+  `source_context` alongside `action`. Use the top-level tenant for scope checks;
+  caller-supplied values remain nested in `source_context`. Calculations have no action,
+  so an `only:` entry never admits them. Existing `DecryptFor.allowed?/3` callers retain
+  action-only context; `allowed?/4` accepts additional context.
 - Backfill/verify the copy by its stored name: `--field vault_<field>`.
 
 ## Looking up by value: searchable fields

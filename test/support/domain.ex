@@ -25,5 +25,7 @@ defmodule AshVault.Test.Domain do
     resource(AshVault.Test.EtsLegacyUpsert)
     resource(AshVault.Test.PgLegacyAccount)
     resource(AshVault.Test.EtsDecryptForDoc)
+    resource(AshVault.Test.TenantDecryptDoc)
+    resource(AshVault.Test.TenantLegacyDecryptDoc)
   end
 end

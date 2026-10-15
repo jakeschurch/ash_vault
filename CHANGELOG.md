@@ -7,6 +7,9 @@ All notable changes to AshVault are recorded here. The format follows
 
 ### Added
 
+- Decryption checks receive normalized tenant, resource, field, phase and source
+  context. `AshVault.DecryptFor.allowed?/4` accepts that context while the existing
+  three-argument API and action restrictions retain their behavior.
 - `encrypt :field, legacy: Type | {Type, constraints}`: expand mode for an attribute
   already stored by another Ash type. The attribute keeps its column (retyped to the
   legacy type); AshVault adds the copy `encrypted_<stored_as>` (default `vault_<field>`),

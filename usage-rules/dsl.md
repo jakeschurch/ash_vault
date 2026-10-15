@@ -45,6 +45,13 @@ constraints, `allow_nil?` and `public?` are preserved on the decrypt calculation
 | `normalize` | `:none` | `:none`, `:downcase`, `:downcase_trim`, `{Mod, :fun, extra_args}`, or a 1-arity fun. Must return a binary |
 | `backfill_from` | none | Existing plaintext attribute to read during `mix ash_vault.backfill` |
 
+`decrypt_for: [CheckModule]` supplies a native SimpleCheck with normalized tenant,
+resource, field, phase, source context and action. The top-level tenant is the same raw
+tenant used for key scope; values supplied by callers stay in `source_context`. A legacy
+read preparation knows its action; a direct calculation supplies `action: nil`. Restrict
+an entry with `{CheckModule, only: [:action]}` when an action is required. Field and
+resource policies still control access to legacy attributes and resource operations.
+
 ## `key_lifecycle` section
 
 Generates generic actions that rotate or destroy this scope's keys. Names are yours.
