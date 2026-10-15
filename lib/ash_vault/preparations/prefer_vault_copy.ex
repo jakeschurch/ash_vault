@@ -27,8 +27,18 @@ defmodule AshVault.Preparations.PreferVaultCopy do
   @doc false
   @impl Ash.Resource.Preparation
   def prepare(query, opts, context) do
+    policy_context =
+      AshVault.Context.Builder.from_query(query, opts[:field], context).ash_context
+      |> Map.put(:resource, query.resource)
+      |> Map.put(:field, opts[:field])
+
     if skip?(query) or
-         not AshVault.DecryptFor.allowed?(opts[:decrypt_for], context.actor, query.action) do
+         not AshVault.DecryptFor.allowed?(
+           opts[:decrypt_for],
+           context.actor,
+           query.action,
+           policy_context
+         ) do
       query
     else
       Ash.Query.after_action(query, &prefer(&1, &2, opts, context.actor))
