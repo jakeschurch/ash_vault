@@ -30,9 +30,22 @@ key, and a policy that withholds `create` on `transit/encrypt/*` (as recommended
 it with `403`. Verified against openbao 2.6.3 in a three-node Raft cluster: through the
 all-pods Service, encrypt immediately after create was refused every time on a standby,
 and succeeded a few hundred milliseconds later; through the active Service it never failed.
-A standby can equally serve a tombstone read from before a `destroy/1` landed. The
-connection pool reuses connections, so one standby can serve a node's requests for a long
-time.
+A standby can equally serve a tombstone read from before a `destroy/1` landed.
+
+The `-active` Service only routes *new* connections. A pooled keep-alive connection opened
+while a node was active stays on that node after a leader change demotes it, and Finch has
+no maximum connection lifetime, so under steady traffic it never goes idle and never
+reconnects. That is why `reuse_connections` defaults to `false`: every request carries
+`connection: close`, opens a new connection, and lands on whichever node is active at that
+moment. Leave it off against HA. Turning it on is safe only for a single, non-HA node or
+servers run with `disable_standby_reads = true`, which makes standbys forward every
+request to the active node. That server setting is the defence for every client, not
+just AshVault.
+
+`AshVault.KeyProviders.OpenBaoTransit.node_status/0` reports the HA role
+(`:active`, `:standby`, `:sealed`, `:uninitialized`) of the node a request lands on, from
+the unauthenticated `sys/health`. Log it at boot and export it as a gauge: `:standby` means
+`:address` does not reach the active node, and fresh-scope keys will fail.
 
 The server certificate must name the address you configure (see below).
 

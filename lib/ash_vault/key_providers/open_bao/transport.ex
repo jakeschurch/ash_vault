@@ -30,6 +30,8 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
   @default_kv_mount "ashvault"
   @default_receive_timeout 5_000
   @default_max_retries 2
+  @close_header {"connection", "close"}
+  @health_params [standbyok: true, perfstandbyok: true, sealedcode: 200, uninitcode: 200]
 
   # ── scope encoding ─────────────────────────────────────────────────────────────
 
@@ -537,7 +539,7 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
   defp perform(provider, options) do
     case transport_status() do
       :ready ->
-        case options |> Req.new() |> Req.request() do
+        case options |> put_connection_header(provider) |> Req.new() |> Req.request() do
           {:ok, response} -> {:ok, tag_operation(response, provider, options)}
           {:error, exception} -> {:error, unavailable(provider, transport_reason(exception))}
         end
@@ -551,6 +553,110 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
     :exit, _reason -> {:error, unavailable(provider, {:transport, :exit})}
     :throw, _value -> {:error, unavailable(provider, {:transport, :throw})}
   end
+
+  # Without reuse every request carries `connection: close`, so OpenBao (Go net/http)
+  # answers `Connection: close`, Mint drops the socket, and the next request dials the
+  # configured address afresh. Through a `<release>-active` Service that is the node
+  # that is active *now*, however many leader changes the process has lived through.
+  defp put_connection_header(options, provider) do
+    if reuse_connections?(provider),
+      do: options,
+      else: Keyword.update(options, :headers, [@close_header], &add_close_header/1)
+  end
+
+  defp add_close_header(headers) when is_map(headers),
+    do: Map.put(headers, "connection", ["close"])
+
+  defp add_close_header(headers), do: List.wrap(headers) ++ [@close_header]
+
+  @doc """
+  Whether requests to `provider` reuse pooled keep-alive connections.
+
+  `false` (the default) sends `connection: close` on every request, so each one opens a
+  new connection and reaches whichever node `:address` routes to at that moment.
+
+  This is what keeps the documented precondition — `:address` reaches the **active**
+  node only — true across an HA leader change. Finch pools have no maximum connection
+  lifetime, and a connection with steady traffic never goes idle, so a pooled connection
+  opened while node A was active stays on A after A becomes a standby: indefinitely.
+  OpenBao 2.5+ standbys serve reads locally from a copy that lags the active node and
+  forward only writes, so a fresh scope's key create is forwarded and applied, and the
+  very next read or `transit/hmac` on that standby finds no key (`KeyNotFound`, or `403`
+  for an encrypt that the standby treats as an implicit create).
+
+  The cost is one TCP (and TLS) handshake per request. `reuse_connections: true` opts
+  back into pooling and is safe only when `:address` is a single, non-HA node, or the
+  servers run with `disable_standby_reads = true`.
+
+  Anything but a boolean raises `ArgumentError`: a misspelt value silently choosing
+  either behaviour would be invisible until the next failover.
+  """
+  @spec reuse_connections?(module()) :: boolean()
+  def reuse_connections?(provider) do
+    case Keyword.get(config(provider), :reuse_connections, false) do
+      reuse when is_boolean(reuse) ->
+        reuse
+
+      other ->
+        raise ArgumentError,
+              "#{inspect(provider)} :reuse_connections must be a boolean, got: #{inspect(other)}"
+    end
+  end
+
+  @doc """
+  The HA role of the node a request to `provider` lands on, from `GET /v1/sys/health`.
+
+  `{:ok, :active}`, `{:ok, :standby}`, `{:ok, :sealed}` or `{:ok, :uninitialized}`, or
+  `{:error, exception}` when the node cannot be reached or its answer is not a health
+  body. Classified from the body (`standby`, `performance_standby`, `sealed`,
+  `initialized`), never from the status code alone: the query asks every role to answer
+  `200`, so a `429`/`473` standby code and Req's retry of a `429` never come into it.
+
+  Unauthenticated, as the endpoint is: no token is resolved or sent. Never retried. It
+  travels the same transport as every other request — `connection: close` included
+  unless `reuse_connections: true` — so it reports where a request made now would land,
+  which is what an operator needs to know.
+  """
+  @spec node_status(module()) ::
+          {:ok, :active | :standby | :sealed | :uninitialized} | {:error, Exception.t()}
+  def node_status(provider) do
+    with {:ok, base} <- base_options(provider) do
+      request =
+        Keyword.merge(base,
+          method: :get,
+          url: "/v1/sys/health",
+          params: @health_params,
+          retry: false
+        )
+
+      case perform(provider, request) do
+        {:ok, %{status: 200, body: body}} -> classify_health(provider, body)
+        {:ok, response} -> unavailable!(provider, response)
+        {:error, error} -> {:error, error}
+      end
+    end
+  end
+
+  @doc """
+  Classify a `sys/health` body into the node's HA role.
+
+  Public so the classification is tested against the exact bodies a live server returns.
+  """
+  @spec classify_health(module(), term()) ::
+          {:ok, :active | :standby | :sealed | :uninitialized} | {:error, Exception.t()}
+  def classify_health(provider, body) when is_map(body) do
+    cond do
+      Map.get(body, "initialized") == false -> {:ok, :uninitialized}
+      Map.get(body, "sealed") == true -> {:ok, :sealed}
+      Map.get(body, "standby") == true -> {:ok, :standby}
+      Map.get(body, "performance_standby") == true -> {:ok, :standby}
+      Map.get(body, "standby") == false -> {:ok, :active}
+      true -> {:error, unavailable(provider, :ambiguous_health_response)}
+    end
+  end
+
+  def classify_health(provider, _body),
+    do: {:error, unavailable(provider, :ambiguous_health_response)}
 
   @doc """
   Whether the HTTP transport the OpenBao providers need is actually running.
