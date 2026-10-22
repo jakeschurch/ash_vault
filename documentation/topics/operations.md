@@ -388,7 +388,9 @@ means `:address` reaches standby nodes: they serve reads and policy checks from 
 briefly lagging, copy of the data, so an encrypt issued right after AshVault creates a
 scope's key can find no key there, and OpenBao treats encrypting with a missing key as
 creating it. Point `:address` at the active node only (the Helm chart's `<release>-active`
-Service).
+Service), and leave `reuse_connections` at its default `false`: a pooled connection
+outlives a leader change and keeps talking to the demoted node.
+`OpenBaoTransit.node_status/0` returning `{:ok, :standby}` confirms the misrouting.
 
 A `403` on a tombstone read still fails closed: the scope is never reported intact.
 

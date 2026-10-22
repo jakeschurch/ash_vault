@@ -63,7 +63,8 @@ defmodule AshVault.KeyProviders.OpenBaoTransit do
         kv_mount: "ashvault",
         key_type: "aes256-gcm96",
         receive_timeout: 5_000,
-        max_retries: 2
+        max_retries: 2,
+        reuse_connections: false
 
   Instead of `:token`, `auth: {:kubernetes, role: "..."}` logs in with the pod's
   service account through a supervised token holder, and `:cacertfile` (or
@@ -135,6 +136,13 @@ defmodule AshVault.KeyProviders.OpenBaoTransit do
   > copy that lags the active node, so an encrypt issued right after the explicit create
   > can reach a standby that has not seen the key yet, which treats it as an implicit
   > create and, under the policy above, answers `403`. Verified against openbao 2.6.3.
+  >
+  > A pooled keep-alive connection would quietly break that precondition: one opened
+  > while a node was active stays on it after it is demoted, for as long as traffic keeps
+  > it busy. So by default (`reuse_connections: false`) every request carries
+  > `connection: close` and opens a new connection, which the `-active` Service routes to
+  > the current leader. `node_status/0` reports the HA role a request lands on, for a
+  > boot probe or a gauge. See `AshVault.KeyProviders.OpenBao.Transport.reuse_connections?/1`.
 
   ## The `:mac` keyring
 
@@ -223,6 +231,14 @@ defmodule AshVault.KeyProviders.OpenBaoTransit do
   @impl AshVault.KeyProvider
   @spec setup() :: :ok | {:error, Exception.t()}
   def setup, do: Transport.ensure_kv_mount(__MODULE__)
+
+  @doc """
+  The HA role of the node a request lands on: `:active`, `:standby`, `:sealed` or
+  `:uninitialized`. See `AshVault.KeyProviders.OpenBao.Transport.node_status/1`.
+  """
+  @spec node_status() ::
+          {:ok, :active | :standby | :sealed | :uninitialized} | {:error, Exception.t()}
+  def node_status, do: Transport.node_status(__MODULE__)
 
   @doc """
   The purposes this provider serves: `[:data, :mac]`.

@@ -72,6 +72,13 @@ config :my_app, AshVault.KeyProviders.OpenBao,
 
 Never commit tokens. Put them in `config/runtime.exs`.
 
+Against an HA OpenBao, `:address` must reach the active node only (`<release>-active`).
+Keep `reuse_connections: false` (the default; every request sends `connection: close`):
+pooled connections outlive leader changes and pin the client to a lagging standby, where
+a fresh scope's first MAC or encrypt fails. Set it `true` only for a single non-HA node or
+servers with `disable_standby_reads = true`. Surface `node_status/0` (`:active` /
+`:standby` / `:sealed` / `:uninitialized`) in a boot probe or gauge.
+
 ## Key caching: leave it off
 
 `cache: true` (or `cache: [ttl: ..., max_entries: ...]`) wraps the provider in a TTL cache.

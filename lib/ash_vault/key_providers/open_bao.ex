@@ -38,7 +38,8 @@ defmodule AshVault.KeyProviders.OpenBao do
         kv_mount: "ashvault",
         key_type: "aes256-gcm96",
         receive_timeout: 5_000,
-        max_retries: 2
+        max_retries: 2,
+        reuse_connections: false
 
   Instead of `:token`, `auth: {:kubernetes, role: "..."}` logs in with the pod's
   service account through a supervised token holder, and `:cacertfile` (or
@@ -46,6 +47,12 @@ defmodule AshVault.KeyProviders.OpenBao do
   [Running against OpenBao in Kubernetes](openbao-in-kubernetes.md).
 
   `:token` accepts a literal binary, `{:system, "VAR"}`, or a zero-arity function.
+
+  `reuse_connections: false` (the default) sends `connection: close` on every request so
+  each one reaches the node `:address` routes to *now*; see
+  `AshVault.KeyProviders.OpenBao.Transport.reuse_connections?/1` for why a pooled
+  connection stays on a demoted standby after an HA leader change, and when opting back
+  into pooling is safe. `node_status/0` reports which HA role a request lands on.
 
   > #### What the token guarantee actually is {: .warning}
   >
@@ -488,6 +495,14 @@ defmodule AshVault.KeyProviders.OpenBao do
   @doc since: "0.1.0"
   @spec transport_status() :: :ready | {:not_started, :req | :finch}
   defdelegate transport_status(), to: Transport
+
+  @doc """
+  The HA role of the node a request lands on: `:active`, `:standby`, `:sealed` or
+  `:uninitialized`. See `AshVault.KeyProviders.OpenBao.Transport.node_status/1`.
+  """
+  @spec node_status() ::
+          {:ok, :active | :standby | :sealed | :uninitialized} | {:error, Exception.t()}
+  def node_status, do: Transport.node_status(__MODULE__)
 
   @doc """
   Extract a key version's creation time from transit key metadata.

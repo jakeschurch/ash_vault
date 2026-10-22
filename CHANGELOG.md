@@ -5,7 +5,22 @@ All notable changes to AshVault are recorded here. The format follows
 
 ## Unreleased
 
+### Fixed
+
+- OpenBao providers no longer stay pinned to a demoted standby after an HA leader change.
+  Every request now sends `connection: close` (new `reuse_connections` option, default
+  `false`), so each one reaches the node `:address` routes to at that moment. Pooled
+  keep-alive connections survived failovers indefinitely, and a fresh scope's first MAC
+  or encrypt then failed against the standby's lagging copy (`KeyNotFound` /
+  `ProviderUnavailable`, or `403` for an implicit-create encrypt). Costs one handshake per
+  request; `reuse_connections: true` restores pooling for non-HA servers.
+
 ### Added
+
+- `OpenBao.node_status/0`, `OpenBaoTransit.node_status/0` and
+  `OpenBao.Transport.node_status/1`: the HA role (`:active`, `:standby`, `:sealed`,
+  `:uninitialized`) of the node a request lands on, from `sys/health`, for boot probes
+  and gauges.
 
 - `stored_as:` on ordinary `encrypt`: retain an existing ciphertext column and immutable
   AEAD field binding while keeping the logical public calculation and write argument.
