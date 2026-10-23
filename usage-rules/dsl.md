@@ -28,7 +28,7 @@ end
 | `scope` | `:tenant` | Key scope: `:tenant`, `:global`, or an `AshVault.Scope` module |
 | `attributes` | `[]` | Shorthand: list of fields, each an `encrypt` with default options |
 | `decrypt_by_default` | `[]` | Encrypted fields whose decrypt calculation loads automatically |
-| `encrypt_nil?` | `true` | Encrypt `nil` (hides nullness) instead of storing SQL NULL; overridable per field |
+| `encrypt_nil?` | `true` | Encrypt `nil` (hides nullness) instead of storing SQL NULL; overridable per field. With `false`, an explicit `nil` on update always writes NULL, even from a stale record |
 | `scope_owner?` | `false` | This resource *is* the scope (tenant/organization). Required for `key_lifecycle` |
 
 ## `encrypt` entity options

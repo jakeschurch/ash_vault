@@ -179,6 +179,11 @@ defmodule AshVault do
   Returns the changeset with the error added when encryption fails, so `MissingScope`,
   `KeyDestroyed` and `ProviderUnavailable` surface as ordinary Ash errors rather than a
   raise inside a `before_action` hook.
+
+  On an update, a backing attribute that must become `nil` (an explicit `nil` with
+  `encrypt_nil?: false`, or its lookup token) is written as an unconditional `NULL`
+  assignment. An attribute change would be dropped whenever the caller's in-memory
+  record already holds `nil` (a stale record), leaving the stored ciphertext in place.
   """
   @spec encrypt_and_set(Ash.Changeset.t(), atom(), term(), AshVault.Context.t()) ::
           Ash.Changeset.t()
@@ -186,9 +191,7 @@ defmodule AshVault do
     case write_attributes(changeset.resource, field, value, context) do
       {:ok, attributes} ->
         attributes
-        |> Enum.reduce(changeset, fn {name, value}, changeset ->
-          Ash.Changeset.force_change_attribute(changeset, name, value)
-        end)
+        |> Enum.reduce(changeset, &set_backing_attribute(&2, &1))
         |> scrub_plaintext(field)
 
       {:error, error} ->
@@ -197,6 +200,12 @@ defmodule AshVault do
         |> Ash.Changeset.add_error(error)
     end
   end
+
+  defp set_backing_attribute(%Ash.Changeset{action_type: :update} = changeset, {name, nil}),
+    do: Ash.Changeset.atomic_update(changeset, name, nil)
+
+  defp set_backing_attribute(changeset, {name, value}),
+    do: Ash.Changeset.force_change_attribute(changeset, name, value)
 
   @doc """
   Every backing attribute a write of `field` must set: the ciphertext, plus the lookup

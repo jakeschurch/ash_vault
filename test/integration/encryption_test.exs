@@ -45,6 +45,21 @@ defmodule AshVault.Integration.EncryptionTest do
     Repo.query!(sql, params).rows
   end
 
+  describe "explicit nil from a stale record" do
+    test "the UPDATE writes NULL even when the record already shows nil" do
+      user = create!(%{ssn: "123-45-6789"})
+      id = Ecto.UUID.dump!(user.id)
+      assert [[blob]] = raw("SELECT encrypted_ssn FROM users WHERE id = $1", [id])
+      assert is_binary(blob)
+
+      %{user | encrypted_ssn: nil}
+      |> Ash.Changeset.for_update(:update, %{ssn: nil}, tenant: @acme, authorize?: false)
+      |> Ash.update!()
+
+      assert [[nil]] = raw("SELECT encrypted_ssn FROM users WHERE id = $1", [id])
+    end
+  end
+
   describe "round trip" do
     test "create then read returns the plaintext" do
       create!(%{email: "a@b.c"})
