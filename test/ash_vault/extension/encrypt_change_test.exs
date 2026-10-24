@@ -3,6 +3,8 @@ defmodule AshVault.Extension.EncryptChangeTest do
   # talks to the default-named Memory provider. Each test starts a fresh one.
   use ExUnit.Case, async: false
 
+  require Ash.Query
+
   alias AshVault.Errors.MissingScope
   alias AshVault.KeyProviders.Memory
   alias AshVault.Test.EtsNote
@@ -108,6 +110,53 @@ defmodule AshVault.Extension.EncryptChangeTest do
 
       assert <<"AV", 1::8, _::binary>> = Map.get(user, :encrypted_ssn)
       assert Ash.load!(user, [:ssn], tenant: "acme").ssn == "123-45-6789"
+    end
+  end
+
+  describe "explicit nil from a stale record" do
+    defp stored(user) do
+      EtsUser
+      |> Ash.Query.filter(id == ^user.id)
+      |> Ash.read_one!(tenant: "acme")
+      |> Map.get(:encrypted_ssn)
+    end
+
+    test "clears stored ciphertext the caller's record no longer shows" do
+      user = create!(%{ssn: "123-45-6789"})
+      assert is_binary(stored(user))
+
+      stale = %{user | encrypted_ssn: nil}
+
+      stale
+      |> Ash.Changeset.for_update(:update, %{ssn: nil}, tenant: "acme")
+      |> Ash.update!()
+
+      assert stored(user) == nil
+    end
+
+    test "clears regardless of where a resource adds its own before_action hooks" do
+      user = create!(%{ssn: "123-45-6789"})
+      stale = %{user | encrypted_ssn: nil}
+
+      stale
+      |> Ash.Changeset.for_update(:update, %{ssn: nil}, tenant: "acme")
+      |> Ash.Changeset.before_action(& &1, prepend?: true)
+      |> Ash.Changeset.before_action(& &1)
+      |> Ash.update!()
+
+      assert stored(user) == nil
+    end
+
+    test "a current record clears too" do
+      user = create!(%{ssn: "123-45-6789"})
+
+      updated =
+        user
+        |> Ash.Changeset.for_update(:update, %{ssn: nil}, tenant: "acme")
+        |> Ash.update!()
+
+      assert stored(user) == nil
+      assert Ash.load!(updated, [:ssn], tenant: "acme").ssn == nil
     end
   end
 

@@ -7,6 +7,12 @@ All notable changes to AshVault are recorded here. The format follows
 
 ### Fixed
 
+- An explicit `nil` for an `encrypt_nil?: false` field now always clears the stored
+  ciphertext on an update. `encrypt_and_set/4` writes it as an unconditional `NULL`
+  assignment rather than an attribute change, which Ash dropped as a no-op whenever the
+  caller's record already held `nil` (a stale record), leaving the old ciphertext in the
+  row. Non-nil writes are unchanged; their random nonce never equals a stored value.
+
 - OpenBao providers no longer stay pinned to a demoted standby after an HA leader change.
   Every request now sends `connection: close` (new `reuse_connections` option, default
   `false`), so each one reaches the node `:address` routes to at that moment. Pooled
