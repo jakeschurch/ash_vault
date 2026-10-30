@@ -64,6 +64,79 @@ defmodule AshVault.KeyProviders.LocalTest do
   defp meta_path(root, scope), do: Path.join(scope_path(root, scope), "meta.json")
   defp tombstone_path(root, scope), do: scope_path(root, scope) <> ".tombstone"
 
+  describe "key root boundaries" do
+    @describetag :root_boundaries
+
+    test "empty scopes cannot touch the key root or another scope's tombstone", %{
+      name: name,
+      root: root
+    } do
+      assert {:ok, _} = Local.current_key(name, "erased")
+      assert :ok = Local.destroy(name, "erased")
+      before = File.ls!(root) |> Enum.sort()
+
+      for operation <- [
+            fn -> Local.current_key(name, "") end,
+            fn -> Local.current_key(name, "", :mac) end,
+            fn -> Local.get_key(name, "", 1) end,
+            fn -> Local.get_key(name, "", 1, :mac) end,
+            fn -> Local.rotate(name, "") end,
+            fn -> Local.rotate(name, "", :mac) end,
+            fn -> Local.lookup_key(name, "") end,
+            fn -> Local.destroy(name, "") end,
+            fn -> Local.scope_dir("") end
+          ] do
+        assert_raise ArgumentError, ~r/non-empty/, operation
+      end
+
+      assert Enum.sort(File.ls!(root)) == before
+      assert {:error, :destroyed} = Local.current_key(name, "erased")
+    end
+
+    for replacement <- [:missing, :empty, :initialized] do
+      @tag replacement: replacement
+      test "a #{replacement} replacement root fails closed until the original is restored", %{
+        name: name,
+        root: root,
+        replacement: replacement
+      } do
+        assert {:ok, %{key: original}} = Local.current_key(name, "live")
+        assert {:ok, _} = Local.current_key(name, "erased")
+        assert :ok = Local.destroy(name, "erased")
+        detached = root <> "-detached"
+        File.rename!(root, detached)
+
+        case replacement do
+          :missing -> :ok
+          :empty -> File.mkdir!(root)
+          :initialized -> Local.init_root!(root)
+        end
+
+        for operation <- [
+              fn -> Local.current_key(name, "erased") end,
+              fn -> Local.current_key(name, "erased", :mac) end,
+              fn -> Local.get_key(name, "live", 1) end,
+              fn -> Local.get_key(name, "live", 1, :mac) end,
+              fn -> Local.rotate(name, "erased") end,
+              fn -> Local.rotate(name, "erased", :mac) end,
+              fn -> Local.lookup_key(name, "erased") end,
+              fn -> Local.destroy(name, "live") end
+            ] do
+          assert {:error, %ProviderUnavailable{}} = operation.()
+        end
+
+        if replacement == :missing, do: refute(File.exists?(root))
+        refute File.exists?(scope_path(root, "erased"))
+        refute File.exists?(tombstone_path(root, "live"))
+        File.rm_rf!(root)
+        File.rename!(detached, root)
+
+        assert {:ok, %{key: ^original}} = Local.current_key(name, "live")
+        assert {:error, :destroyed} = Local.current_key(name, "erased")
+      end
+    end
+  end
+
   describe "start_link/1" do
     test "requires a root" do
       assert_raise ArgumentError, ~r/requires a `:root`/, fn -> Local.start_link([]) end
@@ -510,7 +583,7 @@ defmodule AshVault.KeyProviders.LocalTest do
       File.chmod!(blocked_root, 0o600)
       on_exit(fn -> File.chmod(blocked_root, 0o700) end)
 
-      assert {:error, %ProviderUnavailable{reason: {:tombstone_unreadable, _, :eacces}}} =
+      assert {:error, %ProviderUnavailable{reason: {:key_root_unavailable, _, :eacces}}} =
                Local.current_key(blocked_name, scope)
 
       assert {:error, %ProviderUnavailable{}} = Local.get_key(blocked_name, scope, 1)

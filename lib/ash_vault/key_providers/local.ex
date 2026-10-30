@@ -64,6 +64,10 @@ defmodule AshVault.KeyProviders.Local do
   created automatically — a fresh install has an empty root too, and auto-creating the
   sentinel would make the two indistinguishable again.
 
+  Every operation checks that the root and sentinel still identify the store opened
+  at startup. A missing, unreadable or replaced store returns `ProviderUnavailable`,
+  including when a mounted volume disappears while the provider is running.
+
   All operations are serialised through a `GenServer`, reads included. Simplicity beats
   throughput here; `AshVault.KeyProviders.OpenBao` is the answer for load.
 
@@ -269,7 +273,8 @@ defmodule AshVault.KeyProviders.Local do
   every filesystem, so operators can map a tenant id to a directory and back.
   """
   @spec scope_dir(binary()) :: String.t()
-  def scope_dir(scope) when is_binary(scope), do: Base.url_encode64(scope, padding: false)
+  def scope_dir(scope) when is_binary(scope),
+    do: scope |> validate_scope!() |> Base.url_encode64(padding: false)
 
   @doc """
   The purposes this provider serves: `[:data, :mac]`.
@@ -420,11 +425,11 @@ defmodule AshVault.KeyProviders.Local do
     :exit, reason -> {:error, {:provider_unavailable, reason}}
   end
 
-  defp validate_scope!(scope) when is_binary(scope), do: scope
+  defp validate_scope!(scope) when is_binary(scope) and byte_size(scope) > 0, do: scope
 
   defp validate_scope!(scope) do
     raise ArgumentError, """
-    #{inspect(__MODULE__)} scopes must be binaries, got: #{inspect(scope)}.
+    #{inspect(__MODULE__)} scopes must be binaries and non-empty, got: #{inspect(scope)}.
 
     Scopes reach a key provider already normalised to a binary by the vault's
     `AshVault.Scope` implementation.
@@ -485,7 +490,14 @@ defmodule AshVault.KeyProviders.Local do
     verify_writable!(root)
     warn_on_loose_permissions(root)
 
-    {:ok, %{root: root, key_bytes: Keyword.fetch!(opts, :key_bytes)}}
+    case root_identity(root) do
+      {:ok, identity} ->
+        {:ok, %{root: root, root_identity: identity, key_bytes: Keyword.fetch!(opts, :key_bytes)}}
+
+      {:error, _reason} ->
+        raise ArgumentError,
+              uninitialised_message(root, "changed while the provider was starting")
+    end
   end
 
   defp verify_initialised!(root) do
@@ -568,24 +580,52 @@ defmodule AshVault.KeyProviders.Local do
 
   @impl GenServer
   def handle_call({:current_key, scope, purpose}, _from, state) do
-    {:reply, do_current_key(state, scope, purpose), state}
+    {:reply, with_key_root(state, fn -> do_current_key(state, scope, purpose) end), state}
   end
 
   def handle_call({:get_key, scope, version, purpose}, _from, state) do
-    {:reply, do_get_key(state, scope, version, purpose), state}
+    {:reply, with_key_root(state, fn -> do_get_key(state, scope, version, purpose) end), state}
   end
 
   def handle_call({:rotate, scope, purpose}, _from, state) do
-    {:reply, do_rotate(state, scope, purpose), state}
+    {:reply, with_key_root(state, fn -> do_rotate(state, scope, purpose) end), state}
   end
 
   def handle_call({:destroy, scope}, _from, state) do
-    {:reply, do_destroy(state, scope), state}
+    {:reply, with_key_root(state, fn -> do_destroy(state, scope) end), state}
   end
 
   def handle_call({:lookup_key, scope}, _from, state) do
-    {:reply, do_lookup_key(state, scope), state}
+    {:reply, with_key_root(state, fn -> do_lookup_key(state, scope) end), state}
   end
+
+  defp with_key_root(state, operation) do
+    with :ok <- check_key_root(state),
+         result = operation.(),
+         :ok <- check_key_root(state) do
+      result
+    end
+  end
+
+  defp check_key_root(state) do
+    case root_identity(state.root) do
+      {:ok, identity} when identity == state.root_identity -> :ok
+      {:ok, _other} -> {:error, unavailable({:key_root_unavailable, state.root, :replaced})}
+      {:error, reason} -> {:error, unavailable({:key_root_unavailable, state.root, reason})}
+    end
+  end
+
+  defp root_identity(root) do
+    with {:ok, %File.Stat{type: :directory} = directory} <- File.stat(root),
+         {:ok, %File.Stat{type: :regular} = sentinel} <- File.stat(sentinel_path(root)) do
+      {:ok, {file_identity(directory), file_identity(sentinel)}}
+    else
+      {:ok, _stat} -> {:error, :invalid_type}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp file_identity(stat), do: {stat.major_device, stat.minor_device, stat.inode}
 
   # -- operations ------------------------------------------------------------
 
@@ -761,8 +801,10 @@ defmodule AshVault.KeyProviders.Local do
   end
 
   defp ensure_dir(dir) do
-    case File.mkdir_p(dir) do
+    # The scope is one encoded path component. Never recreate a missing key root.
+    case File.mkdir(dir) do
       :ok -> File.chmod(dir, 0o700)
+      {:error, :eexist} -> File.chmod(dir, 0o700)
       {:error, reason} -> {:error, unavailable({:mkdir_failed, dir, reason})}
     end
   end

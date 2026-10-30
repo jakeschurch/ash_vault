@@ -54,6 +54,10 @@ children = [MyApp.Repo] ++ MyApp.Vault.child_specs()
   creates it with mode 0700 and a `.ash_vault_root` sentinel). That refusal protects against an
   unmounted volume looking like an empty key store. Do not "fix" it by creating the sentinel by
   hand on the wrong filesystem.
+- `Local` scopes must be non-empty binaries. Every operation checks the initialized root
+  and sentinel against the store opened at startup; a missing, unreadable or replaced
+  store is `ProviderUnavailable`. Restore the original volume; never initialize an empty
+  replacement to make the error go away.
 - `OpenBao` needs no process; `setup/0` mounts the KV engine that holds tombstones.
 
 ## Configuration
