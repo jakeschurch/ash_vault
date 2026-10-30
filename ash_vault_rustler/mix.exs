@@ -57,7 +57,7 @@ defmodule AshVaultRustler.MixProject do
       # variable, so whichever one the switch picks has to already be there. See
       # `AshVaultRustler.Native` for the switch and the README for the release steps.
       {:rustler, "~> 0.38"},
-      {:rustler_precompiled, "~> 0.8"},
+      {:rustler_precompiled, "~> 0.10"},
       {:ex_doc, ">= 0.0.0", only: :dev, runtime: false}
     ]
   end

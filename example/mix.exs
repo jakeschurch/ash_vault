@@ -30,8 +30,8 @@ defmodule Example.MixProject do
   defp deps do
     [
       {:ash_vault, path: ".."},
-      {:ash, "~> 3.0"},
-      {:ash_postgres, "~> 2.0"},
+      {:ash, "~> 3.37 and >= 3.37.2"},
+      {:ash_postgres, "~> 2.15 and >= 2.15.2"},
       # Ash.Policy.Authorizer needs a SAT solver at runtime. The parent declares it
       # `only: [:dev, :test]`, so it does not reach us through the path dep.
       {:simple_sat, "~> 0.1"},

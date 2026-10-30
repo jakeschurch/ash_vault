@@ -135,6 +135,9 @@ node, or anything where losing a disk should not lose every customer's data.
 
 ## Installation
 
+Requires Ash 3.37.2 or later within 3.x. PostgreSQL applications should use
+AshPostgres 2.15.2 or later within 2.x to include the tenant-isolation security fixes.
+
 ```elixir
 def deps do
   [

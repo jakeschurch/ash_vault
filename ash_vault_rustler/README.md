@@ -69,7 +69,7 @@ either decrypts with the other; the test suite asserts both directions across si
 Be precise about this, because the temptation to overclaim here is enormous.
 
 **The level-1 cache does not eliminate the per-operation copy.**
-`AshVault.KeyProviders.Cached.get_key/2` returns a *binary* to the BEAM. A copy of the
+`AshVault.KeyProviders.Cached.get_key/3` returns a *binary* to the BEAM. A copy of the
 key lands on an Elixir process heap for every single encrypt and decrypt, and that copy
 is the garbage collector's business, not ours. This package bounds the lifetime of the
 **authoritative** copy. Eliminating the per-operation one needs the opaque-handle path,
@@ -81,7 +81,7 @@ What goes away is the *repeat*: with a cache in front, key bytes exist as an Eli
 once per cache miss rather than once per field read.
 
 **The TTL is the erasure SLA, but only for erasures that do not go through the vault.**
-`AshVault.KeyProviders.Cached.destroy/1` evicts synchronously on every connected node
+`AshVault.KeyProviders.Cached.destroy/2` evicts synchronously on every connected node
 before it returns, and fails if any node does not acknowledge — so an erasure performed
 through the vault is immediate. An erasure performed **out of band** is not: a
 `mix ash_vault.destroy_keys` in an unclustered node, an operator deleting a transit key
@@ -106,7 +106,7 @@ because a key that might reach swap beats a node that refuses to decrypt. Check
 
 **Nothing here defends against a compromised application.** An attacker with code
 execution can ask the cache for a key exactly as your app does. See the parent's
-[threat model](../documentation/topics/threat-model.md).
+[threat model](https://hexdocs.pm/ash_vault/threat-model.html).
 
 ---
 
@@ -252,7 +252,7 @@ cache and the opaque key path are.
 
 ### Known coverage gap
 
-`AshVault.KeyProviders.Cached.evict_scope/1` fans out to `Node.list(:connected)`, which is
+`AshVault.KeyProviders.Cached.evict_scope/2` fans out to `Node.list(:connected)`, which is
 empty on a single node, so the `:erpc.multicall/5` call itself is never executed by the
 test suite — there is no cluster here to stand one up against. What *is* tested is the
 decision the fan-out feeds:

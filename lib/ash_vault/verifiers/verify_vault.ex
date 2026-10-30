@@ -51,11 +51,12 @@ defmodule AshVault.Verifiers.VerifyVault do
       `deps/ash/lib/ash/resource/verifiers/validate_relationship_attributes.ex:33-40`
       raises "expects source attribute `email` to be defined"; the other side is caught on
       the other resource at `:75-83` of the same file.
-    * the multitenancy attribute —
-      `deps/ash/lib/ash/resource/verifiers/validate_multitenancy.ex:57-66` raises
-      "Attribute email used in multitenancy configuration does not exist".
     * a `postgres` `check_constraints` entry —
       `deps/ash_postgres/lib/verifiers/validate_check_constraints.ex:17-30` raises.
+
+  The multitenancy attribute is rejected earlier by
+  `AshVault.Transformers.SetupEncryption`, before removing any attributes. AshPostgres
+  needs that column while persisting key metadata, before Ash's multitenancy verifier runs.
 
   Two do not, and this verifier covers them:
 

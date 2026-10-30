@@ -7,6 +7,10 @@ database. Read this file in full before touching an encrypted resource.
 
 ## Setup
 
+Use Ash 3.37.2 or later within 3.x. With AshPostgres, use 2.15.2 or later within 2.x;
+earlier releases have tenant-isolation vulnerabilities. Keep the application's
+lockfile current and run `mix hex.audit` after dependency updates.
+
 ```elixir
 # 1. A vault: the key provider plus defaults (AES-256-GCM, tenant scope, manual rotation).
 defmodule MyApp.Vault do

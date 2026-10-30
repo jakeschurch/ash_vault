@@ -310,6 +310,14 @@ defmodule AshVault.Transformers.SetupEncryption do
           path: [:ash_vault, :encrypt],
           message: "cannot encrypt primary key attribute #{inspect(field.name)}"
 
+      attribute.name == Ash.Resource.Info.multitenancy_attribute(dsl) ->
+        raise Spark.Error.DslError,
+          module: module,
+          path: [:ash_vault, :encrypt],
+          message:
+            "cannot encrypt multitenancy attribute #{inspect(field.name)}; " <>
+              "Ash needs the tenant column to remain an attribute"
+
       Ash.Resource.Info.attribute(dsl, AshVault.encrypted_field_name(dsl, field.name)) ->
         raise Spark.Error.DslError,
           module: module,

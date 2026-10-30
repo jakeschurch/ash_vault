@@ -10,7 +10,7 @@
 //!
 //! The length checks are copied deliberately, including the reasoning. OTP's
 //! `:crypto.crypto_one_time_aead/7` accepts a truncated GCM tag and compares only its
-//! leading bytes, which was a real forgery vector in this project (REVIEW_FINDINGS #6).
+//! leading bytes, which permits forgery by guessing a shortened authentication tag.
 //! `aes-gcm`'s fixed-size `Tag` type would reject a short tag anyway, but the check is
 //! written out so that the two implementations reject exactly the same inputs for exactly
 //! the same reasons, rather than by accident of a different library's typing.
