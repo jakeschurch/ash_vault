@@ -339,5 +339,6 @@ defmodule AshVault.KeyProviders.OpenBaoRetirementTest do
   defp native_preflight(OpenBaoTransit, name) do
     for suffix <- ["", ".mac", "_lookup"], do: {"GET", "/v1/transit/keys/#{name}#{suffix}"}
   end
+
   defp native_preflight(_provider, _name), do: []
 end
