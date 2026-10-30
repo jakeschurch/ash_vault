@@ -75,6 +75,7 @@ Generates generic actions that rotate or destroy this scope's keys. Names are yo
 ## Don't
 
 - Don't list a field twice in `encrypt`/`attributes` (compile error).
+- Don't encrypt a primary key or the resource's multitenancy attribute (compile error).
 - Don't use `searchable?` on non-string-like types (`:string`, `:ci_string`, `:binary`,
   `:uuid` are accepted) without a custom `normalize:` returning a binary.
 - Don't add `identity`/custom indexes on an encrypted field. Use `unique?: true`.

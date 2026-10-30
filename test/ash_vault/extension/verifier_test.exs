@@ -444,25 +444,24 @@ defmodule AshVault.Extension.VerifierTest do
       assert Exception.message(error) =~ "expects source attribute `email` to be defined"
     end
 
-    test "the multitenancy attribute is already caught by Ash" do
-      dsl =
-        define_postgres!(Verify.PlaintextTenantAttribute, """
-          postgres do
-            table "search_users"
-            repo AshVault.Test.Repo
-          end
+    test "the multitenancy attribute is rejected before postgres persists key metadata" do
+      error =
+        assert_dsl_error("cannot encrypt multitenancy attribute :email", fn ->
+          define_postgres!(Verify.PlaintextTenantAttribute, """
+            postgres do
+              table "search_users"
+              repo AshVault.Test.Repo
+            end
 
-          multitenancy do
-            strategy :attribute
-            attribute :email
-          end
-        """)
+            multitenancy do
+              strategy :attribute
+              attribute :email
+            end
+          """)
+        end)
 
-      assert {:error, %Spark.Error.DslError{} = error} =
-               Ash.Resource.Verifiers.ValidateMultitenancy.verify(dsl)
-
-      assert Exception.message(error) =~
-               "Attribute email used in multitenancy configuration does not exist"
+      assert error.path == [:ash_vault, :encrypt]
+      assert Exception.message(error) =~ "tenant column to remain an attribute"
     end
   end
 end
