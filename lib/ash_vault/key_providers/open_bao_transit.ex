@@ -112,6 +112,12 @@ defmodule AshVault.KeyProviders.OpenBaoTransit do
   erasing a subject who has data under both means destroying under both vaults. See
   [Two vaults in one application](two-vaults.md).
 
+  The exporting provider escapes ambiguous binary scopes into a versioned prefix.
+  Before destruction this provider also checks that legacy data and MAC keys are
+  non-exportable and no exporting-provider lookup key is present. Conflicting or
+  ambiguous ownership is `ProviderUnavailable`, before writing any tombstone. With
+  server retirement, the plugin repeats that check inside the retirement transaction.
+
   ## The OpenBao policy this provider needs
 
   Verified against openbao 2.6.2. `POST /v1/transit/encrypt/<name>` **creates the key**

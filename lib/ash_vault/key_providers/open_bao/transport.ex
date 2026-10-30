@@ -178,6 +178,7 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
   defp data_key_name?(_), do: false
 
   @doc "Require explicit migration/provisioning before using the escaped binary namespace."
+  @spec ensure_namespace(module(), String.t()) :: :ok | {:error, term()}
   def ensure_namespace(provider, "ashvault.v2.export." <> _ = name) do
     case get(provider, kv_path(provider, "/data/namespaces/#{name}")) do
       {:ok,
@@ -198,6 +199,7 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
   def ensure_namespace(_provider, _name), do: :ok
 
   @doc "Refuse native destruction when legacy keys belong to the exporting provider."
+  @spec verify_native_namespace(module(), String.t()) :: :ok | {:error, term()}
   def verify_native_namespace(provider, name) do
     Enum.reduce_while([name, name <> ".mac", name <> "_lookup"], :ok, fn key, :ok ->
       case read_meta(provider, key) do
@@ -210,6 +212,7 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
   end
 
   @doc "Move an ambiguous exportable scope without exporting key material to the client."
+  @spec migrate_binary_namespace(module(), binary(), boolean()) :: :ok | {:error, term()}
   def migrate_binary_namespace(provider, scope, rollback? \\ false) do
     encoded = Base.url_encode64(validate_scope!(provider, scope), padding: false)
 

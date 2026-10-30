@@ -7,6 +7,11 @@ All notable changes to AshVault are recorded here. The format follows
 
 ### Fixed
 
+- Exporting OpenBao binary scopes cannot collide with the native provider's key
+  namespace. Ambiguous binary scopes use a versioned prefix with an explicit,
+  transactional migration that preserves historical keys, lookup tokens and erasure.
+  Native destruction refuses foreign exportable keys before writing a tombstone.
+
 - An explicit `nil` for an `encrypt_nil?: false` field now always clears the stored
   ciphertext on an update. `encrypt_and_set/4` writes it as an unconditional `NULL`
   assignment rather than an attribute change, which Ash dropped as a no-op whenever the
@@ -22,6 +27,9 @@ All notable changes to AshVault are recorded here. The format follows
   request; `reuse_connections: true` restores pooling for non-HA servers.
 
 ### Added
+
+- `ASHVAULT_BACKEND=memory|openbao` selects integration tests across Elixir and Go;
+  `openbao` runs stock Transit and retirement-plugin checks with one selector.
 
 - Optional server-enforced OpenBao retirement: `server_retirement: true` on either
   provider requires the AshVault external plugin and transactional storage. Retirement

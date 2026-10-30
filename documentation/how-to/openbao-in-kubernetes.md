@@ -218,12 +218,53 @@ in-flight responses or erase historical OpenBao snapshots/Raft logs.
 
 ### Verify the plugin
 
-From `openbao_plugin/`, run `go test -race ./...`. For the real process/upgrade suite,
-run `ASHVAULT_BAO_INTEGRATION=1 go test -count=1 -timeout 3m ./...` with `bao`, `curl`,
+`ASHVAULT_BACKEND` is the shared test selector: `memory` (default) runs without services;
+`openbao` includes both stock Transit and plugin integration checks. From
+`openbao_plugin/`, run `ASHVAULT_BACKEND=openbao go test -race -count=1 -timeout 3m ./...` with `bao`, `curl`,
 `go` and `rtk` on PATH (Linux). It starts its own disposable Raft server, upgrades stock
 keys in place, kills delayed clients and the plugin process, and restarts the server.
-The Elixir suite additionally accepts `ASHVAULT_RETIREMENT_MOUNT` naming an initialized
-plugin mount alongside the ordinary stock Transit test mount.
+For Elixir, `ASHVAULT_BACKEND=openbao mix test` includes the full PostgreSQL/OpenBao
+suite. Prepare stock Transit at `transit` and an initialized plugin at `ashvault-transit`.
+`BAO_ADDR` and `BAO_TOKEN` configure their connection; no separate integration toggles
+are needed.
+
+### Migrate ambiguous binary scopes
+
+Ordinary text tenant identifiers keep their names. An exporting scope whose canonical
+base64url encoding starts with `nx_` formerly overlapped the native provider's prefix.
+It now uses `ashvault.v2.export.<encoded>`. Every operation on this reserved binary
+range requires explicit namespace readiness in KV; missing or ambiguous readiness is
+an error, so existing ciphertext cannot silently acquire a new key version 1.
+
+Stop all writers and drain requests, including older application versions. Install the
+updated plugin at the existing mount without disabling it, initialize retirement as
+above, and run with an operator token:
+
+```sh
+mix ash_vault.openbao.migrate_namespace BASE64URL_SCOPE
+```
+
+Use the same task to provision a fresh scope in this binary range. The token needs
+`sudo` and `update` on `<mount>/ashvault/namespace/*`, `read` on `sys/mounts` and old
+KV tombstones, plus read/write access to `<kv_mount>/data/namespaces/*` and tombstones.
+Applications need read access to the namespaces path as well as their existing grants.
+
+The server atomically moves exportable data/MAC/lookup policies and archives, retaining
+their key bytes, version numbers and timestamps. Non-exportable keys belonging to the
+native scope stay untouched. Mixed ownership, unexpected archives and occupied
+destinations fail closed. The client never receives key bytes. Historical tombstones
+and server retirements remain erasures; old ambiguous erasure cannot be reinterpreted
+as a new live scope. KV readiness is written last. Keep writers stopped after a failure
+and repeat the same command to finish an interrupted migration.
+
+For rollback, keep writers stopped and use the same command with `--rollback`. It
+restores the original keys and disables the new namespace, and refuses an occupied or
+retired legacy destination or an erased new scope. It never removes retirement markers.
+Resume older code only after rollback completes. After successful forward migration,
+stock mode can return to the original stock Transit implementation while retaining the
+mount storage and KV readiness; all clients must use the updated library. Keep the
+plugin when using `server_retirement: true`. Neither direction re-encrypts rows or
+changes lookup tokens. Never delete readiness or tombstones to force a retry.
 
 ## A private CA
 

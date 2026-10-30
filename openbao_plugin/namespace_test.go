@@ -74,10 +74,33 @@ func TestNamespaceIsolationAndOccupiedRollback(t *testing.T) {
 	}
 	mustCall(t, b, s, logical.ReadOperation, "keys/"+legacyBinary, nil)
 	mustCall(t, b, s, logical.UpdateOperation, "ashvault/retire/"+legacyBinary, map[string]interface{}{"key_profile": "native"})
+	r, _ = call(b, s, logical.UpdateOperation, "ashvault/namespace/"+escapedBinary, map[string]interface{}{"rollback": true})
+	if status(r) != 400 {
+		t.Fatal("rollback restored keys behind a permanent legacy retirement")
+	}
 	migrate(t, b, s, false) // old retirement after migration must not erase the new scope
 	mustCall(t, b, s, logical.ReadOperation, "export/encryption-key/"+escapedBinary+"/1", nil)
 	mustCall(t, b, s, logical.UpdateOperation, "ashvault/retire/"+escapedBinary, nil)
 	assertAbsent(t, s, escapedBinary)
+}
+
+func TestNativeRetirementCannotCommitAcrossForeignCreation(t *testing.T) {
+	s := testStorage(t)
+	b := testBackend(t, s)
+	initialize(t, b, s)
+	prepared, resume, done := make(chan struct{}), make(chan struct{}), make(chan *logical.Response, 1)
+	controlled := &controlledStorage{Storage: s, beforeCommit: func() { close(prepared); <-resume }}
+	go func() {
+		r, _ := call(b, controlled, logical.UpdateOperation, "ashvault/retire/"+legacyBinary, map[string]interface{}{"key_profile": "native"})
+		done <- r
+	}()
+	<-prepared
+	create(t, b, s, legacyBinary, true)
+	close(resume)
+	if status(<-done) != 503 {
+		t.Fatal("stale native retirement erased a foreign key")
+	}
+	mustCall(t, b, s, logical.ReadOperation, "export/encryption-key/"+legacyBinary+"/1", nil)
 }
 
 func TestNamespaceMigrationPreservesLegacyErasure(t *testing.T) {

@@ -22,8 +22,12 @@ import (
 // This suite owns its Raft server, credentials and plugin processes. It never
 // connects to a developer's configured OpenBao instance.
 func TestOpenBaoIntegration(t *testing.T) {
-	if os.Getenv("ASHVAULT_BAO_INTEGRATION") != "1" {
-		t.Skip("set ASHVAULT_BAO_INTEGRATION=1; requires bao and go on PATH")
+	switch os.Getenv("ASHVAULT_BACKEND") {
+	case "", "memory":
+		t.Skip("set ASHVAULT_BACKEND=openbao; requires bao, curl and go on PATH")
+	case "openbao":
+	default:
+		t.Fatal("ASHVAULT_BACKEND must be memory or openbao")
 	}
 	dir := t.TempDir()
 	plugins := filepath.Join(dir, "plugins")

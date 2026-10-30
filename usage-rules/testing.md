@@ -1,5 +1,13 @@
 # Testing code that uses AshVault
 
+For this repository, `ASHVAULT_BACKEND` is the shared integration selector:
+`memory` (default) runs service-free tests; `openbao` runs both stock Transit and
+retirement-plugin integration checks. There are no separate Bao/plugin toggles.
+Use `ASHVAULT_BACKEND=openbao mix test` for the full PostgreSQL/OpenBao suite, with
+stock Transit at `transit` and an initialized plugin at `ashvault-transit`.
+The Go plugin suite uses the same variable and starts its own disposable Raft server.
+`BAO_ADDR` and `BAO_TOKEN` remain connection settings for the Elixir suites.
+
 ## Use the Memory provider
 
 `AshVault.KeyProviders.Memory` keeps keys in a process: no setup, no disk, no network. Never

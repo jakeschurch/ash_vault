@@ -61,6 +61,12 @@ precompiled artifact.
 Services the tagged suites expect: PostgreSQL on `localhost:5432` (`postgres`/`postgres`)
 and OpenBao on `127.0.0.1:8200`.
 
+`ASHVAULT_BACKEND=openbao mix test` (also `mix test.all`) includes both stock Transit
+at `transit` and the initialized retirement plugin at `ashvault-transit`. The default
+`memory` selector is service-free. The Go plugin suite uses the same selector:
+`cd openbao_plugin && ASHVAULT_BACKEND=openbao go test -race -count=1 -timeout 3m ./...`;
+its integration test owns a disposable Raft server.
+
 **Run the postgres suites alone.** `test/support/db.ex` truncates shared tables and the
 acceptance suite drops and recreates the database, so two concurrent runs corrupt each
 other — every failure looks like missing rows. Override the database per run with
