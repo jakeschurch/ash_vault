@@ -83,6 +83,11 @@ a fresh scope's first MAC or encrypt fails. Set it `true` only for a single non-
 servers with `disable_standby_reads = true`. Surface `node_status/0` (`:active` /
 `:standby` / `:sealed` / `:uninitialized`) in a boot probe or gauge.
 
+OpenBao HTTP redirects are refused, including Kubernetes login redirects. Configure
+the final trusted endpoint directly; `req_options` cannot enable redirect following.
+An operation that receives a redirect fails with `ProviderUnavailable` instead of
+forwarding its token or service-account JWT.
+
 ## Key caching: leave it off
 
 `cache: true` (or `cache: [ttl: ..., max_entries: ...]`) wraps the provider in a TTL cache.
