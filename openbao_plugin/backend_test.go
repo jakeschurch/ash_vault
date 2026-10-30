@@ -15,6 +15,34 @@ import (
 
 const testName = "ashvault_dGVuYW50"
 
+func TestCanonicalDataNameEndingInLookup(t *testing.T) {
+	// A canonical data name can end in these letters without being a lookup key.
+	name := "ashvault_a_lookup"
+	s := testStorage(t)
+	b := testBackend(t, s)
+	initialize(t, b, s)
+	create(t, b, s, name, true)
+	create(t, b, s, name+"_lookup", true)
+	mustCall(t, b, s, logical.UpdateOperation, "ashvault/retire/"+name, nil)
+	assertAbsent(t, s, name)
+}
+
+func TestUnsupportedFieldsAndPinnedVersion(t *testing.T) {
+	s := testStorage(t)
+	b := testBackend(t, s)
+	initialize(t, b, s)
+	create(t, b, s, testName, true)
+	mustCall(t, b, s, logical.UpdateOperation, "keys/"+testName+"/rotate", nil)
+	r := mustCall(t, b, s, logical.UpdateOperation, "encrypt/"+testName, map[string]interface{}{"plaintext": "c2VjcmV0", "key_version": 1})
+	if r.Data["key_version"] != 1 {
+		t.Fatal("pinned version response must match ciphertext")
+	}
+	r, _ = call(b, s, logical.UpdateOperation, "keys/"+testName+"/config", map[string]interface{}{"min_decryption_version": 2})
+	if status(r) != 400 {
+		t.Fatal("unsupported field was silently ignored")
+	}
+}
+
 func testStorage(t *testing.T) logical.Storage {
 	t.Helper()
 	p, err := inmem.NewInmem(nil, hclog.NewNullLogger())

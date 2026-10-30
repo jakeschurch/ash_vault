@@ -56,6 +56,14 @@ defmodule AshVault.Vault.Runtime do
     aad = build_aad(scope, ctx)
 
     case opts.cipher.encrypt(plaintext, key_info.key, aad) do
+      {:error, :destroyed} ->
+        raise KeyDestroyed.exception(
+                scope: scope,
+                key_version: key_info.version,
+                resource: ctx.resource,
+                field: ctx.field
+              )
+
       {:ok, payload} ->
         opts.envelope.encode(%{
           version: opts.envelope.version(),
@@ -180,6 +188,14 @@ defmodule AshVault.Vault.Runtime do
     payload = %{ciphertext: env.ciphertext, nonce: env.nonce, tag: env.tag}
 
     case cipher_mod.decrypt(payload, key, aad) do
+      {:error, :destroyed} ->
+        raise KeyDestroyed.exception(
+                scope: scope,
+                key_version: env.key_version,
+                resource: ctx.resource,
+                field: ctx.field
+              )
+
       {:ok, plaintext} ->
         plaintext
 
@@ -450,6 +466,14 @@ defmodule AshVault.Vault.Runtime do
 
   defp mac_error(%ProviderUnavailable{} = error, _opts, _ctx, _operation), do: error
   defp mac_error(%ProviderForbidden{} = error, _opts, _ctx, _operation), do: error
+
+  defp mac_error(:destroyed, opts, ctx, operation),
+    do:
+      KeyDestroyed.exception(
+        scope: resolve_scope!(ctx, opts.scope, operation),
+        resource: ctx.resource,
+        field: ctx.field
+      )
 
   defp mac_error(reason, opts, _ctx, _operation),
     do: ProviderUnavailable.exception(provider: mac_module(opts), reason: reason)

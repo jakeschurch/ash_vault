@@ -159,7 +159,7 @@ rotation, `AshVault.Vault.Runtime` raises `AshVault.Errors.KeyDestroyed` rather 
 falling back to the pre-destroy key. A rejected write is recoverable; a "successful" write
 storing ciphertext nobody can ever read is not.
 
-Both OpenBao providers also recheck the scope tombstone after attempting to create a
+With stock Transit (the default), both OpenBao providers recheck the scope tombstone after attempting to create a
 transit key. A create request can be delayed until after `destroy/1` has already finished
 deleting keys. When its recheck observes the tombstone, the creator deletes that late
 key, confirms absence, and returns `:destroyed` without exporting it or returning a
@@ -173,6 +173,17 @@ in-flight requests before erasing a scope if physical deletion must be complete 
 `destroy/1` returns. A creator that crashes after sending its request cannot perform its
 recheck; retry destruction after outstanding requests have settled. The persistent
 tombstone continues to block provider access throughout cleanup.
+
+Opt into `server_retirement: true` with the AshVault OpenBao plugin to remove that
+client-crash window. Every supported key operation checks permanent retirement markers
+inside a server storage transaction. Retirement writes those markers and deletes all
+data, MAC and lookup key versions in one transaction; a concurrent creator either
+commits before retirement and is deleted, or its transaction cannot commit afterwards.
+Successful destruction needs no creator cleanup or per-scope writer drain. An outage,
+unsupported backend or uncertain commit remains `ProviderUnavailable`; retry destruction
+until confirmed. This does not recall keys already exported or responses already in
+flight, remove application caches, or erase historical OpenBao snapshots and Raft logs.
+See [installation and migration](openbao-in-kubernetes.md#server-enforced-retirement).
 
 ## Running it
 

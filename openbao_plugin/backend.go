@@ -84,6 +84,9 @@ func fields() map[string]*framework.FieldSchema {
 }
 
 func (b *backend) request(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	if !validFields(req) {
+		return invalid("unsupported request field")
+	}
 	storage, ok := req.Storage.(logical.TransactionalStorage)
 	if !ok {
 		return failure(req, 503, "transactional_storage_required")
@@ -110,6 +113,38 @@ func (b *backend) request(ctx context.Context, req *logical.Request, d *framewor
 		return failure(req, 503, "commit_unavailable")
 	}
 	return resp, nil
+}
+
+// Reject options we cannot honor rather than returning a plausible success for
+// Transit features this deliberately restricted backend does not implement.
+func validFields(req *logical.Request) bool {
+	allowed := map[string]bool{"name": true, "kind": true, "version": true}
+	var fields []string
+	switch {
+	case req.Path == "ashvault/initialize":
+		fields = []string{"retired_scopes"}
+	case strings.HasPrefix(req.Path, "keys/") && strings.HasSuffix(req.Path, "/config"):
+		fields = []string{"deletion_allowed"}
+	case strings.HasPrefix(req.Path, "keys/") && !strings.HasSuffix(req.Path, "/rotate"):
+		fields = []string{"type", "exportable", "allow_plaintext_backup", "derived", "convergent_encryption"}
+	case strings.HasPrefix(req.Path, "encrypt/"):
+		fields = []string{"plaintext", "associated_data", "key_version"}
+	case strings.HasPrefix(req.Path, "decrypt/"):
+		fields = []string{"ciphertext", "associated_data"}
+	case strings.HasPrefix(req.Path, "hmac/"):
+		fields = []string{"input", "key_version"}
+	case strings.HasPrefix(req.Path, "verify/"):
+		fields = []string{"input", "hmac", "key_version"}
+	}
+	for _, field := range fields {
+		allowed[field] = true
+	}
+	for field := range req.Data {
+		if !allowed[field] {
+			return false
+		}
+	}
+	return true
 }
 
 func (b *backend) dispatch(ctx context.Context, req *logical.Request, d *framework.FieldData, s logical.Storage) (*logical.Response, error) {
@@ -195,6 +230,11 @@ func (b *backend) keyRequest(ctx context.Context, req *logical.Request, d *frame
 	if p.Derived || p.ConvergentEncryption || p.Imported || p.SoftDeleted || p.AllowPlaintextBackup || p.AutoRotatePeriod != 0 {
 		return invalid("unsupported stored key profile")
 	}
+	switch p.Type {
+	case keysutil.KeyType_AES128_GCM96, keysutil.KeyType_AES256_GCM96, keysutil.KeyType_ChaCha20_Poly1305, keysutil.KeyType_XChaCha20_Poly1305:
+	default:
+		return invalid("unsupported stored key type")
+	}
 	if req.Path == "keys/"+name {
 		return response(metadata(p)), nil
 	}
@@ -233,11 +273,15 @@ func (b *backend) keyRequest(ctx context.Context, req *logical.Request, d *frame
 		return invalid("unsupported operation")
 	}
 	if req.Path == "encrypt/"+name {
-		ciphertext, err := p.EncryptWithFactory(d.Get("key_version").(int), nil, nil, d.Get("plaintext").(string), associatedData(d.Get("associated_data").(string)))
+		version := d.Get("key_version").(int)
+		if version == 0 {
+			version = p.LatestVersion
+		}
+		ciphertext, err := p.EncryptWithFactory(version, nil, nil, d.Get("plaintext").(string), associatedData(d.Get("associated_data").(string)))
 		if err != nil {
 			return invalid("encryption input or key version is invalid")
 		}
-		return response(map[string]interface{}{"ciphertext": ciphertext, "key_version": p.LatestVersion}), nil
+		return response(map[string]interface{}{"ciphertext": ciphertext, "key_version": version}), nil
 	}
 	if req.Path == "decrypt/"+name {
 		plaintext, err := p.DecryptWithFactory(nil, nil, d.Get("ciphertext").(string), associatedData(d.Get("associated_data").(string)))
@@ -253,12 +297,22 @@ func (b *backend) keyRequest(ctx context.Context, req *logical.Request, d *frame
 }
 
 func scopeName(name string) (string, error) {
+	if dataKeyName(name) {
+		return name, nil
+	}
 	data := name
 	if strings.HasSuffix(name, ".mac") {
 		data = strings.TrimSuffix(name, ".mac")
 	} else if strings.HasSuffix(name, "_lookup") {
 		data = strings.TrimSuffix(name, "_lookup")
 	}
+	if dataKeyName(data) {
+		return data, nil
+	}
+	return "", errors.New("invalid name")
+}
+
+func dataKeyName(data string) bool {
 	for _, prefix := range []string{"ashvault_nx_", "ashvault_"} {
 		if !strings.HasPrefix(data, prefix) {
 			continue
@@ -266,10 +320,10 @@ func scopeName(name string) (string, error) {
 		encoded := strings.TrimPrefix(data, prefix)
 		raw, err := base64.RawURLEncoding.DecodeString(encoded)
 		if err == nil && base64.RawURLEncoding.EncodeToString(raw) == encoded {
-			return data, nil
+			return true
 		}
 	}
-	return "", errors.New("invalid name")
+	return false
 }
 
 func retire(ctx context.Context, s logical.Storage, scope string) error {

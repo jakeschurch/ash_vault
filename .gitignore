@@ -30,3 +30,6 @@ erl_crash.dump
 
 # agent scratch
 .claude/agent-memory/
+
+# Locally built optional OpenBao plugin.
+/openbao_plugin/ashvault-transit

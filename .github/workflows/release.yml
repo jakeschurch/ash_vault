@@ -112,6 +112,19 @@ jobs:
           elixir-version: ${{ env.ELIXIR_VERSION }}
       - uses: dtolnay/rust-toolchain@stable
 
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.27.x"
+          cache-dependency-path: openbao_plugin/go.sum
+
+      - name: Optional OpenBao retirement plugin
+        working-directory: openbao_plugin
+        run: |
+          go mod verify
+          go vet ./...
+          go test -race ./...
+          go build ./cmd/ashvault-transit
+
       - name: ash_vault
         run: |
           mix deps.get
