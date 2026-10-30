@@ -107,6 +107,20 @@ deletes all key purposes and prevents delayed creation even if the creator dies.
 The library also writes the KV tombstone for older clients. Retire through the provider;
 direct plugin retirement does not write KV, and needs tombstone export before a downgrade.
 
+## Binary OpenBao scope namespaces
+
+The exporting and native providers have disjoint key names, including for arbitrary
+binary scopes. Exporting scopes whose base64url encoding starts with `nx_` use
+`ashvault.v2.export.<encoded>`; ordinary text tenant IDs retain their existing names.
+Before using such a binary scope, stop writers and run
+`mix ash_vault.openbao.migrate_namespace BASE64URL_SCOPE` with the updated OpenBao
+plugin and an operator token. The same command provisions fresh scopes in that range.
+It preserves data/MAC/lookup keys and every version without exporting keys to the client,
+imports historical erasure into the new namespace, and records KV readiness last.
+An unprovisioned or ambiguous namespace fails closed; never bypass that by minting keys
+manually. `--rollback` requires writers stopped and refuses retired scopes or an occupied
+legacy destination. Do not run older application versions during this migration.
+
 ## Key caching: leave it off
 
 `cache: true` (or `cache: [ttl: ..., max_entries: ...]`) wraps the provider in a TTL cache.

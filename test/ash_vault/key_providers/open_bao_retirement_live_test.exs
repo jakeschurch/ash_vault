@@ -7,12 +7,10 @@ for {module, provider} <- [
     use ExUnit.Case, async: false
     alias AshVault.KeyProviders.OpenBao.Transport
     @provider provider
-    @mount System.get_env("ASHVAULT_RETIREMENT_MOUNT")
+    @mount "ashvault-transit"
     @address System.get_env("BAO_ADDR", "http://127.0.0.1:8200")
     @token System.get_env("BAO_TOKEN", "ashvault-root")
-    @moduletag :openbao
-    if is_nil(@mount),
-      do: @moduletag(skip: "set ASHVAULT_RETIREMENT_MOUNT to an initialized plugin mount")
+    @moduletag :openbao_plugin
 
     use AshVault.Test.Support.KeyProviderCases, setup: &__MODULE__.configure_provider/1
 

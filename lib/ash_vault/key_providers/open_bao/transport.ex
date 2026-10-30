@@ -79,8 +79,13 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
 
   @doc "Atomically retire all purposes of a data key at the server. Never falls back to deletion."
   @spec retire_scope(module(), String.t()) :: :ok | {:error, term()}
-  def retire_scope(provider, name) do
-    case post(provider, transit_path(provider, "/ashvault/retire/#{name}")) do
+  def retire_scope(provider, name, profile \\ :configured) do
+    body =
+      if profile == :configured and provider == AshVault.KeyProviders.OpenBaoTransit,
+        do: %{key_profile: "native"},
+        else: %{}
+
+    case post(provider, transit_path(provider, "/ashvault/retire/#{name}"), body) do
       {:ok,
        %{status: 200, body: %{"data" => %{"protocol" => @retirement_protocol, "retired" => true}}}} ->
         :ok
@@ -156,7 +161,7 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
   end
 
   defp data_key_name?(name) when is_binary(name) do
-    Enum.any?(["ashvault_nx_", "ashvault_"], fn prefix ->
+    Enum.any?(["ashvault.v2.export.", "ashvault_nx_", "ashvault_"], fn prefix ->
       if String.starts_with?(name, prefix) do
         encoded = String.replace_prefix(name, prefix, "")
 
@@ -172,11 +177,107 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
 
   defp data_key_name?(_), do: false
 
+  @doc "Require explicit migration/provisioning before using the escaped binary namespace."
+  @spec ensure_namespace(module(), String.t()) :: :ok | {:error, term()}
+  def ensure_namespace(provider, "ashvault.v2.export." <> _ = name) do
+    case get(provider, kv_path(provider, "/data/namespaces/#{name}")) do
+      {:ok,
+       %{
+         status: 200,
+         body: %{"data" => %{"data" => %{"protocol" => "ashvault-namespace/v2", "ready" => true}}}
+       }} ->
+        :ok
+
+      {:error, error} ->
+        {:error, error}
+
+      {:ok, response} ->
+        retirement_failure(provider, response, :binary_scope_namespace_migration_required)
+    end
+  end
+
+  def ensure_namespace(_provider, _name), do: :ok
+
+  @doc "Refuse native destruction when legacy keys belong to the exporting provider."
+  @spec verify_native_namespace(module(), String.t()) :: :ok | {:error, term()}
+  def verify_native_namespace(provider, name) do
+    Enum.reduce_while([name, name <> ".mac", name <> "_lookup"], :ok, fn key, :ok ->
+      case read_meta(provider, key) do
+        {:ok, :missing} -> {:cont, :ok}
+        {:ok, %{"exportable" => false}} when key != name <> "_lookup" -> {:cont, :ok}
+        {:ok, _} -> {:halt, {:error, unavailable(provider, :scope_namespace_conflict)}}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  @doc "Move an ambiguous exportable scope without exporting key material to the client."
+  @spec migrate_binary_namespace(module(), binary(), boolean()) :: :ok | {:error, term()}
+  def migrate_binary_namespace(provider, scope, rollback? \\ false) do
+    encoded = Base.url_encode64(validate_scope!(provider, scope), padding: false)
+
+    if not String.starts_with?(encoded, "nx_"),
+      do: raise(ArgumentError, "scope does not require namespace migration")
+
+    name = "ashvault.v2.export." <> encoded
+    legacy = "ashvault_" <> encoded
+
+    with :ok <- verify_legacy_mount(provider),
+         {:ok, retired?} <- legacy_erasure(provider, legacy),
+         {:ok, response} <-
+           post(provider, transit_path(provider, "/ashvault/namespace/#{name}"), %{
+             legacy_retired: retired?,
+             rollback: rollback?
+           }) do
+      case response do
+        %{
+          status: 200,
+          body: %{
+            "data" => %{
+              "protocol" => @retirement_protocol,
+              "namespace" => 2,
+              "ready" => ready,
+              "retired" => retired
+            }
+          }
+        }
+        when is_boolean(retired) and ready == not rollback? ->
+          finish_namespace_migration(provider, name, ready, retired)
+
+        _ ->
+          retirement_failure(provider, response, :namespace_migration_unconfirmed)
+      end
+    end
+  end
+
+  defp legacy_erasure(provider, name) do
+    case check_legacy_tombstone(provider, name) do
+      :absent -> {:ok, false}
+      {:error, :destroyed} -> {:ok, true}
+      other -> other
+    end
+  end
+
+  defp finish_namespace_migration(provider, name, ready, retired) do
+    with :ok <- maybe_namespace_tombstone(provider, name, retired) do
+      case post(provider, kv_path(provider, "/data/namespaces/#{name}"), %{
+             data: %{protocol: "ashvault-namespace/v2", ready: ready}
+           }) do
+        {:ok, %{status: status}} when status in 200..299 -> :ok
+        {:error, error} -> {:error, error}
+        {:ok, response} -> unavailable!(provider, response)
+      end
+    end
+  end
+
+  defp maybe_namespace_tombstone(provider, name, true), do: write_tombstone(provider, name)
+  defp maybe_namespace_tombstone(_provider, _name, false), do: :ok
+
   defp import_retirements(provider, names) do
     Enum.reduce_while(names, :ok, fn name, :ok ->
       case check_legacy_tombstone(provider, name) do
         {:error, :destroyed} ->
-          case retire_scope(provider, name) do
+          case retire_scope(provider, name, :historical) do
             :ok -> {:cont, :ok}
             error -> {:halt, error}
           end

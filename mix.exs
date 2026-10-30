@@ -143,7 +143,8 @@ defmodule AshVault.MixProject do
         ],
         Migration: [
           AshVault.Backfill,
-          Mix.Tasks.AshVault.Openbao.InitRetirement
+          Mix.Tasks.AshVault.Openbao.InitRetirement,
+          Mix.Tasks.AshVault.Openbao.MigrateNamespace
         ],
         Errors: [
           AshVault.Errors,
@@ -183,7 +184,12 @@ defmodule AshVault.MixProject do
 
   defp aliases do
     [
-      "test.all": ["test --include postgres --include openbao"],
+      "test.all": [
+        fn args ->
+          System.put_env("ASHVAULT_BACKEND", "openbao")
+          Mix.Task.run("test", args)
+        end
+      ],
       "test.ci": ["test"],
       "spark.formatter": "spark.formatter --extensions AshVault"
     ]

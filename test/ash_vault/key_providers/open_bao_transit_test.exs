@@ -277,12 +277,12 @@ defmodule AshVault.KeyProviders.OpenBaoTransitTest do
       assert %{status: 404} = raw(:get, "/v1/#{@transit_mount}/keys/#{name}")
     end
 
-    test "a transit key that cannot be deleted is an error, not a silent :ok",
+    test "unverifiable ownership fails before writing a tombstone",
          %{scope: scope} do
       scope = scope.()
       name = Transit.key_name(scope)
 
-      assert {:ok, %{version: 1}} = Transit.current_key(scope)
+      assert {:ok, %{version: 1} = original} = Transit.current_key(scope)
 
       put_config(
         token: @token,
@@ -293,10 +293,10 @@ defmodule AshVault.KeyProviders.OpenBaoTransitTest do
 
       put_config(token: @token)
 
-      # Intact but fail-closed: the tombstone landed first, so a fresh v1 can never join
-      # ciphertext whose original key is still out there.
+      # An unreadable mount cannot establish which provider owns the key. Destruction
+      # stops before the tombstone; it never claims erasure or invalidates live data.
       assert %{status: 200} = raw(:get, "/v1/#{@transit_mount}/keys/#{name}")
-      assert {:error, :destroyed} = Transit.current_key(scope)
+      assert {:ok, ^original} = Transit.current_key(scope)
     end
   end
 

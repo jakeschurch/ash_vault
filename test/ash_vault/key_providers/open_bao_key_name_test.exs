@@ -33,6 +33,45 @@ defmodule AshVault.KeyProviders.OpenBaoKeyNameTest do
   # empty binary, which is a legal (if useless) scope and the shortest encoding there is.
   defp scope, do: StreamData.binary()
 
+  describe "provider separation" do
+    test "the reported binary scope cannot alias the native scope abd" do
+      binary = Base.url_decode64!("nx_YWJk", padding: false)
+      assert OpenBao.key_name(binary) == "ashvault.v2.export.nx_YWJk"
+      assert AshVault.KeyProviders.OpenBaoTransit.key_name("abd") == "ashvault_nx_YWJk"
+    end
+
+    property "no exporting purpose can enter the native prefix" do
+      check all(scope <- scope(), max_runs: 2_000) do
+        for name <- [
+              OpenBao.key_name(scope),
+              OpenBao.mac_key_name(scope),
+              OpenBao.lookup_key_name(scope)
+            ] do
+          refute String.starts_with?(name, "ashvault_nx_")
+        end
+      end
+    end
+
+    property "adversarial encodings targeted at the native namespace are escaped" do
+      check all(scope <- scope(), max_runs: 2_000) do
+        encoded = "nx_" <> Base.url_encode64(scope, padding: false)
+
+        case Base.url_decode64(encoded, padding: false) do
+          {:ok, binary} ->
+            if Base.url_encode64(binary, padding: false) == encoded do
+              assert OpenBao.key_name(binary) == "ashvault.v2.export." <> encoded
+
+              refute OpenBao.key_name(binary) ==
+                       AshVault.KeyProviders.OpenBaoTransit.key_name(scope)
+            end
+
+          :error ->
+            :ok
+        end
+      end
+    end
+  end
+
   describe "the structural property" do
     property "no scope's key_name/1 ever ends with the lookup suffix" do
       # This is the discriminating form. A pairwise `key_name(s1) != lookup_key_name(s2)`
@@ -151,14 +190,12 @@ defmodule AshVault.KeyProviders.OpenBaoKeyNameTest do
   describe "the :mac key name" do
     alias AshVault.KeyProviders.OpenBaoTransit
 
-    # The MAC namespace needs no arithmetic: `.` is a legal transit key character but not
-    # a base64url one, and not in either prefix. No data or lookup name contains a `.`;
-    # every MAC name does.
-    property "no data or lookup key name ever contains the MAC separator" do
+    # Versioned prefixes may contain dots; only MAC names can end in .mac.
+    property "no data or lookup key name ever ends with the MAC suffix" do
       check all(scope <- scope(), max_runs: 2_000) do
-        refute String.contains?(OpenBao.key_name(scope), ".")
-        refute String.contains?(OpenBao.lookup_key_name(scope), ".")
-        refute String.contains?(OpenBaoTransit.key_name(scope), ".")
+        refute String.ends_with?(OpenBao.key_name(scope), ".mac")
+        refute String.ends_with?(OpenBao.lookup_key_name(scope), ".mac")
+        refute String.ends_with?(OpenBaoTransit.key_name(scope), ".mac")
       end
     end
 

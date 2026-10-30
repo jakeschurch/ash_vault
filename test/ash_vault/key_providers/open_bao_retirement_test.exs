@@ -231,11 +231,15 @@ defmodule AshVault.KeyProviders.OpenBaoRetirementTest do
       name = provider.key_name("retirement-test")
       assert :ok = provider.destroy("retirement-test")
 
-      assert Enum.reverse(Agent.get(calls, & &1)) == [
-               {"GET", "/v1/ashvault/data/tombstones/#{name}"},
-               {"POST", "/v1/ashvault/data/tombstones/#{name}"},
-               {"POST", "/v1/transit/ashvault/retire/#{name}"}
-             ]
+      preflight = native_preflight(provider, name)
+
+      assert Enum.reverse(Agent.get(calls, & &1)) ==
+               preflight ++
+                 [
+                   {"GET", "/v1/ashvault/data/tombstones/#{name}"},
+                   {"POST", "/v1/ashvault/data/tombstones/#{name}"},
+                   {"POST", "/v1/transit/ashvault/retire/#{name}"}
+                 ]
     end
 
     @tag scenario: :destroy, existing: true, reply: {503, %{"errors" => ["private-needle"]}}
@@ -331,4 +335,10 @@ defmodule AshVault.KeyProviders.OpenBaoRetirementTest do
       refute Enum.any?(Agent.get(calls, & &1), &match?({"POST", _}, &1))
     end
   end
+
+  defp native_preflight(OpenBaoTransit, name) do
+    for suffix <- ["", ".mac", "_lookup"], do: {"GET", "/v1/transit/keys/#{name}#{suffix}"}
+  end
+
+  defp native_preflight(_provider, _name), do: []
 end

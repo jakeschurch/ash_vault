@@ -1,4 +1,19 @@
-ExUnit.start(exclude: [:postgres, :openbao])
+backend = System.get_env("ASHVAULT_BACKEND", "memory")
+ExUnit.start(exclude: [:postgres, :openbao, :openbao_plugin])
+
+case backend do
+  "memory" ->
+    :ok
+
+  "openbao" ->
+    ExUnit.configure(
+      include:
+        Enum.uniq([:postgres, :openbao, :openbao_plugin | ExUnit.configuration()[:include] || []])
+    )
+
+  _ ->
+    raise ArgumentError, "ASHVAULT_BACKEND must be memory or openbao"
+end
 
 included = ExUnit.configuration() |> Keyword.get(:include, [])
 

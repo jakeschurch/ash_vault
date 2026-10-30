@@ -181,9 +181,21 @@ defmodule AshVault.KeyProviders.OpenBao do
 
       iex> AshVault.KeyProviders.OpenBao.key_name("tenant_42")
       "ashvault_dGVuYW50XzQy"
+
+  Binary scopes whose encoded form starts with `nx_` use
+  `ashvault.v2.export.<encoded>` to stay disjoint from the native provider. They
+  require `mix ash_vault.openbao.migrate_namespace BASE64URL_SCOPE` before use;
+  this preserves existing keys and tombstones instead of silently minting new keys.
+  Ordinary text scopes retain their original names.
   """
   @spec key_name(AshVault.KeyProvider.scope()) :: String.t()
-  def key_name(scope), do: Transport.key_name(__MODULE__, "ashvault_", scope)
+  def key_name(scope) do
+    legacy = Transport.key_name(__MODULE__, "ashvault_", scope)
+
+    if String.starts_with?(legacy, "ashvault_nx_"),
+      do: String.replace_prefix(legacy, "ashvault_", "ashvault.v2.export."),
+      else: legacy
+  end
 
   @doc """
   Mount the KV-v2 engine that holds tombstones, if it is not already mounted.
@@ -289,10 +301,9 @@ defmodule AshVault.KeyProviders.OpenBao do
       iex> AshVault.KeyProviders.OpenBao.mac_key_name("tenant_42")
       "ashvault_dGVuYW50XzQy.mac"
 
-  The separator is `.`, which is a legal transit key name character but **not** in the
-  base64url alphabet `key_name/1` encodes the scope with, and not in the `"ashvault_"`
-  prefix either. No `key_name/1` or `lookup_key_name/1` contains a `.`, so no scope's MAC
-  key name can ever equal another scope's data or lookup key name. That argument needs no
+  The suffix `.mac` contains a dot outside the base64url alphabet. Versioned prefixes
+  may contain dots, but no data or lookup name can end in `.mac`, so no scope's MAC
+  key name can equal another scope's data or lookup key name. That argument needs no
   arithmetic, unlike the `_lookup` one on `lookup_key_name/1` — which is why the suffix is
   not `_mac`: `_` and every letter of `mac` *are* base64url, and `"AAAA_mac"` is a
   canonical encoding of six bytes.
@@ -449,10 +460,12 @@ defmodule AshVault.KeyProviders.OpenBao do
   def destroy(scope) do
     name = key_name(scope)
 
-    if Transport.server_retirement?(__MODULE__) do
-      with :ok <- ensure_tombstone(scope), do: Transport.retire_scope(__MODULE__, name)
-    else
-      delete_scope_keys(scope, name)
+    with :ok <- Transport.ensure_namespace(__MODULE__, name) do
+      if Transport.server_retirement?(__MODULE__) do
+        with :ok <- ensure_tombstone(scope), do: Transport.retire_scope(__MODULE__, name)
+      else
+        delete_scope_keys(scope, name)
+      end
     end
   end
 
@@ -540,7 +553,12 @@ defmodule AshVault.KeyProviders.OpenBao do
 
   # ── transit ────────────────────────────────────────────────────────────────────
 
-  defp check_tombstone(scope), do: Transport.check_tombstone(__MODULE__, key_name(scope))
+  defp check_tombstone(scope) do
+    name = key_name(scope)
+
+    with :ok <- Transport.ensure_namespace(__MODULE__, name),
+         do: Transport.check_tombstone(__MODULE__, name)
+  end
 
   defp meta_or_create(name, tombstone_name) do
     case Transport.read_meta(__MODULE__, name) do
