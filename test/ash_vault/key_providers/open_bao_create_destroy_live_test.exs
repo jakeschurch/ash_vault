@@ -15,7 +15,7 @@ defmodule AshVault.KeyProviders.OpenBaoCreateDestroyLiveTest do
     Req.Test.set_req_test_to_shared(context)
     provider = context.provider
     previous = Application.get_env(:ash_vault, provider)
-    scope = "race-live-#{System.unique_integer([:positive])}"
+    scope = "race-live-" <> Ash.UUID.generate()
     name = key_name(provider, scope, context.operation)
     owner = self()
 
