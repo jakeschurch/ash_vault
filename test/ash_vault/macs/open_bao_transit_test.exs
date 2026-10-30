@@ -72,7 +72,7 @@ defmodule AshVault.Macs.OpenBaoTransitTest do
       assert {:ok, tag} = Mac.mac("payload", handle, "aad")
       name = Provider.mac_key_name(tenant)
 
-      assert %Req.Response{status: 204} =
+      assert %Req.Response{status: 200, body: %{"data" => %{"deletion_allowed" => true}}} =
                raw(:post, "/v1/#{@transit_mount}/keys/#{name}/config", %{deletion_allowed: true})
 
       assert %Req.Response{status: 204} = raw(:delete, "/v1/#{@transit_mount}/keys/#{name}")
@@ -87,7 +87,7 @@ defmodule AshVault.Macs.OpenBaoTransitTest do
       assert {:ok, 2} = Provider.rotate(tenant, :mac)
       name = Provider.mac_key_name(tenant)
 
-      assert %Req.Response{status: 204} =
+      assert %Req.Response{status: 200, body: %{"data" => %{"min_decryption_version" => 2}}} =
                raw(:post, "/v1/#{@transit_mount}/keys/#{name}/config", %{
                  min_decryption_version: 2
                })
