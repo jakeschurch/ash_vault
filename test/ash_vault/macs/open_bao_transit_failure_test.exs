@@ -127,6 +127,11 @@ defmodule AshVault.Macs.OpenBaoTransitFailureTest do
     assert {:error, %ProviderUnavailable{}} = Mac.verify("d", <<0::256>>, @handle, "a")
   end
 
+  @tag metadata: {200, %{"data" => %{@metadata | "keys" => %{}}}}
+  test "metadata missing even its latest version cannot prove absence" do
+    assert {:error, %ProviderUnavailable{}} = Mac.verify("d", <<0::256>>, @handle, "a")
+  end
+
   @tag health: {200, %{"initialized" => true, "sealed" => false, "standby" => true}},
        metadata: {404, %{"errors" => []}}
   test "a lagging standby cannot prove key absence" do

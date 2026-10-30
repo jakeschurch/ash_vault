@@ -141,10 +141,17 @@ defmodule AshVault.Macs.OpenBaoTransit do
           "keys" => keys
         }
         when is_integer(latest) and latest > 0 and is_integer(minimum) and minimum >= 0 and
-               is_map(keys) ->
-          if version > latest or version < minimum or not Map.has_key?(keys, to_string(version)),
-            do: {:error, {:key_not_found, version}},
-            else: Transport.unavailable!(Provider, response)
+               minimum <= latest and is_map(keys) ->
+          cond do
+            not Map.has_key?(keys, to_string(latest)) ->
+              {:error, Transport.unavailable(Provider, :malformed_key_metadata)}
+
+            version > latest or version < minimum or not Map.has_key?(keys, to_string(version)) ->
+              {:error, {:key_not_found, version}}
+
+            true ->
+              Transport.unavailable!(Provider, response)
+          end
 
         _ ->
           {:error, Transport.unavailable(Provider, :malformed_key_metadata)}

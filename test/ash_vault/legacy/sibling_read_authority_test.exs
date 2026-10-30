@@ -91,6 +91,32 @@ defmodule AshVault.Legacy.SiblingReadAuthorityTest do
     end
   end
 
+  test "initial_data reads cannot acquire fresh sibling authority", %{record: record} do
+    for supplied <- [record, %{record | token: "fabricated", vault_token: "fabricated"}],
+        marker <- [false, true] do
+      load_query =
+        record
+        |> query(:credentials)
+        |> Ash.Query.set_context(%{ash_vault_prefer_vault_copy_loading: marker})
+        |> Ash.Query.load([:token, :vault_token, :encrypted_vault_token])
+
+      case Ash.Actions.Read.run(load_query, load_query.action,
+             initial_data: [supplied],
+             actor: @actor,
+             tenant: @tenant,
+             authorize?: true
+           ) do
+        {:error, _} ->
+          :ok
+
+        {:ok, [loaded]} ->
+          for field <- [:token, :vault_token, :encrypted_vault_token] do
+            assert %Ash.ForbiddenField{} = Map.fetch!(loaded, field)
+          end
+      end
+    end
+  end
+
   test "caller hooks are not replayed and original filters remain in force", %{record: record} do
     require Ash.Query
 
