@@ -129,7 +129,8 @@ defmodule AshVault.Macs.OpenBaoTransit do
 
     with {:ok, :active} <- Transport.node_status(Provider),
          :absent <- Transport.check_tombstone(Provider, tombstone),
-         {:ok, metadata} <- Transport.read_meta(Provider, name) do
+         {:ok, metadata} <- Transport.read_meta(Provider, name),
+         :absent <- Transport.check_tombstone(Provider, tombstone) do
       case metadata do
         :missing ->
           {:error, {:key_not_found, version}}

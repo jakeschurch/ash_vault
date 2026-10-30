@@ -31,6 +31,7 @@ defmodule AshVault.Macs.OpenBaoTransitFailureTest do
     end)
 
     {:ok, attempted} = Agent.start_link(fn -> false end)
+    {:ok, tombstone_reads} = Agent.start_link(fn -> 0 end)
 
     Req.Test.stub(__MODULE__, fn conn ->
       if conn.method == "POST", do: Agent.update(attempted, fn _ -> true end)
@@ -46,9 +47,12 @@ defmodule AshVault.Macs.OpenBaoTransitFailureTest do
             context[:reply] || {400, %{"errors" => ["private-needle"]}}
 
           conn.request_path =~ "/data/tombstones/" ->
-            if context[:race] == :erased and raced?,
-              do: {200, %{"data" => %{"data" => %{}}}},
-              else: context[:tombstone] || {404, %{"errors" => []}}
+            reads = Agent.get_and_update(tombstone_reads, &{&1 + 1, &1 + 1})
+
+            if (context[:race] == :erased and raced?) or
+                 (context[:race] == :erased_after_metadata and reads > 1),
+               do: {200, %{"data" => %{"data" => %{}}}},
+               else: context[:tombstone] || {404, %{"errors" => []}}
 
           conn.request_path == "/v1/transit/keys/#{@name}" ->
             case {context[:race], raced?} do
@@ -104,6 +108,11 @@ defmodule AshVault.Macs.OpenBaoTransitFailureTest do
 
   @tag tombstone: {200, %{"data" => %{"data" => %{}}}}
   test "a concurrent erasure retains its taxonomy" do
+    assert {:error, :destroyed} = Mac.verify("d", <<0::256>>, @handle, "a")
+  end
+
+  @tag race: :erased_after_metadata, metadata: {404, %{"errors" => []}}
+  test "erasure between tombstone and metadata reads wins over missing-key classification" do
     assert {:error, :destroyed} = Mac.verify("d", <<0::256>>, @handle, "a")
   end
 
