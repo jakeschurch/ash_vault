@@ -201,7 +201,8 @@ defmodule AshVault.MixProject do
       {:sourceror, "~> 1.0", only: [:dev, :test]},
       # dev/test only: AshVault must never depend on it at runtime. It exists here so
       # the searchable-field compatibility claim can be proved, not assumed.
-      {:ash_authentication, "~> 4.0", only: [:dev, :test]},
+      # Assent 0.3 support requires the AshAuthentication 5 release candidate.
+      {:ash_authentication, "~> 5.0.0-rc.15", only: [:dev, :test]},
       {:req, "~> 0.7 and >= 0.7.5"},
       {:telemetry, "~> 1.0"},
       {:ex_doc, ">= 0.0.0", only: :dev, runtime: false},

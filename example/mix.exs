@@ -38,7 +38,8 @@ defmodule Example.MixProject do
       # Password hashing for the sign-in step. The parent library declares it
       # `only: [:dev, :test]` — AshVault must never depend on ash_authentication at
       # runtime — so, like `simple_sat`, it does not reach us through the path dep.
-      {:ash_authentication, "~> 4.0"},
+      # Assent 0.3 support requires the AshAuthentication 5 release candidate.
+      {:ash_authentication, "~> 5.0.0-rc.15"},
       {:jason, "~> 1.4"}
     ]
   end
