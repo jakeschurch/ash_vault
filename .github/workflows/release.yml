@@ -1,6 +1,6 @@
 # Publish `ash_vault` and `ash_vault_rustler` to Hex together, from one tag:
 #
-#     git tag v0.1.0 && git push origin v0.1.0
+#     git tag v0.2.0 && git push origin v0.2.0
 #
 # The two packages are versioned in lockstep. The tag, `version:` in `mix.exs` and
 # `@version` in `ash_vault_rustler/mix.exs` must all agree, or nothing is published.
