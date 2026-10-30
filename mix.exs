@@ -193,18 +193,16 @@ defmodule AshVault.MixProject do
 
   defp deps do
     [
-      {:ash, "~> 3.0"},
+      {:ash, "~> 3.37 and >= 3.37.2"},
       {:spark, "~> 2.0"},
       {:jason, "~> 1.4"},
-      {:ash_postgres, "~> 2.0", only: [:dev, :test]},
+      {:ash_postgres, "~> 2.15 and >= 2.15.2", only: [:dev, :test]},
       {:simple_sat, "~> 0.1", only: [:dev, :test]},
       {:sourceror, "~> 1.0", only: [:dev, :test]},
-      {:ash_cloak, "~> 0.1", only: [:dev, :test]},
       # dev/test only: AshVault must never depend on it at runtime. It exists here so
       # the searchable-field compatibility claim can be proved, not assumed.
       {:ash_authentication, "~> 4.0", only: [:dev, :test]},
-      {:cloak, "~> 1.1", only: [:dev, :test]},
-      {:req, "~> 0.5"},
+      {:req, "~> 0.7 and >= 0.7.5"},
       {:telemetry, "~> 1.0"},
       {:ex_doc, ">= 0.0.0", only: :dev, runtime: false},
       {:usage_rules, "~> 1.2", only: :dev, runtime: false}
