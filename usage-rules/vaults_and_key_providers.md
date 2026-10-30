@@ -100,6 +100,12 @@ for any destroy that does not go through your vault. If you enable it:
   keys out of band.
 - `cache: true` over `Memory` is refused with a warning (pointless).
 
+Cache backends must treat the generation returned by `fetch/3` as an opaque token
+and require that exact token in `put/6`. Fence both scope eviction and cache lifetime:
+a read begun before a cache restart (or while the cache was stopped) must not write
+into the replacement instance. The shipped ETS and Rust backends enforce both fences.
+The diagnostic `generation/2` eviction counter is not a valid write token.
+
 ## Don't
 
 - Don't use `Memory` in production, or `Local` with the root inside the repo/DB volume.

@@ -112,16 +112,19 @@ defmodule AshVaultRustler.KeyCache do
           {:ok, AshVault.KeyCache.entry(), AshVault.KeyCache.generation()}
           | {:miss, AshVault.KeyCache.generation()}
   def fetch(name, scope, slot) when is_binary(scope) do
-    case cache(name) do
+    case instance(name) do
       nil ->
         # Not started. A cache is allowed to fail to cache; it is never allowed to fail
         # to serve, and it must never answer "not destroyed" on its own initiative.
         {:miss, 0}
 
-      cache ->
+      {epoch, cache} ->
         case Native.cache_fetch(cache, scope, encode_slot(slot)) do
-          {:ok, secret, meta, generation} -> {:ok, decode_entry(secret, meta), generation}
-          {:miss, generation} -> {:miss, generation}
+          {:ok, secret, meta, generation} ->
+            {:ok, decode_entry(secret, meta), {epoch, generation}}
+
+          {:miss, generation} ->
+            {:miss, {epoch, generation}}
         end
     end
   end
@@ -139,11 +142,11 @@ defmodule AshVaultRustler.KeyCache do
           AshVault.KeyCache.generation()
         ) :: :ok | :stale
   def put(name, scope, slot, entry, ttl, generation) when is_binary(scope) do
-    case cache(name) do
-      nil ->
+    case {instance(name), generation} do
+      {nil, _} ->
         :ok
 
-      cache ->
+      {{epoch, cache}, {epoch, counter}} when is_reference(epoch) ->
         {secret, meta} = encode_entry(entry)
 
         result =
@@ -154,7 +157,7 @@ defmodule AshVaultRustler.KeyCache do
             secret,
             meta,
             encode_ttl(ttl),
-            generation
+            counter
           )
 
         # After the write, not at start: at start nothing has been allocated, so the
@@ -162,6 +165,9 @@ defmodule AshVaultRustler.KeyCache do
         warn_if_mlock_unavailable(name)
 
         result
+
+      _ ->
+        :stale
     end
   end
 
@@ -213,10 +219,11 @@ defmodule AshVaultRustler.KeyCache do
   end
 
   @doc """
-  The current generation for a scope, `0` if it has never been evicted.
+  The current eviction counter for diagnostics, `0` if never evicted.
+
+  This counter is not a write token. Pass the opaque token from `fetch/3` to `put/6`.
   """
-  @spec generation(AshVault.KeyCache.name(), AshVault.KeyCache.scope()) ::
-          AshVault.KeyCache.generation()
+  @spec generation(AshVault.KeyCache.name(), AshVault.KeyCache.scope()) :: non_neg_integer()
   def generation(name, scope) do
     case cache(name) do
       nil -> 0
@@ -254,7 +261,20 @@ defmodule AshVaultRustler.KeyCache do
   """
   @spec cache(AshVault.KeyCache.name()) :: reference() | nil
   def cache(name) do
-    :persistent_term.get({__MODULE__, name}, nil)
+    case instance(name) do
+      nil -> nil
+      {_epoch, cache} -> cache
+    end
+  end
+
+  defp instance(name) do
+    case :persistent_term.get({__MODULE__, name}, nil) do
+      nil -> nil
+      {epoch, cache} -> {epoch, cache}
+      # A cache started before this code was loaded must still be evicted on destroy.
+      # Its unfenced writes are refused until it is restarted with a fresh epoch.
+      cache -> {:legacy, cache}
+    end
   end
 
   # --- encoding -------------------------------------------------------------
@@ -303,7 +323,7 @@ defmodule AshVaultRustler.KeyCache do
         Keyword.get(opts, :max_bytes, @default_max_bytes)
       )
 
-    :persistent_term.put({__MODULE__, name}, cache)
+    :persistent_term.put({__MODULE__, name}, {make_ref(), cache})
 
     {:ok, %{name: name, cache: cache}}
   end

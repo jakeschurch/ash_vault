@@ -99,26 +99,30 @@ defmodule AshVault.KeyCaches.ETS do
           {:ok, AshVault.KeyCache.entry(), AshVault.KeyCache.generation()}
           | {:miss, AshVault.KeyCache.generation()}
   def fetch(name, scope, slot) when is_binary(scope) do
-    entries = entries_table(name)
+    entries = :ets.whereis(entries_table(name))
 
-    if :ets.whereis(entries) == :undefined do
+    if entries == :undefined do
       {:miss, 0}
     else
       generation = generation(name, scope)
+      token = {entries, generation}
 
       case :ets.lookup(entries, {scope, slot}) do
         [{_key, entry, expires_at, ^generation, _last_used, _bytes}] ->
           if expired?(expires_at) do
-            {:miss, generation}
+            {:miss, token}
           else
             touch(entries, {scope, slot})
-            {:ok, entry, generation}
+            {:ok, entry, token}
           end
 
         _other ->
-          {:miss, generation}
+          {:miss, token}
       end
     end
+  rescue
+    # The owning process may have stopped between resolving the table and reading it.
+    ArgumentError -> {:miss, 0}
   end
 
   @doc """
@@ -191,10 +195,11 @@ defmodule AshVault.KeyCaches.ETS do
   end
 
   @doc """
-  The current generation for a scope, `0` if it has never been evicted.
+  The current eviction counter for diagnostics, `0` if never evicted.
+
+  This counter is not a write token. Pass the opaque token from `fetch/3` to `put/6`.
   """
-  @spec generation(AshVault.KeyCache.name(), AshVault.KeyCache.scope()) ::
-          AshVault.KeyCache.generation()
+  @spec generation(AshVault.KeyCache.name(), AshVault.KeyCache.scope()) :: non_neg_integer()
   def generation(name, scope) do
     table = generations_table(name)
 
@@ -252,6 +257,7 @@ defmodule AshVault.KeyCaches.ETS do
      %{
        name: name,
        entries: entries,
+       epoch: :ets.whereis(entries),
        generations: generations,
        count: 0,
        tombstones: 0,
@@ -263,10 +269,13 @@ defmodule AshVault.KeyCaches.ETS do
 
   @impl GenServer
   def handle_call({:put, scope, slot, entry, ttl, generation}, _from, state) do
-    if generation == generation(state.name, scope) do
-      {:reply, :ok, do_put(state, scope, slot, entry, ttl, generation)}
+    current = generation(state.name, scope)
+    epoch = Map.get(state, :epoch, :ets.whereis(state.entries))
+
+    if generation == {epoch, current} do
+      {:reply, :ok, do_put(state, scope, slot, entry, ttl, current)}
     else
-      # The scope was evicted between the read that missed and this write. Dropping the
+      # The scope was evicted or the cache restarted since the read. Dropping the
       # write is the whole point of the fence: without it, a read that began before a
       # `destroy` repopulates the cache after the eviction and the erased scope is
       # readable again for a full TTL.
