@@ -470,7 +470,8 @@ defmodule AshVault.KeyProviders.OpenBaoTransit do
   def destroy(scope) do
     name = key_name(scope)
 
-    with :ok <- ensure_tombstone(name) do
+    with :ok <- Transport.verify_native_namespace(__MODULE__, name),
+         :ok <- ensure_tombstone(name) do
       if Transport.server_retirement?(__MODULE__) do
         Transport.retire_scope(__MODULE__, name)
       else

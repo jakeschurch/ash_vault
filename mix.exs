@@ -143,7 +143,8 @@ defmodule AshVault.MixProject do
         ],
         Migration: [
           AshVault.Backfill,
-          Mix.Tasks.AshVault.Openbao.InitRetirement
+          Mix.Tasks.AshVault.Openbao.InitRetirement,
+          Mix.Tasks.AshVault.Openbao.MigrateNamespace
         ],
         Errors: [
           AshVault.Errors,

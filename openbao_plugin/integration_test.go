@@ -147,6 +147,10 @@ storage "raft" { path = %q node_id = "retirement-integration" }
 	// Register as transit with a custom version: tuning the existing mount retains
 	// its storage, including historical key material created by stock Transit.
 	must("POST", "sys/mounts/transit", map[string]interface{}{"type": "transit"})
+	builtinVersion, ok := must("GET", "sys/mounts", nil)["transit/"].(map[string]interface{})["running_plugin_version"].(string)
+	if !ok || builtinVersion == "" {
+		t.Fatal("cannot identify stock Transit version")
+	}
 	must("PUT", "sys/plugins/catalog/secret/transit", map[string]interface{}{
 		"sha256": hex.EncodeToString(hash[:]), "command": "ashvault-transit", "version": "v0.1.0",
 	})
@@ -157,6 +161,14 @@ storage "raft" { path = %q node_id = "retirement-integration" }
 		keys[name] = must("GET", "transit/export/encryption-key/"+name+"/1", nil)["keys"]
 		must("POST", "transit/keys/"+name+"/rotate", nil)
 	}
+	binaryKeys := map[string]interface{}{}
+	for _, suffix := range purposes {
+		name := legacyBinary + suffix
+		must("POST", "transit/keys/"+name, map[string]interface{}{"exportable": true})
+		binaryKeys[suffix] = must("GET", "transit/export/encryption-key/"+name+"/1", nil)["keys"]
+		must("POST", "transit/keys/"+name+"/rotate", nil)
+	}
+	binaryCiphertext := must("POST", "transit/encrypt/"+legacyBinary, map[string]interface{}{"plaintext": "c2VjcmV0", "associated_data": "YWFk", "key_version": 1})["ciphertext"]
 	plaintext := base64.StdEncoding.EncodeToString([]byte("migration secret"))
 	input := map[string]interface{}{"plaintext": plaintext, "associated_data": "YWFk", "key_version": 1}
 	ciphertext := must("POST", "transit/encrypt/"+testName, input)["ciphertext"]
@@ -179,8 +191,20 @@ storage "raft" { path = %q node_id = "retirement-integration" }
 	if status, _ := request("POST", "transit/ashvault/initialize", nil); status != 403 {
 		t.Fatal("initialization must require sudo, even with ordinary update permission")
 	}
+	if status, _ := request("POST", "transit/ashvault/namespace/"+escapedBinary, nil); status != 403 {
+		t.Fatal("namespace migration must require sudo")
+	}
 	must("GET", "transit/ashvault/protocol", nil)
 	token = rootToken
+	must("POST", "transit/ashvault/namespace/"+escapedBinary, nil)
+	for _, suffix := range purposes {
+		got := must("GET", "transit/export/encryption-key/"+escapedBinary+suffix+"/1", nil)["keys"]
+		if fmt.Sprint(got) != fmt.Sprint(binaryKeys[suffix]) {
+			t.Fatal("binary migration changed historical keys")
+		}
+	}
+	must("POST", "transit/ashvault/namespace/"+escapedBinary, map[string]interface{}{"rollback": true})
+	must("POST", "transit/ashvault/namespace/"+escapedBinary, nil)
 	for _, name := range names {
 		got := must("GET", "transit/export/encryption-key/"+name+"/1", nil)["keys"]
 		if fmt.Sprint(got) != fmt.Sprint(keys[name]) {
@@ -290,5 +314,12 @@ storage "raft" { path = %q node_id = "retirement-integration" }
 	}
 	if retired := must("GET", "transit/ashvault/retired/"+testName, nil); retired["retired"] != true {
 		t.Fatal("durable marker disappeared")
+	}
+	// The new names are ordinary Transit names. Keeping the plugin is optional
+	// when the application uses stock mode after its maintenance migration.
+	must("POST", "sys/mounts/transit/tune", map[string]interface{}{"plugin_version": builtinVersion})
+	must("PUT", "sys/plugins/reload/backend", map[string]interface{}{"plugin": "transit"})
+	if got := must("POST", "transit/decrypt/"+escapedBinary, map[string]interface{}{"ciphertext": binaryCiphertext, "associated_data": "YWFk"})["plaintext"]; got != "c2VjcmV0" {
+		t.Fatal("stock Transit lost migrated ciphertext")
 	}
 }

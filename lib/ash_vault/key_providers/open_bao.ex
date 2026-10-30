@@ -183,7 +183,13 @@ defmodule AshVault.KeyProviders.OpenBao do
       "ashvault_dGVuYW50XzQy"
   """
   @spec key_name(AshVault.KeyProvider.scope()) :: String.t()
-  def key_name(scope), do: Transport.key_name(__MODULE__, "ashvault_", scope)
+  def key_name(scope) do
+    legacy = Transport.key_name(__MODULE__, "ashvault_", scope)
+
+    if String.starts_with?(legacy, "ashvault_nx_"),
+      do: String.replace_prefix(legacy, "ashvault_", "ashvault.v2.export."),
+      else: legacy
+  end
 
   @doc """
   Mount the KV-v2 engine that holds tombstones, if it is not already mounted.
@@ -449,10 +455,12 @@ defmodule AshVault.KeyProviders.OpenBao do
   def destroy(scope) do
     name = key_name(scope)
 
-    if Transport.server_retirement?(__MODULE__) do
-      with :ok <- ensure_tombstone(scope), do: Transport.retire_scope(__MODULE__, name)
-    else
-      delete_scope_keys(scope, name)
+    with :ok <- Transport.ensure_namespace(__MODULE__, name) do
+      if Transport.server_retirement?(__MODULE__) do
+        with :ok <- ensure_tombstone(scope), do: Transport.retire_scope(__MODULE__, name)
+      else
+        delete_scope_keys(scope, name)
+      end
     end
   end
 
@@ -540,7 +548,12 @@ defmodule AshVault.KeyProviders.OpenBao do
 
   # ── transit ────────────────────────────────────────────────────────────────────
 
-  defp check_tombstone(scope), do: Transport.check_tombstone(__MODULE__, key_name(scope))
+  defp check_tombstone(scope) do
+    name = key_name(scope)
+
+    with :ok <- Transport.ensure_namespace(__MODULE__, name),
+         do: Transport.check_tombstone(__MODULE__, name)
+  end
 
   defp meta_or_create(name, tombstone_name) do
     case Transport.read_meta(__MODULE__, name) do

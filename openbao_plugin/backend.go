@@ -42,7 +42,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 		BackendType: logical.TypeLogical,
 		Help:        "AshVault Transit with transactional, permanent scope retirement",
 		PathsSpecial: &logical.Paths{
-			Root:            []string{"ashvault/initialize"},
+			Root:            []string{"ashvault/initialize", "ashvault/namespace/*"},
 			SealWrapStorage: []string{"policy/", "archive/"},
 		},
 	}
@@ -51,6 +51,7 @@ func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend,
 	for _, pattern := range []string{
 		"ashvault/protocol", "ashvault/initialize", "ashvault/retired/(?P<name>[^/]+)",
 		"ashvault/retire/(?P<name>[^/]+)", "keys/(?P<name>[^/]+)",
+		"ashvault/namespace/(?P<name>[^/]+)",
 		"keys/(?P<name>[^/]+)/rotate", "keys/(?P<name>[^/]+)/config",
 		"export/(?P<kind>encryption-key|hmac-key)/(?P<name>[^/]+)/(?P<version>[0-9]+)",
 		"encrypt/(?P<name>[^/]+)", "decrypt/(?P<name>[^/]+)",
@@ -80,6 +81,7 @@ func fields() map[string]*framework.FieldSchema {
 		"plaintext": {Type: framework.TypeString}, "ciphertext": {Type: framework.TypeString},
 		"associated_data": {Type: framework.TypeString}, "input": {Type: framework.TypeString},
 		"hmac": {Type: framework.TypeString}, "retired_scopes": {Type: framework.TypeStringSlice},
+		"key_profile": {Type: framework.TypeString}, "legacy_retired": {Type: framework.TypeBool}, "rollback": {Type: framework.TypeBool},
 	}
 }
 
@@ -121,6 +123,10 @@ func validFields(req *logical.Request) bool {
 	allowed := map[string]bool{"name": true, "kind": true, "version": true}
 	var fields []string
 	switch {
+	case strings.HasPrefix(req.Path, "ashvault/namespace/"):
+		fields = []string{"legacy_retired", "rollback"}
+	case strings.HasPrefix(req.Path, "ashvault/retire/"):
+		fields = []string{"key_profile"}
 	case req.Path == "ashvault/initialize":
 		fields = []string{"retired_scopes"}
 	case strings.HasPrefix(req.Path, "keys/") && strings.HasSuffix(req.Path, "/config"):
@@ -175,6 +181,14 @@ func (b *backend) dispatch(ctx context.Context, req *logical.Request, d *framewo
 		return invalid("invalid key name")
 	}
 	if strings.HasPrefix(req.Path, "ashvault/retire/") && req.Operation == logical.UpdateOperation && name == scope {
+		if profile := d.Get("key_profile").(string); profile != "" {
+			if profile != "native" {
+				return invalid("unsupported key profile")
+			}
+			if err := nativeProfile(ctx, s, name); err != nil {
+				return failure(req, 503, "scope_namespace_conflict")
+			}
+		}
 		if err := retire(ctx, s, scope); err != nil {
 			return failure(req, 503, "retirement_unavailable")
 		}
@@ -182,6 +196,9 @@ func (b *backend) dispatch(ctx context.Context, req *logical.Request, d *framewo
 	}
 	if !initialized {
 		return failure(req, 503, "initialization_required")
+	}
+	if strings.HasPrefix(req.Path, "ashvault/namespace/") && req.Operation == logical.UpdateOperation && name == scope {
+		return migrateNamespace(ctx, req, s, name, d.Get("legacy_retired").(bool), d.Get("rollback").(bool))
 	}
 	retired, err := marker(ctx, s, retiredPrefix+name)
 	if err != nil {
@@ -197,11 +214,26 @@ func (b *backend) dispatch(ctx context.Context, req *logical.Request, d *framewo
 		}
 		return failure(req, 410, "scope_retired")
 	}
+	if strings.HasPrefix(scope, namespacePrefix) {
+		ready, err := marker(ctx, s, namespaceReadyPrefix+scope)
+		if err != nil || !ready {
+			return failure(req, 503, "namespace_migration_required")
+		}
+	}
 	return b.keyRequest(ctx, req, d, s, name)
 }
 
 func (b *backend) keyRequest(ctx context.Context, req *logical.Request, d *framework.FieldData, s logical.Storage, name string) (*logical.Response, error) {
 	create := req.Path == "keys/"+name && req.Operation == logical.UpdateOperation
+	if create && d.Get("exportable").(bool) {
+		moved, err := marker(ctx, s, namespaceMovedPrefix+name)
+		if err != nil {
+			return failure(req, 503, "storage_unavailable")
+		}
+		if moved {
+			return invalid("exportable key namespace has moved")
+		}
+	}
 	if create && (d.Get("allow_plaintext_backup").(bool) || d.Get("derived").(bool) || d.Get("convergent_encryption").(bool)) {
 		return invalid("unsupported key profile")
 	}
@@ -313,7 +345,7 @@ func scopeName(name string) (string, error) {
 }
 
 func dataKeyName(data string) bool {
-	for _, prefix := range []string{"ashvault_nx_", "ashvault_"} {
+	for _, prefix := range []string{namespacePrefix, "ashvault_nx_", "ashvault_"} {
 		if !strings.HasPrefix(data, prefix) {
 			continue
 		}

@@ -231,11 +231,20 @@ defmodule AshVault.KeyProviders.OpenBaoRetirementTest do
       name = provider.key_name("retirement-test")
       assert :ok = provider.destroy("retirement-test")
 
-      assert Enum.reverse(Agent.get(calls, & &1)) == [
-               {"GET", "/v1/ashvault/data/tombstones/#{name}"},
-               {"POST", "/v1/ashvault/data/tombstones/#{name}"},
-               {"POST", "/v1/transit/ashvault/retire/#{name}"}
-             ]
+      preflight =
+        if provider == OpenBaoTransit do
+          for suffix <- ["", ".mac", "_lookup"], do: {"GET", "/v1/transit/keys/#{name}#{suffix}"}
+        else
+          []
+        end
+
+      assert Enum.reverse(Agent.get(calls, & &1)) ==
+               preflight ++
+                 [
+                   {"GET", "/v1/ashvault/data/tombstones/#{name}"},
+                   {"POST", "/v1/ashvault/data/tombstones/#{name}"},
+                   {"POST", "/v1/transit/ashvault/retire/#{name}"}
+                 ]
     end
 
     @tag scenario: :destroy, existing: true, reply: {503, %{"errors" => ["private-needle"]}}
