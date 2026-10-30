@@ -20,6 +20,10 @@ defmodule AshVault.KeyCache do
       the write if the generation has since advanced. Without this fence, a read that
       started before a `destroy` can re-populate the cache after the eviction and
       resurrect an erased scope for a full TTL.
+    * Generations are **opaque tokens bound to the cache lifetime**. A token from
+      before a restart, or from a stopped cache, must never authorize a write to a
+      new instance, even if its per-scope eviction counter is the same. Callers must
+      pass the token from `fetch/3` unchanged; they must not construct or order it.
     * `fetch/3` never invents an entry. A backend that cannot answer returns `:miss`,
       which sends the caller to the real provider. A cache is allowed to fail to
       cache; it is never allowed to fail to serve, and it is never allowed to answer
@@ -65,8 +69,8 @@ defmodule AshVault.KeyCache do
   """
   @type entry :: {:key_info, map()} | {:key, binary()} | :destroyed
 
-  @typedoc "Monotonically increasing per-scope fence, bumped by every eviction."
-  @type generation :: non_neg_integer()
+  @typedoc "Opaque fence bound to the cache instance and changed by each scope eviction."
+  @type generation :: term()
 
   @typedoc "Milliseconds, or `:infinity` for a tombstone."
   @type ttl :: non_neg_integer() | :infinity
@@ -97,7 +101,7 @@ defmodule AshVault.KeyCache do
   Write a slot, unless `generation` is stale.
 
   Returns `:stale` when the scope's generation has advanced since `fetch/3` observed
-  it — the write is dropped, which is the fence that makes `evict_scope/2` durable
+  it, or the cache instance has changed — the write is dropped, making eviction durable
   against a concurrent read.
   """
   @callback put(name(), scope(), slot(), entry(), ttl(), generation()) :: :ok | :stale

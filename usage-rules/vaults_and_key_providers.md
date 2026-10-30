@@ -54,6 +54,10 @@ children = [MyApp.Repo] ++ MyApp.Vault.child_specs()
   creates it with mode 0700 and a `.ash_vault_root` sentinel). That refusal protects against an
   unmounted volume looking like an empty key store. Do not "fix" it by creating the sentinel by
   hand on the wrong filesystem.
+- `Local` scopes must be non-empty binaries. Every operation checks the initialized root
+  and sentinel against the store opened at startup; a missing, unreadable or replaced
+  store is `ProviderUnavailable`. Restore the original volume; never initialize an empty
+  replacement to make the error go away.
 - `OpenBao` needs no process; `setup/0` mounts the KV engine that holds tombstones.
 
 ## Configuration
@@ -79,6 +83,11 @@ a fresh scope's first MAC or encrypt fails. Set it `true` only for a single non-
 servers with `disable_standby_reads = true`. Surface `node_status/0` (`:active` /
 `:standby` / `:sealed` / `:uninitialized`) in a boot probe or gauge.
 
+OpenBao HTTP redirects are refused, including Kubernetes login redirects. Configure
+the final trusted endpoint directly; `req_options` cannot enable redirect following.
+An operation that receives a redirect fails with `ProviderUnavailable` instead of
+forwarding its token or service-account JWT.
+
 ## Key caching: leave it off
 
 `cache: true` (or `cache: [ttl: ..., max_entries: ...]`) wraps the provider in a TTL cache.
@@ -90,6 +99,12 @@ for any destroy that does not go through your vault. If you enable it:
 - Destroy through `AshVault.destroy_keys!/3` (it evicts synchronously), never by deleting
   keys out of band.
 - `cache: true` over `Memory` is refused with a warning (pointless).
+
+Cache backends must treat the generation returned by `fetch/3` as an opaque token
+and require that exact token in `put/6`. Fence both scope eviction and cache lifetime:
+a read begun before a cache restart (or while the cache was stopped) must not write
+into the replacement instance. The shipped ETS and Rust backends enforce both fences.
+The diagnostic `generation/2` eviction counter is not a valid write token.
 
 ## Don't
 

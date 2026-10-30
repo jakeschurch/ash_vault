@@ -21,56 +21,106 @@ defmodule AshVaultRustler.KeyCacheTest do
     %{name: name, backend: backend, key: :crypto.strong_rand_bytes(32)}
   end
 
+  defp put_current(backend, name, scope, slot, entry, ttl) do
+    token =
+      case backend.fetch(name, scope, slot) do
+        {:miss, token} -> token
+        {:ok, _entry, token} -> token
+      end
+
+    backend.put(name, scope, slot, entry, ttl, token)
+  end
+
   for backend <- @backends do
     describe "#{inspect(backend)}" do
       @describetag backend: backend
 
-      test "a miss on an unknown scope reports generation 0", %{name: name, backend: backend} do
-        assert {:miss, 0} = backend.fetch(name, "nobody", :current)
+      @tag :cache_lifetime
+      test "a token from a stopped cache cannot write into its replacement", %{
+        name: name,
+        backend: backend,
+        key: key
+      } do
+        assert {:miss, generation} = backend.fetch(name, "erased", :current)
+        assert :ok = backend.evict_scope(name, "erased")
+        stop_supervised!(name)
+        start_supervised!({backend, name: name})
+
+        assert :stale = backend.put(name, "erased", :current, {:key, key}, 60_000, generation)
+        assert {:miss, fresh} = backend.fetch(name, "erased", :current)
+        assert :ok = backend.put(name, "erased", :current, {:key, key}, 60_000, fresh)
+        assert {:ok, {:key, ^key}, ^fresh} = backend.fetch(name, "erased", :current)
+      end
+
+      @tag :cache_lifetime
+      test "a token observed while stopped cannot write into a newly started cache", %{
+        name: name,
+        backend: backend,
+        key: key
+      } do
+        stop_supervised!(name)
+        assert {:miss, generation} = backend.fetch(name, "erased", :current)
+        start_supervised!({backend, name: name})
+
+        assert :stale = backend.put(name, "erased", :current, {:key, key}, 60_000, generation)
+        assert {:miss, fresh} = backend.fetch(name, "erased", :current)
+        assert :ok = backend.put(name, "erased", :current, {:key, key}, 60_000, fresh)
+        assert {:ok, {:key, ^key}, ^fresh} = backend.fetch(name, "erased", :current)
+      end
+
+      test "a miss on an unknown scope reports a stable write token", %{
+        name: name,
+        backend: backend
+      } do
+        assert {:miss, token} = backend.fetch(name, "nobody", :current)
+        assert {:miss, ^token} = backend.fetch(name, "nobody", :current)
       end
 
       test "put then fetch round trips a key_info", %{name: name, backend: backend, key: key} do
         created = DateTime.utc_now()
         info = %{version: 3, key: key, created_at: created}
 
-        assert :ok = backend.put(name, "acme", :current, {:key_info, info}, 60_000, 0)
-        assert {:ok, {:key_info, fetched}, 0} = backend.fetch(name, "acme", :current)
+        assert :ok = put_current(backend, name, "acme", :current, {:key_info, info}, 60_000)
+        assert {:ok, {:key_info, fetched}, _token} = backend.fetch(name, "acme", :current)
         assert fetched.key == key
         assert fetched.version == 3
         assert DateTime.compare(fetched.created_at, created) == :eq
       end
 
       test "put then fetch round trips a raw key", %{name: name, backend: backend, key: key} do
-        assert :ok = backend.put(name, "acme", 7, {:key, key}, 60_000, 0)
-        assert {:ok, {:key, ^key}, 0} = backend.fetch(name, "acme", 7)
+        assert :ok = put_current(backend, name, "acme", 7, {:key, key}, 60_000)
+        assert {:ok, {:key, ^key}, _token} = backend.fetch(name, "acme", 7)
       end
 
       test "a tombstone round trips and never expires", %{name: name, backend: backend} do
-        assert :ok = backend.put(name, "acme", :tombstone, :destroyed, :infinity, 0)
-        assert {:ok, :destroyed, 0} = backend.fetch(name, "acme", :tombstone)
+        assert :ok = put_current(backend, name, "acme", :tombstone, :destroyed, :infinity)
+        assert {:ok, :destroyed, _token} = backend.fetch(name, "acme", :tombstone)
       end
 
       test "a zero TTL is already expired", %{name: name, backend: backend, key: key} do
-        assert :ok = backend.put(name, "acme", :current, {:key, key}, 0, 0)
+        assert :ok = put_current(backend, name, "acme", :current, {:key, key}, 0)
         assert {:miss, _} = backend.fetch(name, "acme", :current)
       end
 
       test "evict_scope is synchronous and complete", %{name: name, backend: backend, key: key} do
-        backend.put(name, "acme", :current, {:key, key}, 60_000, 0)
-        backend.put(name, "acme", 1, {:key, key}, 60_000, 0)
-        backend.put(name, "other", :current, {:key, key}, 60_000, 0)
+        put_current(backend, name, "acme", :current, {:key, key}, 60_000)
+        put_current(backend, name, "acme", 1, {:key, key}, 60_000)
+        put_current(backend, name, "other", :current, {:key, key}, 60_000)
 
+        assert {:ok, _, before} = backend.fetch(name, "acme", :current)
+        assert {:ok, _, other} = backend.fetch(name, "other", :current)
         assert :ok = backend.evict_scope(name, "acme")
 
-        assert {:miss, 1} = backend.fetch(name, "acme", :current)
-        assert {:miss, 1} = backend.fetch(name, "acme", 1)
-        assert {:ok, _, 0} = backend.fetch(name, "other", :current)
+        assert {:miss, after_eviction} = backend.fetch(name, "acme", :current)
+        refute before == after_eviction
+        assert {:miss, ^after_eviction} = backend.fetch(name, "acme", 1)
+        assert {:ok, _, ^other} = backend.fetch(name, "other", :current)
       end
 
       test "evict_scope removes a tombstone too", %{name: name, backend: backend} do
-        backend.put(name, "acme", :tombstone, :destroyed, :infinity, 0)
+        put_current(backend, name, "acme", :tombstone, :destroyed, :infinity)
         assert :ok = backend.evict_scope(name, "acme")
-        assert {:miss, 1} = backend.fetch(name, "acme", :tombstone)
+        assert {:miss, _} = backend.fetch(name, "acme", :tombstone)
       end
 
       @tag :generation_fence
@@ -88,14 +138,13 @@ defmodule AshVaultRustler.KeyCacheTest do
            %{name: name, backend: backend, key: key} do
         assert :ok = backend.evict_scope(name, "acme")
         assert {:miss, generation} = backend.fetch(name, "acme", :current)
-        assert generation == 1
         assert :ok = backend.put(name, "acme", :current, {:key, key}, 60_000, generation)
-        assert {:ok, _, 1} = backend.fetch(name, "acme", :current)
+        assert {:ok, _, ^generation} = backend.fetch(name, "acme", :current)
       end
 
       test "evict_all clears everything", %{name: name, backend: backend, key: key} do
-        backend.put(name, "a", :current, {:key, key}, 60_000, 0)
-        backend.put(name, "b", :current, {:key, key}, 60_000, 0)
+        put_current(backend, name, "a", :current, {:key, key}, 60_000)
+        put_current(backend, name, "b", :current, {:key, key}, 60_000)
 
         assert :ok = backend.evict_all(name)
 
@@ -106,7 +155,7 @@ defmodule AshVaultRustler.KeyCacheTest do
 
       test "the entry bound is enforced", %{name: name, backend: backend, key: key} do
         for i <- 1..20 do
-          backend.put(name, "scope#{i}", :current, {:key, key}, 60_000, 0)
+          put_current(backend, name, "scope#{i}", :current, {:key, key}, 60_000)
         end
 
         assert backend.stats(name).entries <= 8
@@ -116,17 +165,17 @@ defmodule AshVaultRustler.KeyCacheTest do
         big = :crypto.strong_rand_bytes(1_024)
 
         for i <- 1..8 do
-          backend.put(name, "scope#{i}", :current, {:key, big}, 60_000, 0)
+          put_current(backend, name, "scope#{i}", :current, {:key, big}, 60_000)
         end
 
         assert backend.stats(name).bytes <= 4_096
       end
 
       test "a tombstone is never dropped to make room", %{name: name, backend: backend, key: key} do
-        backend.put(name, "erased", :tombstone, :destroyed, :infinity, 0)
+        put_current(backend, name, "erased", :tombstone, :destroyed, :infinity)
 
         for i <- 1..30 do
-          backend.put(name, "scope#{i}", :current, {:key, key}, 60_000, 0)
+          put_current(backend, name, "scope#{i}", :current, {:key, key}, 60_000)
         end
 
         assert {:ok, :destroyed, _} = backend.fetch(name, "erased", :tombstone)
@@ -144,7 +193,7 @@ defmodule AshVaultRustler.KeyCacheTest do
 
       test "concurrent readers and evictions do not corrupt the counters",
            %{name: name, backend: backend, key: key} do
-        backend.put(name, "acme", :current, {:key, key}, 60_000, 0)
+        put_current(backend, name, "acme", :current, {:key, key}, 60_000)
 
         readers =
           for _ <- 1..8 do
@@ -164,6 +213,26 @@ defmodule AshVaultRustler.KeyCacheTest do
 
   describe "the difference that matters" do
     @tag backend: AshVaultRustler.KeyCache
+    test "a cache started before the lifetime fence remains evictable", %{name: name, key: key} do
+      backend = AshVaultRustler.KeyCache
+      assert :ok = put_current(backend, name, "acme", :current, {:key, key}, 60_000)
+      publication = :persistent_term.get({backend, name})
+      resource = backend.cache(name)
+      :persistent_term.put({backend, name}, resource)
+
+      try do
+        assert backend.cache(name) == resource
+        assert {:ok, {:key, ^key}, token} = backend.fetch(name, "acme", :current)
+        assert :stale = backend.put(name, "acme", :current, {:key, key}, 60_000, token)
+        assert :stale = backend.put(name, "acme", :current, {:key, key}, 60_000, 0)
+        assert :ok = backend.evict_scope(name, "acme")
+        assert {:miss, _} = backend.fetch(name, "acme", :current)
+      after
+        :persistent_term.put({backend, name}, publication)
+      end
+    end
+
+    @tag backend: AshVaultRustler.KeyCache
     test "the Rust backend zeroes on eviction", %{backend: backend} do
       assert backend.zeroes_on_evict?()
     end
@@ -176,7 +245,7 @@ defmodule AshVaultRustler.KeyCacheTest do
     @tag backend: AshVaultRustler.KeyCache
     test "after evict_scope the key is gone from the Rust side's own accessor",
          %{name: name, key: key} do
-      AshVaultRustler.KeyCache.put(name, "acme", :current, {:key, key}, 60_000, 0)
+      put_current(AshVaultRustler.KeyCache, name, "acme", :current, {:key, key}, 60_000)
 
       # Before: the Rust cache will hand out a handle over the cached bytes, and a
       # constant-time comparison against the original key matches.
@@ -189,7 +258,7 @@ defmodule AshVaultRustler.KeyCacheTest do
       # not something Elixir can observe — that assertion lives in the Rust unit tests
       # (`secret::tests::drop_zeroes_the_allocation`). This is the observable contract.
       assert :miss = AshVaultRustler.KeyCache.key_handle(name, "acme", :current)
-      assert {:miss, 1} = AshVaultRustler.KeyCache.fetch(name, "acme", :current)
+      assert {:miss, _} = AshVaultRustler.KeyCache.fetch(name, "acme", :current)
     end
 
     @tag backend: AshVaultRustler.KeyCache
@@ -197,7 +266,7 @@ defmodule AshVaultRustler.KeyCacheTest do
          %{name: name, key: key} do
       before = AshVaultRustler.mlock_status()
 
-      AshVaultRustler.KeyCache.put(name, "acme", :current, {:key, key}, 60_000, 0)
+      put_current(AshVaultRustler.KeyCache, name, "acme", :current, {:key, key}, 60_000)
 
       after_put = AshVaultRustler.mlock_status()
 

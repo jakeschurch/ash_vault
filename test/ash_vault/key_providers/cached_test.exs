@@ -80,6 +80,27 @@ defmodule AshVault.KeyProviders.CachedTest do
   end
 
   describe "a read in flight across a cluster-wide destroy" do
+    for initially_running? <- [true, false] do
+      @tag initially_running?: initially_running?
+      test "cannot restore an erased key after cache startup (initially running: #{initially_running?})",
+           %{cache: cache, opts: opts, initially_running?: initially_running?} do
+        unless initially_running?, do: stop_supervised!(cache)
+
+        reader = Task.async(fn -> Cached.current_key("erased", opts) end)
+        assert_receive {:in_flight, in_flight}
+        assert :ok = Cached.destroy("erased", opts)
+        if initially_running?, do: stop_supervised!(cache)
+        start_supervised!({ETS, name: cache})
+
+        send(in_flight, :go)
+        assert {:ok, _} = Task.await(reader)
+
+        assert {:miss, _} = ETS.fetch(cache, "erased", :current)
+        assert {:miss, _} = ETS.fetch(cache, "erased", 1)
+        assert {:error, :destroyed} = Cached.get_key("erased", 1, opts)
+      end
+    end
+
     test "cannot repopulate any slot afterwards", %{cache: cache, opts: opts} do
       scope = "acme"
 

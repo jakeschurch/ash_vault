@@ -391,6 +391,9 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
   The token-free `Req` options every request to `provider` shares: address, timeout and
   TLS.
 
+  Redirects are disabled, including the legacy `:follow_redirects` option. OpenBao
+  credentials and Kubernetes JWT bodies must never be forwarded to another endpoint.
+
   `:cacertfile` becomes `connect_options: [transport_opts: [cacertfile: path, verify:
   :verify_peer]]`, merged over any `:connect_options` given. Mint keeps its own hostname
   check and server name indication on top. `verify: :verify_none` is refused outright.
@@ -407,7 +410,12 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
     with {:ok, connect_options} <- connect_options(provider, config) do
       options =
         Keyword.get(config, :req_options, [])
-        |> Keyword.merge(base_url: address(provider), receive_timeout: receive_timeout(provider))
+        |> Keyword.delete(:follow_redirects)
+        |> Keyword.merge(
+          base_url: address(provider),
+          receive_timeout: receive_timeout(provider),
+          redirect: false
+        )
         |> then(fn options ->
           if connect_options == [],
             do: options,
