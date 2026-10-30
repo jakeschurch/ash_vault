@@ -32,9 +32,11 @@ defmodule AshVault.Macs.OpenBaoTransit do
   ## Outage versus forgery
 
   `{:error, :invalid_tag}` is returned only when transit answers `200` with
-  `valid: false`, or when the tag is not 32 bytes (refused before any round trip). Every
-  other failure — a deleted key, a `403`, an unreachable server, a malformed response —
-  is `AshVault.Errors.ProviderUnavailable`.
+  `valid: false`, or when the tag is not 32 bytes (refused before any round trip).
+  A `400` triggers an authoritative tombstone and key-metadata recheck: erasure returns
+  `:destroyed`, and a missing key or retired version returns `{:key_not_found, version}`.
+  The vault translates those into `KeyDestroyed` and `KeyNotFound`. A `403` is
+  `ProviderForbidden`; ambiguous responses and outages remain `ProviderUnavailable`.
   """
 
   @behaviour AshVault.Mac
@@ -70,6 +72,9 @@ defmodule AshVault.Macs.OpenBaoTransit do
         {:ok, %{status: 200, body: response}} ->
           response |> Transport.data() |> Map.get("hmac") |> decode_tag(version)
 
+        {:ok, %{status: 400} = response} ->
+          classify_key_failure(name, version, response)
+
         {:ok, response} ->
           Transport.unavailable!(Provider, response)
 
@@ -102,6 +107,9 @@ defmodule AshVault.Macs.OpenBaoTransit do
             _other -> {:error, Transport.unavailable(Provider, :malformed_transit_response)}
           end
 
+        {:ok, %{status: 400} = response} ->
+          classify_key_failure(name, version, response)
+
         {:ok, response} ->
           Transport.unavailable!(Provider, response)
 
@@ -113,6 +121,47 @@ defmodule AshVault.Macs.OpenBaoTransit do
 
   defp check_tag(tag) when is_binary(tag) and byte_size(tag) == @tag_bytes, do: :ok
   defp check_tag(_tag), do: {:error, :invalid_tag}
+
+  # A status or server error string cannot prove erasure or a missing version.
+  # Re-read authoritative state, without creating keys, after a stale handle fails.
+  defp classify_key_failure(name, version, response) do
+    tombstone = String.replace_suffix(name, ".mac", "")
+
+    with {:ok, :active} <- Transport.node_status(Provider),
+         :absent <- Transport.check_tombstone(Provider, tombstone),
+         {:ok, metadata} <- Transport.read_meta(Provider, name),
+         :absent <- Transport.check_tombstone(Provider, tombstone) do
+      case metadata do
+        :missing ->
+          {:error, {:key_not_found, version}}
+
+        %{
+          "exportable" => false,
+          "latest_version" => latest,
+          "min_decryption_version" => minimum,
+          "keys" => keys
+        }
+        when is_integer(latest) and latest > 0 and is_integer(minimum) and minimum >= 0 and
+               minimum <= latest and is_map(keys) ->
+          cond do
+            not Map.has_key?(keys, to_string(latest)) ->
+              {:error, Transport.unavailable(Provider, :malformed_key_metadata)}
+
+            version > latest or version < minimum or not Map.has_key?(keys, to_string(version)) ->
+              {:error, {:key_not_found, version}}
+
+            true ->
+              Transport.unavailable!(Provider, response)
+          end
+
+        _ ->
+          {:error, Transport.unavailable(Provider, :malformed_key_metadata)}
+      end
+    else
+      {:ok, _role} -> Transport.unavailable!(Provider, response)
+      {:error, error} -> {:error, error}
+    end
+  end
 
   @doc """
   Decode transit's `vault:v<N>:<base64>` HMAC into raw bytes, requiring `N == version`.

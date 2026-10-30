@@ -93,13 +93,12 @@ encrypt :api_key, legacy: MyApp.Encrypted.Binary, decrypt_for: [MyApp.Checks.Sys
   so an `only:` entry never admits them. Existing `DecryptFor.allowed?/3` callers retain
   action-only context; `allowed?/4` accepts additional context.
 - Backfill/verify the copy by its stored name: `--field vault_<field>`.
-- Legacy sibling loads use the original read action, arguments, actor, tenant and public
-  context on a fresh query. Native preparations and field authorization run again; keep
-  preparations safe to repeat and do not bypass policies to make a sibling load work.
-- The sibling is still a native `Ash.load` over fetched records (`query_for: :load`).
-  Policies that require a fresh data-layer read can intentionally deny it. Requesting
-  the sibling calculation on the outer query does not eliminate this nested load:
-  runtime calculations run after the legacy preparation's read hook.
+- Legacy siblings use a native read with the original action, arguments, actor, tenant,
+  public context, filter and lock, bounded to the selected rows' primary keys. Native
+  preparations and field authorization run again; keep preparations safe to repeat.
+  Missing, duplicate or changed rows fail closed. Offset and cursor pagination are not
+  applied twice. Caller-supplied record loads retain `query_for: :load` and cannot gain
+  fresh-read authority through the internal read or its public context marker.
 
 ## Looking up by value: searchable fields
 
@@ -162,6 +161,10 @@ Background jobs and scripts need a tenant too.
 
 - **Never** treat `ProviderUnavailable` as "erased" or "no data". An outage must not look
   like deletion.
+- An OpenBao MAC `400` is rechecked against tombstones and key metadata. Confirmed
+  erasure is `KeyDestroyed`; a missing or retired key version is `KeyNotFound`.
+  Ambiguous metadata stays unavailable. Pairing the Transit MAC with raw keys raises
+  `ArgumentError`; fix the provider configuration instead of retrying.
 - **Never** `rescue`/`catch` AshVault errors and continue with a blank or default value.
   A swallowed decrypt error is a silent wrong answer.
 - Through Ash actions they arrive wrapped in `Ash.Error.Invalid`; match the inner struct in

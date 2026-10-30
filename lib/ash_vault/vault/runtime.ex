@@ -464,6 +464,19 @@ defmodule AshVault.Vault.Runtime do
   defp mac_error(:opaque_key_unsupported, opts, ctx, operation),
     do: opaque_key_unsupported(opts, mac_module(opts), ctx, operation)
 
+  defp mac_error(:requires_open_bao_transit_key_provider, opts, _ctx, _operation) do
+    raise ArgumentError,
+          "#{inspect(mac_module(opts))} requires AshVault.KeyProviders.OpenBaoTransit; " <>
+            "configured provider: #{inspect(opts.key_provider)}"
+  end
+
+  defp mac_error({:key_not_found, version}, opts, ctx, operation),
+    do:
+      KeyNotFound.exception(
+        scope: resolve_scope!(ctx, opts.scope, operation),
+        key_version: version
+      )
+
   defp mac_error(%ProviderUnavailable{} = error, _opts, _ctx, _operation), do: error
   defp mac_error(%ProviderForbidden{} = error, _opts, _ctx, _operation), do: error
 

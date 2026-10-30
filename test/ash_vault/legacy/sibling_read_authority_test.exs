@@ -48,6 +48,180 @@ defmodule AshVault.Legacy.SiblingReadAuthorityTest do
     refute_receive {:credential_prepared, _, _, _, _, _}
   end
 
+  test "fresh-read field policies admit vault preference without loading supplied records", %{
+    record: record
+  } do
+    assert {:ok, [credential]} = read(record)
+    assert credential.token == "vault-value"
+    assert_receive {:credential_lifecycle, nil}
+    assert_receive {:credential_lifecycle, nil}
+    refute_receive {:credential_lifecycle, :load}
+  end
+
+  test "supplied stale or fabricated records never acquire fresh sibling authority", %{
+    record: record
+  } do
+    for supplied <- [record, %{record | token: "fabricated", vault_token: "fabricated"}],
+        marker <- [false, true] do
+      load_query =
+        record
+        |> query(:credentials)
+        |> Ash.Query.set_context(%{ash_vault_prefer_vault_copy_loading: marker})
+        |> Ash.Query.load([:token, :vault_token, :encrypted_vault_token])
+
+      case Ash.load(supplied, load_query) do
+        {:error, _} ->
+          :ok
+
+        {:ok, loaded} ->
+          for field <- [:token, :vault_token, :encrypted_vault_token] do
+            assert %Ash.ForbiddenField{} = Map.fetch!(loaded, field)
+          end
+      end
+    end
+  end
+
+  test "missing duplicate substituted or changed sibling records fail closed", %{record: record} do
+    for effect <- [:drop, :duplicate, :substitute, :change] do
+      assert {:error, _} =
+               record
+               |> query(:credentials)
+               |> Ash.Query.set_context(%{sibling_effect: effect})
+               |> Ash.read()
+    end
+  end
+
+  test "initial_data reads cannot acquire fresh sibling authority", %{record: record} do
+    for supplied <- [record, %{record | token: "fabricated", vault_token: "fabricated"}],
+        marker <- [false, true] do
+      load_query =
+        record
+        |> query(:credentials)
+        |> Ash.Query.set_context(%{ash_vault_prefer_vault_copy_loading: marker})
+        |> Ash.Query.load([:token, :vault_token, :encrypted_vault_token])
+
+      case Ash.Actions.Read.run(load_query, load_query.action,
+             initial_data: [supplied],
+             actor: @actor,
+             tenant: @tenant,
+             authorize?: true
+           ) do
+        {:error, _} ->
+          :ok
+
+        {:ok, [loaded]} ->
+          for field <- [:token, :vault_token, :encrypted_vault_token] do
+            assert %Ash.ForbiddenField{} = Map.fetch!(loaded, field)
+          end
+      end
+    end
+  end
+
+  test "caller hooks are not replayed and original filters remain in force", %{record: record} do
+    require Ash.Query
+
+    assert {:ok, [_]} =
+             record
+             |> query(:credentials)
+             |> Ash.Query.filter(org_id == ^@tenant)
+             |> Ash.Query.after_action(fn _query, records ->
+               send(self(), :caller_hook)
+               {:ok, records}
+             end)
+             |> Ash.read()
+
+    assert_receive :caller_hook
+    refute_receive :caller_hook
+
+    assert {:ok, []} =
+             record
+             |> query(:credentials)
+             |> Ash.Query.filter(org_id == "other")
+             |> Ash.read()
+  end
+
+  test "batch offset limit sorting and pagination retain the selected rows", %{record: record} do
+    second =
+      ScopedLegacyCredential
+      |> Ash.Changeset.for_create(:create, %{org_id: @tenant, token: "second-vault"},
+        actor: @actor,
+        tenant: @tenant
+      )
+      |> Ash.create!()
+
+    ids = Enum.sort([record.id, second.id])
+
+    assert {:ok, [credential]} =
+             record
+             |> query(:credential_batch, %{proof: "bound"})
+             |> Ash.Query.sort(id: :asc)
+             |> Ash.Query.offset(1)
+             |> Ash.Query.limit(1)
+             |> Ash.read()
+
+    assert credential.id == List.last(ids)
+    assert credential.token in ["vault-value", "second-vault"]
+
+    assert {:ok, %Ash.Page.Offset{results: [paged]}} =
+             record
+             |> query(:paged_credentials, %{proof: "bound"})
+             |> Ash.Query.sort(id: :asc)
+             |> Ash.read(page: [limit: 1, offset: 1])
+
+    assert paged.id == credential.id
+    assert paged.token == credential.token
+
+    assert {:ok, %Ash.Page.Keyset{results: [first]}} =
+             record
+             |> query(:required_paged_credentials, %{proof: "bound"})
+             |> Ash.Query.sort(id: :asc)
+             |> Ash.read(page: [limit: 1])
+
+    assert {:ok, %Ash.Page.Keyset{results: [last]}} =
+             record
+             |> query(:required_paged_credentials, %{proof: "bound"})
+             |> Ash.Query.sort(id: :asc)
+             |> Ash.read(page: [limit: 1, after: first.__metadata__.keyset])
+
+    assert last.id == credential.id
+    assert last.token == credential.token
+  end
+
+  test "composite primary keys match siblings in the original order" do
+    alias AshVault.Test.CompositeLegacyCredential
+
+    for part <- ["first", "second"] do
+      record =
+        CompositeLegacyCredential
+        |> Ash.Changeset.for_create(
+          :create,
+          %{group: "same", part: part, org_id: @tenant, token: "vault-" <> part},
+          actor: @actor,
+          tenant: @tenant
+        )
+        |> Ash.create!()
+
+      changeset =
+        record
+        |> Ash.Changeset.new()
+        |> Ash.Changeset.set_tenant(@tenant)
+        |> Ash.Changeset.force_change_attribute(:token, "stale-" <> part)
+
+      assert {:ok, _} = Ash.DataLayer.update(CompositeLegacyCredential, changeset)
+    end
+
+    assert {:ok, records} =
+             CompositeLegacyCredential
+             |> Ash.Query.for_read(:read, %{}, actor: @actor, tenant: @tenant)
+             |> Ash.Query.sort(part: :desc)
+             |> Ash.read()
+
+    assert Enum.map(records, &{&1.part, &1.token}) == [
+             {"second", "vault-second"},
+             {"first", "vault-first"}
+           ]
+  end
+
   test "the sibling cannot restore a field denied by native field policies", %{record: record} do
     assert {:ok, [credential]} =
              record
