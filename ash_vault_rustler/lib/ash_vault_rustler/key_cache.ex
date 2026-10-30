@@ -16,13 +16,13 @@ defmodule AshVaultRustler.KeyCache do
   >
   > Each cached key lives in a page-aligned allocation that this package owns, `mlock`ed
   > into RAM so it cannot reach swap, and **overwritten before it is freed**. Eviction is
-  > a `Drop`, and the `Drop` zeroes. `AshVault.KeyProviders.Cached.evict_scope/1` returns
+  > a `Drop`, and the `Drop` zeroes. `AshVault.KeyProviders.Cached.evict_scope/2` returns
   > only after those writes have happened, which is what makes
   > `AshVault.destroy_keys!/2` immediate rather than eventual-within-a-TTL for this node.
 
   ## What it still does not buy
 
-  `AshVault.KeyProviders.Cached.get_key/2` returns a **binary** to the BEAM, so a copy of
+  `AshVault.KeyProviders.Cached.get_key/3` returns a **binary** to the BEAM, so a copy of
   the key lands on an Elixir process heap for every encrypt and decrypt, and that copy is
   the garbage collector's business, not ours. This backend bounds the lifetime of the
   *authoritative* copy; it does not eliminate the per-operation one.
