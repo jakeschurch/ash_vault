@@ -153,9 +153,8 @@ defmodule AshVaultRustler.OpaqueKeyTest do
       assert message =~ inspect(OpaqueKeys)
       assert message =~ "will not unwrap the handle"
 
-      # The verb follows the operation. REVIEW_FINDINGS #10 is the same defect in
-      # `MissingScope`: saying "encrypting" on a read sends the operator to the wrong
-      # half of the system.
+      # The verb follows the operation: saying "encrypting" on a read sends the
+      # operator to the wrong half of the system.
       assert message =~ "encrypting MyApp.User.ssn"
       refute message =~ "decrypting"
     end

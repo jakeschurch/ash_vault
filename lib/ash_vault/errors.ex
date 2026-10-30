@@ -418,9 +418,8 @@ defmodule AshVault.Errors.OpaqueKeyUnsupported do
 
   defp at(%{resource: nil}), do: ""
 
-  # The verb follows the operation. Reporting a failed decrypt as "encrypting" is the
-  # same defect as REVIEW_FINDINGS #10 — it sends the operator looking at the wrong half
-  # of the system.
+  # The verb follows the operation: reporting a failed decrypt as "encrypting" sends
+  # the operator looking at the wrong half of the system.
   defp at(%{resource: resource, field: field, operation: operation}) do
     ", #{verb(operation)} #{inspect(resource)}.#{field}"
   end
