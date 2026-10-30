@@ -247,7 +247,10 @@ mix ash_vault.openbao.migrate_namespace BASE64URL_SCOPE
 Use the same task to provision a fresh scope in this binary range. The token needs
 `sudo` and `update` on `<mount>/ashvault/namespace/*`, `read` on `sys/mounts` and old
 KV tombstones, plus read/write access to `<kv_mount>/data/namespaces/*` and tombstones.
-Applications need read access to the namespaces path as well as their existing grants.
+Applications need read access to the namespaces path. Extend the exporting application's
+existing Transit key and export grants to `ashvault.v2.export.*`; an `ashvault_*` grant
+does not cover the new prefix. Native-provider tokens keep their own key prefix and
+must not gain export permissions.
 
 The server atomically moves exportable data/MAC/lookup policies and archives, retaining
 their key bytes, version numbers and timestamps. Non-exportable keys belonging to the
