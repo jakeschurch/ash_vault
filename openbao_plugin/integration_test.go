@@ -168,6 +168,19 @@ storage "raft" { path = %q node_id = "retirement-integration" }
 		t.Fatal("migration must require initialization")
 	}
 	must("POST", "transit/ashvault/initialize", nil)
+	must("PUT", "sys/policies/acl/retirement-test-app", map[string]interface{}{
+		"policy": `path "transit/*" { capabilities = ["create", "read", "update", "delete", "list"] }`,
+	})
+	_, tokenResponse := request("POST", "auth/token/create", map[string]interface{}{
+		"policies": []string{"retirement-test-app"}, "no_default_policy": true,
+	})
+	rootToken := token
+	token = tokenResponse["auth"].(map[string]interface{})["client_token"].(string)
+	if status, _ := request("POST", "transit/ashvault/initialize", nil); status != 403 {
+		t.Fatal("initialization must require sudo, even with ordinary update permission")
+	}
+	must("GET", "transit/ashvault/protocol", nil)
+	token = rootToken
 	for _, name := range names {
 		got := must("GET", "transit/export/encryption-key/"+name+"/1", nil)["keys"]
 		if fmt.Sprint(got) != fmt.Sprint(keys[name]) {

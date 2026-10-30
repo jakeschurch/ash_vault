@@ -1,6 +1,7 @@
 defmodule AshVault.KeyProviders.OpenBaoRetirementTest do
   use ExUnit.Case, async: false
   alias AshVault.Errors.ProviderUnavailable
+  alias AshVault.Errors.ProviderForbidden
   alias AshVault.KeyProviders.{OpenBao, OpenBaoTransit}
   alias AshVault.KeyProviders.OpenBao.Transport
 
@@ -78,17 +79,106 @@ defmodule AshVault.KeyProviders.OpenBaoRetirementTest do
         context[:reply] || {200, %{"data" => %{"keys" => [@name]}}}
 
       conn.method == "GET" ->
-        {404, %{"data" => %{"data" => nil, "metadata" => %{}}}}
+        context[:tombstone_reply] || {404, %{"data" => %{"data" => nil, "metadata" => %{}}}}
 
       conn.request_path =~ "/retire/" ->
-        {200, retired(true)}
+        context[:retire_reply] || {200, retired(true)}
 
       true ->
-        {200, protocol(true)}
+        context[:initialize_reply] || {200, protocol(true)}
+    end
+  end
+
+  defp respond(%{scenario: :runtime}, conn) do
+    cond do
+      conn.request_path =~ "/data/tombstones/" ->
+        absent()
+
+      conn.request_path =~ "/ashvault/retired/" ->
+        {200, retired(false)}
+
+      conn.request_path =~ "/keys/" ->
+        {200,
+         %{
+           "data" => %{
+             "exportable" => false,
+             "type" => "aes256-gcm96",
+             "latest_version" => 1,
+             "min_decryption_version" => 1,
+             "keys" => %{"1" => 1_791_000_000}
+           }
+         }}
+
+      true ->
+        {410, %{"protocol" => @protocol, "ashvault_error" => "scope_retired"}}
     end
   end
 
   defp respond(context, _conn), do: context.reply
+
+  @tag reply: {403, %{"errors" => ["private-needle"]}}
+  test "protocol policy refusal retains its taxonomy" do
+    assert {:error, %ProviderForbidden{operation: :retirement_protocol} = error} =
+             Transport.retirement_protocol(OpenBao, true)
+
+    refute inspect(error) =~ "private-needle"
+  end
+
+  @tag scenario: :status, reply: {403, %{}}
+  test "retirement status policy refusal retains its taxonomy" do
+    assert {:error, %ProviderForbidden{operation: :read_retirement}} =
+             OpenBao.current_key("retirement-test")
+  end
+
+  @tag scenario: :destroy, existing: true, reply: {403, %{}}
+  test "retirement policy refusal retains its taxonomy" do
+    assert {:error, %ProviderForbidden{operation: :retire_scope}} =
+             OpenBao.destroy("retirement-test")
+  end
+
+  @tag scenario: :migration, reply: {403, %{}}
+  test "listing policy refusal retains its taxonomy" do
+    assert {:error, %ProviderForbidden{operation: :list_tombstones}} =
+             Transport.initialize_retirement(OpenBao)
+  end
+
+  @tag scenario: :migration, initialize_reply: {403, %{}}
+  test "initialization policy refusal retains its taxonomy" do
+    assert {:error, %ProviderForbidden{operation: :initialize_retirement}} =
+             Transport.initialize_retirement(OpenBao)
+  end
+
+  for options <- [
+        [tombstone_reply: {503, %{}}],
+        [tombstone_reply: {404, %{"errors" => []}}],
+        [retire_reply: {503, %{}}],
+        [retire_reply: {200, %{"data" => %{}}}]
+      ] do
+    @tag Keyword.merge([scenario: :migration], options)
+    test "partial import never activates #{inspect(options)}", %{calls: calls} do
+      assert {:error, %ProviderUnavailable{}} = Transport.initialize_retirement(OpenBao)
+      refute {"POST", "/v1/transit/ashvault/initialize"} in Agent.get(calls, & &1)
+    end
+  end
+
+  @tag scenario: :migration, reply: {404, %{"errors" => []}}
+  test "operator task activates a fresh mount" do
+    assert ExUnit.CaptureIO.capture_io(fn ->
+             Mix.Tasks.AshVault.Openbao.InitRetirement.run(["AshVault.KeyProviders.OpenBao"])
+           end) =~ "KV tombstones imported"
+  end
+
+  @tag reply: {200, %{}}
+  test "stock remains default and malformed configuration is rejected" do
+    config = Application.get_env(:ash_vault, OpenBao)
+    Application.put_env(:ash_vault, OpenBao, Keyword.delete(config, :server_retirement))
+    refute Transport.server_retirement?(OpenBao)
+    Application.put_env(:ash_vault, OpenBao, Keyword.put(config, :server_retirement, "true"))
+
+    assert_raise ArgumentError, ~r/server_retirement must be a boolean/, fn ->
+      Transport.server_retirement?(OpenBao)
+    end
+  end
 
   for provider <- [OpenBao, OpenBaoTransit] do
     @tag scenario: :setup
@@ -166,6 +256,34 @@ defmodule AshVault.KeyProviders.OpenBaoRetirementTest do
   @tag reply: {410, %{"errors" => ["scope_retired"]}}
   test "arbitrary HTTP 410 never invents erasure" do
     assert {:ok, %{status: 410}} = Transport.post(OpenBaoTransit, "/v1/transit/encrypt/#{@name}")
+  end
+
+  for operation <- [:encrypt, :decrypt, :mac, :verify] do
+    @tag scenario: :runtime, operation: operation
+    test "retirement after handle acquisition remains KeyDestroyed during #{operation}",
+         context do
+      vault = AshVault.Test.Support.TransitVault
+      ctx = AshVault.Test.Support.Helpers.context_for("retirement-test")
+
+      blob =
+        AshVault.Envelope.V1.encode(%{
+          version: 1,
+          cipher: AshVault.Ciphers.OpenBaoTransit.id(),
+          key_version: 1,
+          nonce: "",
+          tag: "",
+          ciphertext: "vault:v1:AAAA"
+        })
+
+      assert_raise AshVault.Errors.KeyDestroyed, fn ->
+        case context.operation do
+          :encrypt -> vault.encrypt!("secret", ctx)
+          :decrypt -> vault.decrypt!(blob, ctx)
+          :mac -> vault.mac!("payload", ctx)
+          :verify -> vault.verify_mac!("payload", 1, <<0::256>>, ctx)
+        end
+      end
+    end
   end
 
   @tag scenario: :migration

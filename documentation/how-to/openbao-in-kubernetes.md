@@ -207,8 +207,9 @@ No re-encryption or lookup-token rebuild is needed. Subsequent scope retirement 
 no per-scope writer drain. Route requests to the active node as described above.
 
 The library retains KV tombstones as well as server markers. Reverting the application
-flag keeps recognizing scopes erased through the provider, but returns to stock-mode
-guarantees. Reverting the mount implementation is a separate operator change: retain
+flag keeps recognizing scopes erased through the provider, but does not switch the
+server backend: stock-mode key deletion is unsupported by the plugin and fails closed.
+Reverting the mount implementation is a separate operator change: retain
 its storage and KV tombstones, stop writers, and reconcile every server retirement into
 KV first if operators used the raw plugin endpoint. Never remove or restore retirement
 metadata to reactivate a scope. No mode can revoke already-exported keys, recall

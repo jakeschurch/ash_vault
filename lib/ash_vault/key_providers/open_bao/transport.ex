@@ -72,8 +72,8 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
       {:error, error} ->
         {:error, error}
 
-      _ ->
-        {:error, unavailable(provider, :retirement_protocol_unavailable)}
+      {:ok, response} ->
+        retirement_failure(provider, response, :retirement_protocol_unavailable)
     end
   end
 
@@ -88,8 +88,8 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
       {:error, error} ->
         {:error, error}
 
-      _ ->
-        {:error, unavailable(provider, :retirement_unconfirmed)}
+      {:ok, response} ->
+        retirement_failure(provider, response, :retirement_unconfirmed)
     end
   end
 
@@ -110,8 +110,8 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
         {:error, error} ->
           {:error, error}
 
-        _ ->
-          {:error, unavailable(provider, :retirement_initialization_unconfirmed)}
+        {:ok, response} ->
+          retirement_failure(provider, response, :retirement_initialization_unconfirmed)
       end
     end
   end
@@ -131,8 +131,8 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
       {:error, error} ->
         {:error, error}
 
-      _ ->
-        {:error, unavailable(provider, :tombstone_listing_unavailable)}
+      {:ok, response} ->
+        retirement_failure(provider, response, :tombstone_listing_unavailable)
     end
   end
 
@@ -459,10 +459,16 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
       {:error, error} ->
         {:error, error}
 
-      _ ->
-        {:error, unavailable(provider, :retirement_status_unavailable)}
+      {:ok, response} ->
+        retirement_failure(provider, response, :retirement_status_unavailable)
     end
   end
+
+  defp retirement_failure(provider, %{status: 403} = response, _reason),
+    do: unavailable!(provider, response)
+
+  defp retirement_failure(provider, _response, reason),
+    do: {:error, unavailable(provider, reason)}
 
   @doc """
   Classify a raw tombstone-read response into `:destroyed`, `:absent` or
@@ -1009,7 +1015,9 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
   The operation a request to `path` with `method` performs, as recorded on
   `AshVault.Errors.ProviderForbidden`: `:read_key`, `:create_key`, `:delete_key`,
   `:rotate_key`, `:configure_key`, `:encrypt`, `:decrypt`, `:hmac`, `:verify`, `:export`,
-  `:read_tombstone`, `:write_tombstone`, `:mount`, `:login`, or `:unknown`.
+  `:read_tombstone`, `:write_tombstone`, `:list_tombstones`, `:read_retirement`,
+  `:retire_scope`, `:initialize_retirement`, `:retirement_protocol`, `:mount`,
+  `:login`, or `:unknown`.
 
   Derived from the path, never from the response, and never carrying the key name.
   """
@@ -1019,6 +1027,9 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
     tombstones = "/v1/#{kv_mount(provider)}/data/tombstones/"
 
     cond do
+      String.starts_with?(path, "/v1/#{kv_mount(provider)}/metadata/tombstones") ->
+        :list_tombstones
+
       String.starts_with?(path, transit) ->
         path
         |> String.replace_prefix(transit, "")
@@ -1042,6 +1053,10 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
   def operation(_provider, _method, _path), do: :unknown
 
   defp transit_operation(["keys", _name], :get), do: :read_key
+  defp transit_operation(["ashvault", "protocol"], :get), do: :retirement_protocol
+  defp transit_operation(["ashvault", "retired", _name], :get), do: :read_retirement
+  defp transit_operation(["ashvault", "retire", _name], :post), do: :retire_scope
+  defp transit_operation(["ashvault", "initialize"], :post), do: :initialize_retirement
   defp transit_operation(["keys", _name], :post), do: :create_key
   defp transit_operation(["keys", _name], :delete), do: :delete_key
   defp transit_operation(["keys", _name, "rotate"], _method), do: :rotate_key
