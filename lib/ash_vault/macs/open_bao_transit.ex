@@ -32,7 +32,7 @@ defmodule AshVault.Macs.OpenBaoTransit do
   ## Outage versus forgery
 
   `{:error, :invalid_tag}` is returned only when transit answers `200` with
-  `valid: false`, or when the tag is not 32 bytes (refused before any round trip). Every
+  `valid: false`, or when the tag is not 32 bytes (refused before any round trip).
   A `400` triggers an authoritative tombstone and key-metadata recheck: erasure returns
   `:destroyed`, and a missing key or retired version returns `{:key_not_found, version}`.
   The vault translates those into `KeyDestroyed` and `KeyNotFound`. A `403` is
