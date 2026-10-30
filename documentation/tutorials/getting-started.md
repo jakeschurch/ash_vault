@@ -17,7 +17,7 @@ def deps do
   [
     {:ash, "~> 3.0"},
     {:ash_postgres, "~> 2.0"},
-    {:ash_vault, "~> 0.1.0"}
+    {:ash_vault, "~> 0.2.0"}
   ]
 end
 ```

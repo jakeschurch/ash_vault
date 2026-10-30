@@ -141,7 +141,7 @@ AshPostgres 2.15.2 or later within 2.x to include the tenant-isolation security 
 ```elixir
 def deps do
   [
-    {:ash_vault, "~> 0.1.0"}
+    {:ash_vault, "~> 0.2.0"}
   ]
 end
 ```

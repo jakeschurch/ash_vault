@@ -8,8 +8,8 @@ Optional. The parent `ash_vault` has no Rust dependency and never will.
 ```elixir
 def deps do
   [
-    {:ash_vault, "~> 0.1"},
-    {:ash_vault_rustler, "~> 0.1"}
+    {:ash_vault, "~> 0.2.0"},
+    {:ash_vault_rustler, "~> 0.2.0"}
   ]
 end
 ```
@@ -267,95 +267,30 @@ between `multicall` and that function is four lines and is not covered.
 
 ## Distribution
 
-Today this package **builds from source** via `rustler`, so consumers need a Rust
-toolchain and a linker.
+Consumers download a precompiled NIF through `rustler_precompiled` and verify it against
+`checksum-Elixir.AshVaultRustler.Native.exs`. A Rust toolchain is needed only when
+`ASH_VAULT_RUSTLER_BUILD=1` forces a source build. The setting is read at compile time;
+run `mix deps.compile ash_vault_rustler --force` after changing it.
 
-That is a genuine adoption cost, and this repo's own host is the worst case for it: it
-has `cargo` but no linker at all, which is why every build and test here runs inside
-`nix develop`.
+Artifacts cover Linux GNU and musl, plus macOS, on x86_64 and aarch64. Each uses NIF API
+2.16, supported by OTP 24 and later. The package's Elixir requirement still applies.
 
-### The `rustler_precompiled` path — wired, and deliberately off
+### Releasing both packages
 
-The switch exists in `AshVaultRustler.Native`. It is **off**, and the default build is
-still from source, because a `base_url` pointing at a release that does not exist turns
-every `mix test` in every consuming project into a NIF load failure — a far worse default
-than requiring a toolchain. Nothing here can be finished on a developer machine: it needs
-real published artifacts.
+1. Update the versions in both Mix projects and the native crate, plus the changelog.
+   Run the local suites and the release workflow with `dry_run=true` before merging.
+2. Push the matching `v<version>` tag, for example `v0.2.0`. The release workflow tests
+   both packages, builds all six NIF artifacts and publishes `ash_vault` to Hex.
+3. The workflow generates checksums from the published artifacts, includes them in the
+   `ash_vault_rustler` Hex package, and opens a PR to retain the checksum file in Git.
+   Merge that PR after checking the artifact names and checksums.
+4. Verify both Hex releases and compile the published Rustler package from a clean
+   consumer without forcing a source build. Verify that all six artifacts exist under
+   `ash_vault_rustler-v<version>`.
 
-What is already done:
-
-* `{:rustler_precompiled, "~> 0.8"}` is a dependency, alongside `rustler`. Neither is
-  `optional:`, because `AshVaultRustler.Native` chooses between them at **compile** time
-  from an environment variable, so whichever the switch picks has to already be present.
-* `AshVaultRustler.Native` carries both `use` forms, the target list, and the `base_url`.
-* `.github/workflows/nif-release.yml` cross-compiles every target and attaches the
-  artifacts to a release, on a `ash_vault_rustler-v*` tag or on `workflow_dispatch`.
-* `mix nif.checksum` generates the checksum file.
-
-Try the precompiled code path without a release, which is as far as this can be taken
-locally:
-
-```sh
-ASH_VAULT_RUSTLER_PRECOMPILED=1 ASH_VAULT_RUSTLER_BUILD=1 mix compile --force
-```
-
-`ASH_VAULT_RUSTLER_PRECOMPILED=1` takes the `RustlerPrecompiled` branch;
-`ASH_VAULT_RUSTLER_BUILD=1` makes it build from source rather than download, which is
-also what CI uses to produce the artifacts. Both are read at compile time, so changing
-either needs `--force`.
-
-### Releasing a precompiled NIF
-
-> #### Normally automated {: .info}
->
-> `.github/workflows/release.yml` publishes `ash_vault` and `ash_vault_rustler` to Hex
-> together from one `v<version>` tag, with both `mix.exs` versions bumped to match. It
-> builds the NIF release when missing, regenerates the checksum against it, publishes the
-> parent, then this package against the parent *from Hex* (`ASH_VAULT_RUSTLER_HEX=1`),
-> and opens a PR committing any new checksum file. The manual steps below are what it
-> does, for when it cannot.
-
-For the maintainer, in order. Steps 1-3 are mechanical; **step 5 is the irreversible
-one**, and it is last on purpose.
-
-1. Set the version in `ash_vault_rustler/mix.exs`. `base_url` is built from it, so the
-   tag, the version and the artifact names must agree exactly.
-2. Confirm `base_url` in `AshVaultRustler.Native` names the real repository. It is
-   currently `https://github.com/jakeschurch/ash_vault/releases/download/ash_vault_rustler-v#{@version}`.
-   If the repository is ever moved or renamed, this is the line that silently 404s.
-3. Push the tag and let the workflow finish:
-
-   ```sh
-   git tag ash_vault_rustler-v0.1.0 && git push origin ash_vault_rustler-v0.1.0
-   ```
-
-   Every matrix job must be green. A missing target is not a soft failure: a consumer on
-   that target gets a download error at compile time. Run the workflow by hand first
-   (`workflow_dispatch`) if there is any doubt — a bad release has to be deleted, and a
-   deleted release breaks anyone who already downloaded from it.
-4. Generate and **commit** the checksum file, from `ash_vault_rustler/`:
-
-   ```sh
-   mix nif.checksum
-   git add checksum-Elixir.AshVaultRustler.Native.exs
-   ```
-
-   This is what makes a downloaded `.so` verifiable rather than merely convenient. It is
-   not optional and it is not generated at consumer build time — without it in the
-   package, `RustlerPrecompiled` refuses to use a downloaded artifact.
-5. Flip the default: in `AshVaultRustler.Native`, change
-
-   ```elixir
-   @precompiled_by_default false
-   ```
-
-   to `true`. From that commit on, `ASH_VAULT_RUSTLER_BUILD=1` is the escape hatch back
-   to a source build, and `ASH_VAULT_RUSTLER_PRECOMPILED` stops mattering.
-6. Verify from a clean checkout on a machine **without** a Rust toolchain that
-   `mix deps.get && mix compile` succeeds. That is the entire point of the exercise, and
-   it is the one check that cannot be done in the repository that produced the artifacts.
-
-Until step 5 lands, consumers build from source exactly as they do today.
+Never rebuild or overwrite artifacts of an existing release: a different binary would
+invalidate the checksums already shipped to consumers. The release workflow refuses
+partial artifact releases rather than mixing builds.
 
 ---
 

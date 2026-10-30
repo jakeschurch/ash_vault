@@ -5,6 +5,8 @@ All notable changes to AshVault are recorded here. The format follows
 
 ## Unreleased
 
+## 0.2.0 - 2026-10-30
+
 ### Fixed
 
 - Legacy dual reads preserve fresh-read field authorization with bounded native sibling

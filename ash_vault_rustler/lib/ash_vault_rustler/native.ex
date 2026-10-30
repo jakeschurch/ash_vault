@@ -27,32 +27,16 @@ defmodule AshVaultRustler.Native do
   caller rather than an aborted VM. `panic_for_test/0` exists purely so that claim can be
   tested rather than asserted; see `test/panic_test.exs`.
 
-  ## Distribution: source build by default, precompiled behind a switch
+  ## Distribution: verified precompiled artifacts by default
 
-  Building from source needs a Rust toolchain and a linker, which is a real adoption
-  cost. `rustler_precompiled` removes it by downloading a verified artifact instead — but
-  only once a tagged release with CI artifacts exists, because a `base_url` pointing at a
-  release that is not there turns every `mix test` into a NIF load failure. That is a far
-  worse default than requiring a toolchain.
-
-  So the switch is wired and **off**. With `ASH_VAULT_RUSTLER_PRECOMPILED` unset, this is
-  a plain `use Rustler` and nothing about the build changes. Set it at compile time to
-  take the precompiled path:
-
-      ASH_VAULT_RUSTLER_PRECOMPILED=1 mix compile
-
-  `ASH_VAULT_RUSTLER_BUILD=1` forces a source build on that path, which is what CI uses
-  to produce the artifacts in the first place.
-
-  Both are read at **compile** time, so changing either needs a `mix deps.compile
-  ash_vault_rustler --force` to take effect. `README.md` has the release checklist,
-  including the one-line change that makes precompiled the default.
+  `rustler_precompiled` downloads a release artifact and verifies its committed checksum.
+  Set `ASH_VAULT_RUSTLER_BUILD=1` to build from source with a Rust toolchain and linker.
+  This setting is read at compile time; changing it requires
+  `mix deps.compile ash_vault_rustler --force`. `README.md` has the release checklist.
   """
 
-  # The consumer-facing default. Flipping this literal to `true` — after the first
-  # release exists and `checksum-Elixir.AshVaultRustler.Native.exs` is committed — is what
-  # makes precompiled artifacts the default; the environment variable then becomes the
-  # opt-out rather than the opt-in.
+  # Release artifacts and their checksums must exist before publishing the Hex package.
+  # ASH_VAULT_RUSTLER_BUILD=1 remains the explicit source-build option.
   @precompiled_by_default true
 
   @precompiled? @precompiled_by_default or
