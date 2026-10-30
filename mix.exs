@@ -142,7 +142,8 @@ defmodule AshVault.MixProject do
           AshVault.RotationPolicies.Manual
         ],
         Migration: [
-          AshVault.Backfill
+          AshVault.Backfill,
+          Mix.Tasks.AshVault.Openbao.InitRetirement
         ],
         Errors: [
           AshVault.Errors,

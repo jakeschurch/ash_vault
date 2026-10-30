@@ -32,6 +32,163 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
   @default_max_retries 2
   @close_header {"connection", "close"}
   @health_params [standbyok: true, perfstandbyok: true, sealedcode: 200, uninitcode: 200]
+  @retirement_protocol "ashvault-retirement/v1"
+
+  @doc "Whether this provider requires transactional server retirement (default: false)."
+  @spec server_retirement?(module()) :: boolean()
+  def server_retirement?(provider) do
+    case Keyword.get(config(provider), :server_retirement, false) do
+      value when is_boolean(value) -> value
+      _ -> raise ArgumentError, "#{inspect(provider)} :server_retirement must be a boolean"
+    end
+  end
+
+  @doc "Prepare the tombstone store and validate the opted-in retirement backend."
+  @spec setup(module()) :: :ok | {:error, Exception.t()}
+  def setup(provider) do
+    with :ok <- ensure_kv_mount(provider) do
+      if server_retirement?(provider), do: retirement_protocol(provider, true), else: :ok
+    end
+  end
+
+  @doc "Require a compatible transactional plugin, optionally already initialized."
+  @spec retirement_protocol(module(), boolean()) :: :ok | {:error, term()}
+  def retirement_protocol(provider, initialized?) do
+    case get(provider, transit_path(provider, "/ashvault/protocol")) do
+      {:ok,
+       %{
+         status: 200,
+         body: %{
+           "data" => %{
+             "protocol" => @retirement_protocol,
+             "transactional" => true,
+             "initialized" => initialized
+           }
+         }
+       }}
+      when is_boolean(initialized) and (not initialized? or initialized) ->
+        :ok
+
+      {:error, error} ->
+        {:error, error}
+
+      {:ok, response} ->
+        retirement_failure(provider, response, :retirement_protocol_unavailable)
+    end
+  end
+
+  @doc "Atomically retire all purposes of a data key at the server. Never falls back to deletion."
+  @spec retire_scope(module(), String.t()) :: :ok | {:error, term()}
+  def retire_scope(provider, name) do
+    case post(provider, transit_path(provider, "/ashvault/retire/#{name}")) do
+      {:ok,
+       %{status: 200, body: %{"data" => %{"protocol" => @retirement_protocol, "retired" => true}}}} ->
+        :ok
+
+      {:error, error} ->
+        {:error, error}
+
+      {:ok, response} ->
+        retirement_failure(provider, response, :retirement_unconfirmed)
+    end
+  end
+
+  @doc "Import existing KV tombstones before activating a transactional retirement mount."
+  @spec initialize_retirement(module()) :: :ok | {:error, term()}
+  def initialize_retirement(provider) do
+    with :ok <- retirement_protocol(provider, false),
+         :ok <- verify_legacy_mount(provider),
+         {:ok, names} <- legacy_tombstone_names(provider),
+         :ok <- import_retirements(provider, names) do
+      case post(provider, transit_path(provider, "/ashvault/initialize")) do
+        {:ok,
+         %{
+           status: 200,
+           body: %{"data" => %{"protocol" => @retirement_protocol, "initialized" => true}}
+         }} ->
+          :ok
+
+        {:error, error} ->
+          {:error, error}
+
+        {:ok, response} ->
+          retirement_failure(provider, response, :retirement_initialization_unconfirmed)
+      end
+    end
+  end
+
+  defp verify_legacy_mount(provider) do
+    mount = String.trim_trailing(kv_mount(provider), "/") <> "/"
+
+    case get(provider, "/v1/sys/mounts") do
+      {:ok, %{status: 200, body: %{"data" => mounts}}} when is_map(mounts) ->
+        case Map.get(mounts, mount) do
+          %{"type" => "kv", "options" => %{"version" => "2"}} -> :ok
+          _ -> {:error, unavailable(provider, :legacy_kv_v2_mount_unconfirmed)}
+        end
+
+      {:error, error} ->
+        {:error, error}
+
+      {:ok, response} ->
+        retirement_failure(provider, response, :legacy_kv_v2_mount_unconfirmed)
+    end
+  end
+
+  defp legacy_tombstone_names(provider) do
+    # GET ?list=true is OpenBao's ACL-protected LIST operation, expressed using
+    # a standard HTTP method accepted by Req and Mint.
+    case get(provider, kv_path(provider, "/metadata/tombstones?list=true")) do
+      {:ok, %{status: 200, body: %{"data" => %{"keys" => names}}}} when is_list(names) ->
+        if Enum.all?(names, &data_key_name?/1),
+          do: {:ok, names},
+          else: {:error, unavailable(provider, :invalid_tombstone_listing)}
+
+      {:ok, %{status: 404, body: %{"errors" => []}}} ->
+        {:ok, []}
+
+      {:error, error} ->
+        {:error, error}
+
+      {:ok, response} ->
+        retirement_failure(provider, response, :tombstone_listing_unavailable)
+    end
+  end
+
+  defp data_key_name?(name) when is_binary(name) do
+    Enum.any?(["ashvault_nx_", "ashvault_"], fn prefix ->
+      if String.starts_with?(name, prefix) do
+        encoded = String.replace_prefix(name, prefix, "")
+
+        case Base.url_decode64(encoded, padding: false) do
+          {:ok, raw} -> Base.url_encode64(raw, padding: false) == encoded
+          :error -> false
+        end
+      else
+        false
+      end
+    end)
+  end
+
+  defp data_key_name?(_), do: false
+
+  defp import_retirements(provider, names) do
+    Enum.reduce_while(names, :ok, fn name, :ok ->
+      case check_legacy_tombstone(provider, name) do
+        {:error, :destroyed} ->
+          case retire_scope(provider, name) do
+            :ok -> {:cont, :ok}
+            error -> {:halt, error}
+          end
+
+        {:error, error} ->
+          {:halt, {:error, error}}
+
+        :absent ->
+          {:halt, {:error, unavailable(provider, :tombstone_disappeared_during_migration)}}
+      end
+    end)
+  end
 
   # ── scope encoding ─────────────────────────────────────────────────────────────
 
@@ -144,6 +301,9 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
   when its response was lost. An unavailable tombstone or failed cleanup stays an error.
 
   `tombstone_name` is always the data key's name, including for MAC and lookup keys.
+  With server retirement enabled, the transaction fences creation independently of this
+  client. A late legacy tombstone triggers idempotent server retirement, never separate
+  key deletion.
   """
   @spec create_transit_key(module(), String.t(), String.t(), map()) ::
           {:ok, term()} | {:error, term()}
@@ -155,7 +315,12 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
         result
 
       {:error, :destroyed} ->
-        with :ok <- delete_transit_key(provider, name), do: {:error, :destroyed}
+        if server_retirement?(provider) do
+          # Server transactions fence creation even when this client never resumes.
+          with :ok <- retire_scope(provider, tombstone_name), do: {:error, :destroyed}
+        else
+          with :ok <- delete_transit_key(provider, name), do: {:error, :destroyed}
+        end
 
       {:error, error} ->
         {:error, error}
@@ -269,6 +434,18 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
   """
   @spec check_tombstone(module(), String.t()) :: :absent | {:error, term()}
   def check_tombstone(provider, name) do
+    case check_legacy_tombstone(provider, name) do
+      :absent ->
+        if server_retirement?(provider), do: check_retirement(provider, name), else: :absent
+
+      other ->
+        other
+    end
+  end
+
+  @doc "Read only the KV tombstone, including during server-retirement migration."
+  @spec check_legacy_tombstone(module(), String.t()) :: :absent | {:error, term()}
+  def check_legacy_tombstone(provider, name) do
     case get(provider, kv_path(provider, "/data/tombstones/#{name}")) do
       {:ok, %{status: status, body: body}} ->
         case classify_tombstone(status, body) do
@@ -281,6 +458,36 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
         {:error, error}
     end
   end
+
+  defp check_retirement(provider, name) do
+    case get(provider, transit_path(provider, "/ashvault/retired/#{name}")) do
+      {:ok,
+       %{
+         status: 200,
+         body: %{
+           "data" => %{
+             "protocol" => @retirement_protocol,
+             "initialized" => true,
+             "retired" => retired
+           }
+         }
+       }}
+      when is_boolean(retired) ->
+        if retired, do: {:error, :destroyed}, else: :absent
+
+      {:error, error} ->
+        {:error, error}
+
+      {:ok, response} ->
+        retirement_failure(provider, response, :retirement_status_unavailable)
+    end
+  end
+
+  defp retirement_failure(provider, %{status: 403} = response, _reason),
+    do: unavailable!(provider, response)
+
+  defp retirement_failure(provider, _response, reason),
+    do: {:error, unavailable(provider, reason)}
 
   @doc """
   Classify a raw tombstone-read response into `:destroyed`, `:absent` or
@@ -576,8 +783,20 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
     case transport_status() do
       :ready ->
         case options |> put_connection_header(provider) |> Req.new() |> Req.request() do
-          {:ok, response} -> {:ok, tag_operation(response, provider, options)}
-          {:error, exception} -> {:error, unavailable(provider, transport_reason(exception))}
+          {:ok,
+           %{
+             status: 410,
+             body: %{"protocol" => @retirement_protocol, "ashvault_error" => "scope_retired"}
+           } = response} ->
+            if server_retirement?(provider),
+              do: {:error, :destroyed},
+              else: {:ok, tag_operation(response, provider, options)}
+
+          {:ok, response} ->
+            {:ok, tag_operation(response, provider, options)}
+
+          {:error, exception} ->
+            {:error, unavailable(provider, transport_reason(exception))}
         end
 
       {:not_started, app} ->
@@ -815,7 +1034,9 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
   The operation a request to `path` with `method` performs, as recorded on
   `AshVault.Errors.ProviderForbidden`: `:read_key`, `:create_key`, `:delete_key`,
   `:rotate_key`, `:configure_key`, `:encrypt`, `:decrypt`, `:hmac`, `:verify`, `:export`,
-  `:read_tombstone`, `:write_tombstone`, `:mount`, `:login`, or `:unknown`.
+  `:read_tombstone`, `:write_tombstone`, `:list_tombstones`, `:read_retirement`,
+  `:retire_scope`, `:initialize_retirement`, `:retirement_protocol`, `:mount`,
+  `:login`, or `:unknown`.
 
   Derived from the path, never from the response, and never carrying the key name.
   """
@@ -825,6 +1046,9 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
     tombstones = "/v1/#{kv_mount(provider)}/data/tombstones/"
 
     cond do
+      String.starts_with?(path, "/v1/#{kv_mount(provider)}/metadata/tombstones") ->
+        :list_tombstones
+
       String.starts_with?(path, transit) ->
         path
         |> String.replace_prefix(transit, "")
@@ -834,7 +1058,7 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
       String.starts_with?(path, tombstones) ->
         if method == :get, do: :read_tombstone, else: :write_tombstone
 
-      String.starts_with?(path, "/v1/sys/mounts/") ->
+      path == "/v1/sys/mounts" or String.starts_with?(path, "/v1/sys/mounts/") ->
         :mount
 
       String.starts_with?(path, "/v1/auth/") ->
@@ -848,6 +1072,10 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
   def operation(_provider, _method, _path), do: :unknown
 
   defp transit_operation(["keys", _name], :get), do: :read_key
+  defp transit_operation(["ashvault", "protocol"], :get), do: :retirement_protocol
+  defp transit_operation(["ashvault", "retired", _name], :get), do: :read_retirement
+  defp transit_operation(["ashvault", "retire", _name], :post), do: :retire_scope
+  defp transit_operation(["ashvault", "initialize"], :post), do: :initialize_retirement
   defp transit_operation(["keys", _name], :post), do: :create_key
   defp transit_operation(["keys", _name], :delete), do: :delete_key
   defp transit_operation(["keys", _name, "rotate"], _method), do: :rotate_key

@@ -88,13 +88,24 @@ the final trusted endpoint directly; `req_options` cannot enable redirect follow
 An operation that receives a redirect fails with `ProviderUnavailable` instead of
 forwarding its token or service-account JWT.
 
-Both OpenBao providers recheck the scope tombstone after every transit-key create
+With stock Transit (the default), both OpenBao providers recheck the scope tombstone after every transit-key create
 attempt, including failed responses. A create that races erasure deletes its late key
 and confirms absence before returning `:destroyed`; cleanup failures remain errors.
 Stop and drain writers before erasure when you need all physical key deletion complete
 at the return of `destroy/1`. A client that crashes after sending a create cannot run
 its cleanup; retry `destroy/1` after pending requests settle. The tombstone continues
 to block access while cleanup is retried.
+
+For server-enforced no-recreation, install the AshVault OpenBao retirement plugin and
+set `server_retirement: true` in either provider's configuration. It requires transactional
+OpenBao storage (tested with 2.6.2 Raft); stock Transit, an uninitialized plugin, unknown
+protocols and ambiguous responses fail closed. Never silently downgrade this setting.
+Use `mix ash_vault.openbao.init_retirement PROVIDER` with writers stopped during migration
+to import every existing KV tombstone before activation. Key names, versions, stored
+envelopes and lookup keys remain unchanged. Once active, each retirement atomically
+deletes all key purposes and prevents delayed creation even if the creator dies.
+The library also writes the KV tombstone for older clients. Retire through the provider;
+direct plugin retirement does not write KV, and needs tombstone export before a downgrade.
 
 ## Key caching: leave it off
 

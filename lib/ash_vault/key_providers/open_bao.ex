@@ -39,7 +39,16 @@ defmodule AshVault.KeyProviders.OpenBao do
         key_type: "aes256-gcm96",
         receive_timeout: 5_000,
         max_retries: 2,
-        reuse_connections: false
+        reuse_connections: false,
+        server_retirement: false
+
+  Stock Transit remains the default. With `server_retirement: true`, `setup/0` and
+  key operations require the initialized AshVault retirement plugin and transactional
+  server storage. `destroy/1` records the KV tombstone, then atomically retires the data,
+  MAC and lookup key names inside OpenBao. Delayed creates cannot commit after retirement,
+  including when their client crashes. There is no fallback to stock deletion. See
+  [Server-enforced retirement](openbao-in-kubernetes.md#server-enforced-retirement)
+  for installation and migration, including importing existing tombstones.
 
   Instead of `:token`, `auth: {:kubernetes, role: "..."}` logs in with the pod's
   service account through a supervised token holder, and `:cacertfile` (or
@@ -186,7 +195,7 @@ defmodule AshVault.KeyProviders.OpenBao do
   """
   @impl AshVault.KeyProvider
   @spec setup() :: :ok | {:error, Exception.t()}
-  def setup, do: Transport.ensure_kv_mount(__MODULE__)
+  def setup, do: Transport.setup(__MODULE__)
 
   @doc """
   The key size in bytes this provider mints, derived from the configured `:key_type`.
@@ -440,6 +449,14 @@ defmodule AshVault.KeyProviders.OpenBao do
   def destroy(scope) do
     name = key_name(scope)
 
+    if Transport.server_retirement?(__MODULE__) do
+      with :ok <- ensure_tombstone(scope), do: Transport.retire_scope(__MODULE__, name)
+    else
+      delete_scope_keys(scope, name)
+    end
+  end
+
+  defp delete_scope_keys(scope, name) do
     with :ok <- ensure_tombstone(scope),
          :ok <- Transport.delete_transit_key(__MODULE__, name),
          # Erasure must be total. A surviving lookup key would let anyone holding it
@@ -457,7 +474,7 @@ defmodule AshVault.KeyProviders.OpenBao do
   # a transit key. Retrying deletion here makes `destroy/1` both safe to interrupt and
   # honestly idempotent.
   defp ensure_tombstone(scope) do
-    case check_tombstone(scope) do
+    case Transport.check_legacy_tombstone(__MODULE__, key_name(scope)) do
       :absent -> Transport.write_tombstone(__MODULE__, key_name(scope))
       {:error, :destroyed} -> :ok
       other -> other

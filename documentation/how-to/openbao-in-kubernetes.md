@@ -113,6 +113,118 @@ Grant the policy only what the provider needs. The `OpenBaoTransit` moduledoc li
 paths. Do not grant `transit/export/*`: `AshVault.Macs.OpenBaoTransit` computes MACs
 with `transit/hmac` and `transit/verify`, so the MAC key never leaves OpenBao either.
 
+## Server-enforced retirement
+
+Stock Transit is the default (`server_retirement: false`). Its client-side tombstone
+recheck cannot clean up a delayed create when that client dies. For permanent
+no-recreation at the server, install the optional plugin from the repository's
+`openbao_plugin/` directory and set `server_retirement: true` on either provider.
+
+The plugin uses OpenBao SDK 2.7.1 transactions, tested against OpenBao 2.6.2 with Raft
+storage. A backend without transactional storage fails with HTTP 503. Every key
+operation, including export, rotation, AEAD and HMAC, checks the retirement marker
+in the same transaction as its key access. Retirement deletes policy and archive
+entries for all three key purposes and permanently marks their names. Concurrent
+creators cannot commit across that retirement transaction. A lost commit response
+remains an outage; repeat destruction until confirmed.
+
+This is a restricted Transit backend for AshVault keys, not a general Transit
+replacement. It supports the AES-GCM and ChaCha20-Poly1305 profiles used by AshVault,
+versioned exports, rotation, AEAD with associated data and SHA-256 HMAC. Derived,
+convergent, imported, soft-deleted, auto-rotating or plaintext-backup-enabled keys
+are refused. Import/restore, implicit creation, retirement deletion and other Transit
+operations are unavailable. Unsupported request options are rejected. Use a dedicated
+AshVault mount; inventory existing key profiles before upgrading one.
+
+### Build and install
+
+Build from a reviewed repository checkout with Go 1.27.3 or newer. The root Nix shell
+includes Go and OpenBao; the plugin adds no runtime dependency to an Elixir release.
+
+```sh
+cd openbao_plugin
+go build -trimpath -o ashvault-transit ./cmd/ashvault-transit
+sha256sum ashvault-transit
+```
+
+Copy the binary to each OpenBao node's configured `plugin_directory`, with execute
+permission for the OpenBao user. Register its SHA-256 using an operator token:
+
+```sh
+bao plugin register -sha256=SHA256 -command=ashvault-transit -version=v0.1.0 secret ashvault-transit
+bao secrets enable -path=ashvault-transit -plugin-version=v0.1.0 ashvault-transit
+bao secrets enable -path=ashvault -version=2 kv
+```
+
+Configure `transit_mount: "ashvault-transit"` and the existing `kv_mount`. Do not
+point an existing installation at a new empty mount: it would lose access to its keys.
+The mount refuses key operations until initialized. Grant the application these
+additional paths (replace the Transit mount prefix as configured):
+
+```hcl
+path "ashvault-transit/ashvault/protocol" { capabilities = ["read"] }
+path "ashvault-transit/ashvault/retired/*" { capabilities = ["read"] }
+path "ashvault-transit/ashvault/retire/*" { capabilities = ["update"] }
+```
+
+Retain the provider's ordinary key/crypto and KV permissions. The plugin does not
+need `delete` on key paths; use its retirement endpoint. Keep `sudo` on initialization,
+KV metadata deletion and mount/catalog administration out of application policies.
+
+### Upgrade an existing stock Transit mount
+
+Stop writers and drain requests once for this maintenance migration. Keep the same
+Transit and KV mounts. Register the binary under the existing plugin name `transit`
+with a custom version, tune the mount and reload it; **do not disable the mount**:
+
+```sh
+bao plugin register -sha256=SHA256 -command=ashvault-transit -version=v0.1.0 secret transit
+bao secrets tune -plugin-version=v0.1.0 transit/
+bao plugin reload -plugin=transit
+```
+
+This preserves stock Transit storage, including keys, versions and archives. Reloading
+by plugin name affects all mounts using it; use dedicated mounts and schedule accordingly.
+After installing or upgrading, import all previous KV tombstones before activation:
+
+```sh
+mix ash_vault.openbao.init_retirement AshVault.KeyProviders.OpenBao
+# Or the OpenBaoTransit provider, using its configured mounts.
+```
+
+Run with an operator token configured for that provider: `read` on `sys/mounts` to
+verify the configured store is KV-v2, `read`/`list` on
+`<kv_mount>/metadata/tombstones`, `read` on `<kv_mount>/data/tombstones/*`, `update`
+on `<transit_mount>/ashvault/retire/*`, and `update` plus `sudo` on
+`<transit_mount>/ashvault/initialize`, as well as protocol read access. Create the
+KV-v2 mount explicitly before a fresh installation's initialization. The task loads
+application configuration and starts only AshVault and its HTTP dependencies, not the
+consumer application. It imports soft-deleted tombstones too and stops on any unreadable
+or ambiguous entry. Interrupted imports are safe to repeat. Never initialize a migrated
+mount directly with `bao write`: skipping the tombstone import would lose old erasures.
+
+Set `server_retirement: true`, verify `provider.setup()` succeeds, then resume writers.
+No re-encryption or lookup-token rebuild is needed. Subsequent scope retirement needs
+no per-scope writer drain. Route requests to the active node as described above.
+
+The library retains KV tombstones as well as server markers. Reverting the application
+flag keeps recognizing scopes erased through the provider, but does not switch the
+server backend: stock-mode key deletion is unsupported by the plugin and fails closed.
+Reverting the mount implementation is a separate operator change: retain
+its storage and KV tombstones, stop writers, and reconcile every server retirement into
+KV first if operators used the raw plugin endpoint. Never remove or restore retirement
+metadata to reactivate a scope. No mode can revoke already-exported keys, recall
+in-flight responses or erase historical OpenBao snapshots/Raft logs.
+
+### Verify the plugin
+
+From `openbao_plugin/`, run `go test -race ./...`. For the real process/upgrade suite,
+run `ASHVAULT_BAO_INTEGRATION=1 go test -count=1 -timeout 3m ./...` with `bao`, `curl`,
+`go` and `rtk` on PATH (Linux). It starts its own disposable Raft server, upgrades stock
+keys in place, kills delayed clients and the plugin process, and restarts the server.
+The Elixir suite additionally accepts `ASHVAULT_RETIREMENT_MOUNT` naming an initialized
+plugin mount alongside the ordinary stock Transit test mount.
+
 ## A private CA
 
 `:cacertfile` is a path to a PEM bundle, typically a ConfigMap mounted as a file:

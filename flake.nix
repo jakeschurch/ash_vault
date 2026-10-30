@@ -38,6 +38,9 @@
 
           # OpenBao CLI, for inspecting transit keys and tombstones by hand.
           openbao
+
+          # Build/test the optional OpenBao server-retirement plugin.
+          go
         ];
 
         beam = with pkgs; [ erlang_28 elixir_1_18 ];

@@ -23,6 +23,13 @@ All notable changes to AshVault are recorded here. The format follows
 
 ### Added
 
+- Optional server-enforced OpenBao retirement: `server_retirement: true` on either
+  provider requires the AshVault external plugin and transactional storage. Retirement
+  atomically removes all key purposes and rejects delayed creates even after a client
+  crash. Stock Transit remains the default. The migration task
+  `mix ash_vault.openbao.init_retirement PROVIDER` imports existing KV tombstones;
+  existing key material, versions and ciphertext stay compatible.
+
 - `OpenBao.node_status/0`, `OpenBaoTransit.node_status/0` and
   `OpenBao.Transport.node_status/1`: the HA role (`:active`, `:standby`, `:sealed`,
   `:uninitialized`) of the node a request lands on, from `sys/health`, for boot probes

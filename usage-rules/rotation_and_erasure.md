@@ -52,6 +52,11 @@ mix ash_vault.destroy_keys MyApp.Accounts.User --tenant acme
   indexes, third parties). Inventory those first.
 - It does not defeat a **key backup**: a copy of the key store from before the destroy
   resurrects the data. Your key-backup retention is the real lifetime of a destroyed key.
+- OpenBao defaults to stock Transit with client cleanup: drain writers before requiring
+  complete deletion at return. Opt into `server_retirement: true` with the initialized
+  AshVault OpenBao plugin for atomic server deletion and permanent no-recreation even
+  when a delayed creator crashes. An uncertain server commit stays an outage and must
+  be retried. Migration requires importing existing KV tombstones before activation.
 
 ## `key_lifecycle` actions (from your app, with policies)
 

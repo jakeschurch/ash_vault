@@ -64,7 +64,16 @@ defmodule AshVault.KeyProviders.OpenBaoTransit do
         key_type: "aes256-gcm96",
         receive_timeout: 5_000,
         max_retries: 2,
-        reuse_connections: false
+        reuse_connections: false,
+        server_retirement: false
+
+  Stock Transit remains the default. `server_retirement: true` requires the initialized
+  AshVault retirement plugin and transactional server storage. It fences every Transit
+  operation at the server, including operations using a handle acquired before erasure,
+  and prevents delayed creates from committing after retirement even if their client
+  crashes. It never falls back to stock deletion. Live-scope checks add a server-retirement
+  status request to the round-trip counts above. See
+  [Server-enforced retirement](openbao-in-kubernetes.md#server-enforced-retirement).
 
   Instead of `:token`, `auth: {:kubernetes, role: "..."}` logs in with the pod's
   service account through a supervised token holder, and `:cacertfile` (or
@@ -230,7 +239,7 @@ defmodule AshVault.KeyProviders.OpenBaoTransit do
   """
   @impl AshVault.KeyProvider
   @spec setup() :: :ok | {:error, Exception.t()}
-  def setup, do: Transport.ensure_kv_mount(__MODULE__)
+  def setup, do: Transport.setup(__MODULE__)
 
   @doc """
   The HA role of the node a request lands on: `:active`, `:standby`, `:sealed` or
@@ -461,14 +470,19 @@ defmodule AshVault.KeyProviders.OpenBaoTransit do
   def destroy(scope) do
     name = key_name(scope)
 
-    with :ok <- ensure_tombstone(name),
-         :ok <- Transport.delete_transit_key(__MODULE__, name) do
-      Transport.delete_transit_key(__MODULE__, mac_key_name(scope))
+    with :ok <- ensure_tombstone(name) do
+      if Transport.server_retirement?(__MODULE__) do
+        Transport.retire_scope(__MODULE__, name)
+      else
+        with :ok <- Transport.delete_transit_key(__MODULE__, name) do
+          Transport.delete_transit_key(__MODULE__, mac_key_name(scope))
+        end
+      end
     end
   end
 
   defp ensure_tombstone(name) do
-    case check_tombstone(name) do
+    case Transport.check_legacy_tombstone(__MODULE__, name) do
       :absent -> Transport.write_tombstone(__MODULE__, name)
       {:error, :destroyed} -> :ok
       other -> other
