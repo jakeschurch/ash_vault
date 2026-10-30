@@ -274,7 +274,7 @@ defmodule AshVault.KeyProviders.OpenBaoTransit do
     # The tombstone is the DATA key name's: one tombstone per scope, covering every
     # purpose.
     with :absent <- check_tombstone(key_name(scope)),
-         {:ok, meta} <- mac_meta_or_create(name),
+         {:ok, meta} <- mac_meta_or_create(name, key_name(scope)),
          version = meta["latest_version"],
          {:ok, created_at} <- Transport.created_at(__MODULE__, meta, version) do
       {:ok, %{version: version, key: mac_handle(name, version), created_at: created_at}}
@@ -321,7 +321,8 @@ defmodule AshVault.KeyProviders.OpenBaoTransit do
          {:ok, meta} <- Transport.read_meta(__MODULE__, name) do
       case meta do
         :missing ->
-          with {:ok, created} <- create_mac_key(name), do: {:ok, created["latest_version"]}
+          with {:ok, created} <- create_mac_key(name, key_name(scope)),
+               do: {:ok, created["latest_version"]}
 
         _ ->
           with :ok <- check_mac_meta(name, meta),
@@ -349,7 +350,7 @@ defmodule AshVault.KeyProviders.OpenBaoTransit do
     name = key_name(scope)
 
     with :absent <- check_tombstone(name),
-         {:ok, meta} <- meta_or_create(name),
+         {:ok, meta} <- meta_or_create(name, key_name(scope)),
          :ok <- refuse_exportable(name, meta),
          version = meta["latest_version"],
          {:ok, created_at} <- Transport.created_at(__MODULE__, meta, version) do
@@ -430,7 +431,8 @@ defmodule AshVault.KeyProviders.OpenBaoTransit do
         :missing ->
           # No key yet: creating it mints version 1, which is the rotation. Matches
           # `AshVault.KeyProviders.Memory` and `AshVault.KeyProviders.OpenBao`.
-          with {:ok, created} <- create_key(name), do: {:ok, created["latest_version"]}
+          with {:ok, created} <- create_key(name, key_name(scope)),
+               do: {:ok, created["latest_version"]}
 
         _ ->
           with :ok <- refuse_exportable(name, meta),
@@ -526,22 +528,22 @@ defmodule AshVault.KeyProviders.OpenBaoTransit do
 
   defp check_tombstone(name), do: Transport.check_tombstone(__MODULE__, name)
 
-  defp meta_or_create(name) do
+  defp meta_or_create(name, tombstone_name) do
     case Transport.read_meta(__MODULE__, name) do
-      {:ok, :missing} -> create_key(name)
+      {:ok, :missing} -> create_key(name, tombstone_name)
       {:ok, meta} -> {:ok, meta}
       {:error, error} -> {:error, error}
     end
   end
 
-  defp create_key(name) do
+  defp create_key(name, tombstone_name) do
     body = %{
       type: key_type(),
       exportable: false,
       allow_plaintext_backup: false
     }
 
-    with {:ok, response} <- Transport.post(__MODULE__, path("/keys/#{name}"), body),
+    with {:ok, response} <- Transport.create_transit_key(__MODULE__, tombstone_name, name, body),
          {:ok, meta} <- transit_ok(response),
          :ok <- refuse_exportable(name, meta) do
       {:ok, meta}
@@ -565,10 +567,10 @@ defmodule AshVault.KeyProviders.OpenBaoTransit do
     end
   end
 
-  defp mac_meta_or_create(name) do
+  defp mac_meta_or_create(name, tombstone_name) do
     case Transport.read_meta(__MODULE__, name) do
       {:ok, :missing} ->
-        create_mac_key(name)
+        create_mac_key(name, tombstone_name)
 
       {:ok, meta} ->
         with :ok <- check_mac_meta(name, meta), do: {:ok, meta}
@@ -578,10 +580,10 @@ defmodule AshVault.KeyProviders.OpenBaoTransit do
     end
   end
 
-  defp create_mac_key(name) do
+  defp create_mac_key(name, tombstone_name) do
     body = %{type: "aes256-gcm96", exportable: false, allow_plaintext_backup: false}
 
-    with {:ok, response} <- Transport.post(__MODULE__, path("/keys/#{name}"), body),
+    with {:ok, response} <- Transport.create_transit_key(__MODULE__, tombstone_name, name, body),
          {:ok, meta} <- transit_ok(response),
          :ok <- check_mac_meta(name, meta) do
       {:ok, meta}

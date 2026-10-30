@@ -61,6 +61,7 @@ defmodule AshVault.KeyProviders.OpenBaoTransitStubbedTest do
                {"GET", "/v1/ashvault/data/tombstones/#{@name}"},
                {"GET", "/v1/transit/keys/#{@name}"},
                {"POST", "/v1/transit/keys/#{@name}"},
+               {"GET", "/v1/ashvault/data/tombstones/#{@name}"},
                {"POST", "/v1/transit/encrypt/#{@name}"}
              ]
 

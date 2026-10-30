@@ -89,29 +89,34 @@ defmodule AshVault.KeyProviders.OpenBaoCreateDestroyTest do
       assert Agent.get(context.server, & &1.keys) == %{}
     end
 
-    @tag provider: provider, operation: :current_mac
-    test "#{inspect(provider)} cleans up even when the create response is an error", context do
-      Agent.update(context.server, &%{&1 | create_status: 500})
-      {reader, creator} = paused_create(context)
-      assert :ok = context.provider.destroy(@scope)
-      send(creator, :finish_create)
+    for status <- [500, :timeout] do
+      @tag provider: provider, operation: :current_mac, create_status: status
+      test "#{inspect(provider)} cleans up a create whose response is #{status}", context do
+        Agent.update(context.server, &%{&1 | create_status: context.create_status})
+        {reader, creator} = paused_create(context)
+        assert :ok = context.provider.destroy(@scope)
+        send(creator, :finish_create)
 
-      assert {:error, :destroyed} = Task.await(reader)
-      assert Agent.get(context.server, & &1.keys) == %{}
+        assert {:error, :destroyed} = Task.await(reader)
+        assert Agent.get(context.server, & &1.keys) == %{}
+      end
     end
 
-    @tag provider: provider, operation: :current_mac
-    test "#{inspect(provider)} reports failed cleanup and lets destroy retry it", context do
-      {reader, creator} = paused_create(context)
-      assert :ok = context.provider.destroy(@scope)
-      Agent.update(context.server, &%{&1 | cleanup_status: 403})
-      send(creator, :finish_create)
+    for {status, error} <- [{403, ProviderForbidden}, {500, ProviderUnavailable}] do
+      @tag provider: provider, operation: :current_mac, cleanup_status: status, error: error
+      test "#{inspect(provider)} reports cleanup #{status} and lets destroy retry", context do
+        {reader, creator} = paused_create(context)
+        assert :ok = context.provider.destroy(@scope)
+        Agent.update(context.server, &%{&1 | cleanup_status: context.cleanup_status})
+        send(creator, :finish_create)
 
-      assert {:error, %ProviderForbidden{}} = Task.await(reader)
-      assert map_size(Agent.get(context.server, & &1.keys)) == 1
-      Agent.update(context.server, &%{&1 | cleanup_status: 200})
-      assert :ok = context.provider.destroy(@scope)
-      assert Agent.get(context.server, & &1.keys) == %{}
+        assert {:error, error} = Task.await(reader)
+        assert error.__struct__ == context.error
+        assert map_size(Agent.get(context.server, & &1.keys)) == 1
+        Agent.update(context.server, &%{&1 | cleanup_status: 200})
+        assert :ok = context.provider.destroy(@scope)
+        assert Agent.get(context.server, & &1.keys) == %{}
+      end
     end
 
     @tag provider: provider, operation: :current_mac
@@ -181,7 +186,11 @@ defmodule AshVault.KeyProviders.OpenBaoCreateDestroyTest do
 
       Agent.update(server, &%{&1 | keys: Map.put(&1.keys, name, meta)})
       if Agent.get(server, & &1.pause) == :after, do: pause(owner)
-      reply(conn, Agent.get(server, & &1.create_status), %{"data" => meta})
+
+      case Agent.get(server, & &1.create_status) do
+        :timeout -> Req.Test.transport_error(conn, :timeout)
+        status -> reply(conn, status, %{"data" => meta})
+      end
     end
   end
 
