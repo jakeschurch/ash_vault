@@ -71,6 +71,11 @@ defmodule AshVault.KeyProviders.OpenBaoRetirementTest do
 
   defp respond(%{scenario: :migration} = context, conn) do
     cond do
+      conn.request_path == "/v1/sys/mounts" ->
+        context[:mount_reply] ||
+          {200,
+           %{"data" => %{"ashvault/" => %{"type" => "kv", "options" => %{"version" => "2"}}}}}
+
       conn.request_path =~ "/protocol" ->
         {200, protocol(false)}
 
@@ -177,6 +182,20 @@ defmodule AshVault.KeyProviders.OpenBaoRetirementTest do
 
     assert_raise ArgumentError, ~r/server_retirement must be a boolean/, fn ->
       Transport.server_retirement?(OpenBao)
+    end
+  end
+
+  for reply <- [
+        {200, %{"data" => %{}}},
+        {200, %{"data" => %{"ashvault/" => %{"type" => "kv", "options" => %{"version" => "1"}}}}},
+        {200,
+         %{"data" => %{"ashvault/" => %{"type" => "transit", "options" => %{"version" => "2"}}}}},
+        {503, %{}}
+      ] do
+    @tag scenario: :migration, mount_reply: reply
+    test "migration refuses an unconfirmed KV-v2 mount #{inspect(reply)}", %{calls: calls} do
+      assert {:error, %ProviderUnavailable{}} = Transport.initialize_retirement(OpenBao)
+      refute Enum.any?(Agent.get(calls, & &1), &match?({"POST", _}, &1))
     end
   end
 
@@ -292,6 +311,7 @@ defmodule AshVault.KeyProviders.OpenBaoRetirementTest do
 
     assert Enum.reverse(Agent.get(calls, & &1)) == [
              {"GET", "/v1/transit/ashvault/protocol"},
+             {"GET", "/v1/sys/mounts"},
              {"GET", "/v1/ashvault/metadata/tombstones"},
              {"GET", "/v1/ashvault/data/tombstones/#{@name}"},
              {"POST", "/v1/transit/ashvault/retire/#{@name}"},

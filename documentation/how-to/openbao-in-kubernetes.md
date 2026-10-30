@@ -192,7 +192,8 @@ mix ash_vault.openbao.init_retirement AshVault.KeyProviders.OpenBao
 # Or the OpenBaoTransit provider, using its configured mounts.
 ```
 
-Run with an operator token configured for that provider: `read`/`list` on
+Run with an operator token configured for that provider: `read` on `sys/mounts` to
+verify the configured store is KV-v2, `read`/`list` on
 `<kv_mount>/metadata/tombstones`, `read` on `<kv_mount>/data/tombstones/*`, `update`
 on `<transit_mount>/ashvault/retire/*`, and `update` plus `sudo` on
 `<transit_mount>/ashvault/initialize`, as well as protocol read access. Create the

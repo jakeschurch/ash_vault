@@ -8,7 +8,8 @@ defmodule Mix.Tasks.AshVault.Openbao.InitRetirement do
 
   Run with writers stopped, after installing the plugin at the configured Transit
   mount. Uses the named provider's configuration and an operator token with `sudo`
-  on `<transit_mount>/ashvault/initialize`, plus read/list access to KV tombstones and
+  on `<transit_mount>/ashvault/initialize`, read access to `sys/mounts` to verify KV-v2,
+  plus read/list access to KV tombstones and
   update access to `<transit_mount>/ashvault/retire/*`. This task loads application
   configuration without starting the application, so an uninitialized plugin cannot
   deadlock application startup. The HTTP dependencies are started explicitly.

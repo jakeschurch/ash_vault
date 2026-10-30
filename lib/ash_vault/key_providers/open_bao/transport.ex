@@ -97,6 +97,7 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
   @spec initialize_retirement(module()) :: :ok | {:error, term()}
   def initialize_retirement(provider) do
     with :ok <- retirement_protocol(provider, false),
+         :ok <- verify_legacy_mount(provider),
          {:ok, names} <- legacy_tombstone_names(provider),
          :ok <- import_retirements(provider, names) do
       case post(provider, transit_path(provider, "/ashvault/initialize")) do
@@ -113,6 +114,24 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
         {:ok, response} ->
           retirement_failure(provider, response, :retirement_initialization_unconfirmed)
       end
+    end
+  end
+
+  defp verify_legacy_mount(provider) do
+    mount = String.trim_trailing(kv_mount(provider), "/") <> "/"
+
+    case get(provider, "/v1/sys/mounts") do
+      {:ok, %{status: 200, body: %{"data" => mounts}}} when is_map(mounts) ->
+        case Map.get(mounts, mount) do
+          %{"type" => "kv", "options" => %{"version" => "2"}} -> :ok
+          _ -> {:error, unavailable(provider, :legacy_kv_v2_mount_unconfirmed)}
+        end
+
+      {:error, error} ->
+        {:error, error}
+
+      {:ok, response} ->
+        retirement_failure(provider, response, :legacy_kv_v2_mount_unconfirmed)
     end
   end
 
@@ -1039,7 +1058,7 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
       String.starts_with?(path, tombstones) ->
         if method == :get, do: :read_tombstone, else: :write_tombstone
 
-      String.starts_with?(path, "/v1/sys/mounts/") ->
+      path == "/v1/sys/mounts" or String.starts_with?(path, "/v1/sys/mounts/") ->
         :mount
 
       String.starts_with?(path, "/v1/auth/") ->
