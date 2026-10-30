@@ -135,6 +135,34 @@ defmodule AshVault.KeyProviders.OpenBao.Transport do
   end
 
   @doc """
+  Create a transit key, then recheck the scope's tombstone before releasing the response.
+
+  The caller checks the tombstone before reading key metadata. That check alone cannot
+  fence a create request delayed until after `destroy/1` finishes deleting keys. If
+  erasure won the race, delete this key and confirm absence before reporting `:destroyed`.
+  The recheck also runs on failed requests: the server may have committed a create even
+  when its response was lost. An unavailable tombstone or failed cleanup stays an error.
+
+  `tombstone_name` is always the data key's name, including for MAC and lookup keys.
+  """
+  @spec create_transit_key(module(), String.t(), String.t(), map()) ::
+          {:ok, term()} | {:error, term()}
+  def create_transit_key(provider, tombstone_name, name, body) do
+    result = post(provider, transit_path(provider, "/keys/#{name}"), body)
+
+    case check_tombstone(provider, tombstone_name) do
+      :absent ->
+        result
+
+      {:error, :destroyed} ->
+        with :ok <- delete_transit_key(provider, name), do: {:error, :destroyed}
+
+      {:error, error} ->
+        {:error, error}
+    end
+  end
+
+  @doc """
   Delete a transit key, returning `:ok` only once it is **confirmed absent** by a fresh
   read.
 

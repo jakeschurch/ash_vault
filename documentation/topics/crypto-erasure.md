@@ -159,6 +159,21 @@ rotation, `AshVault.Vault.Runtime` raises `AshVault.Errors.KeyDestroyed` rather 
 falling back to the pre-destroy key. A rejected write is recoverable; a "successful" write
 storing ciphertext nobody can ever read is not.
 
+Both OpenBao providers also recheck the scope tombstone after attempting to create a
+transit key. A create request can be delayed until after `destroy/1` has already finished
+deleting keys. When its recheck observes the tombstone, the creator deletes that late
+key, confirms absence, and returns `:destroyed` without exporting it or returning a
+handle. This covers data keys, MAC keys, and the exportable provider's lookup keys,
+including first-use rotation. Failed create responses are rechecked too: the server may
+have committed a request whose response was lost. Cleanup failures remain errors and a
+repeated `destroy/1` resumes deletion.
+
+These HTTP operations are not one server-side transaction. Stop new writes and drain
+in-flight requests before erasing a scope if physical deletion must be complete when
+`destroy/1` returns. A creator that crashes after sending its request cannot perform its
+recheck; retry destruction after outstanding requests have settled. The persistent
+tombstone continues to block provider access throughout cleanup.
+
 ## Running it
 
 ```

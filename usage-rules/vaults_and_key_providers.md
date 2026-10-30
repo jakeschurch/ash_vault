@@ -88,6 +88,14 @@ the final trusted endpoint directly; `req_options` cannot enable redirect follow
 An operation that receives a redirect fails with `ProviderUnavailable` instead of
 forwarding its token or service-account JWT.
 
+Both OpenBao providers recheck the scope tombstone after every transit-key create
+attempt, including failed responses. A create that races erasure deletes its late key
+and confirms absence before returning `:destroyed`; cleanup failures remain errors.
+Stop and drain writers before erasure when you need all physical key deletion complete
+at the return of `destroy/1`. A client that crashes after sending a create cannot run
+its cleanup; retry `destroy/1` after pending requests settle. The tombstone continues
+to block access while cleanup is retried.
+
 ## Key caching: leave it off
 
 `cache: true` (or `cache: [ttl: ..., max_entries: ...]`) wraps the provider in a TTL cache.
