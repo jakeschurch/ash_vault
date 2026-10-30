@@ -67,6 +67,43 @@ defmodule AshVault.Macs.OpenBaoTransitTest do
   end
 
   describe "through a vault" do
+    test "a handle whose key was deleted reports a missing version", %{tenant: tenant} do
+      assert {:ok, %{key: handle}} = Provider.current_key(tenant, :mac)
+      assert {:ok, tag} = Mac.mac("payload", handle, "aad")
+      name = Provider.mac_key_name(tenant)
+
+      assert %Req.Response{status: 204} =
+               raw(:post, "/v1/#{@transit_mount}/keys/#{name}/config", %{deletion_allowed: true})
+
+      assert %Req.Response{status: 204} = raw(:delete, "/v1/#{@transit_mount}/keys/#{name}")
+
+      assert {:error, {:key_not_found, 1}} = Mac.verify("payload", tag, handle, "aad")
+      assert {:error, {:key_not_found, 1}} = Mac.mac("payload", handle, "aad")
+    end
+
+    test "a handle below the new minimum reports a retired version", %{tenant: tenant} do
+      assert {:ok, %{key: handle}} = Provider.current_key(tenant, :mac)
+      assert {:ok, tag} = Mac.mac("payload", handle, "aad")
+      assert {:ok, 2} = Provider.rotate(tenant, :mac)
+      name = Provider.mac_key_name(tenant)
+
+      assert %Req.Response{status: 204} =
+               raw(:post, "/v1/#{@transit_mount}/keys/#{name}/config", %{
+                 min_decryption_version: 2
+               })
+
+      assert {:error, {:key_not_found, 1}} = Mac.verify("payload", tag, handle, "aad")
+    end
+
+    test "a handle retained across scope erasure reports destruction", %{tenant: tenant} do
+      assert {:ok, %{key: handle}} = Provider.current_key(tenant, :mac)
+      assert {:ok, tag} = Mac.mac("payload", handle, "aad")
+      assert :ok = Provider.destroy(tenant)
+
+      assert {:error, :destroyed} = Mac.verify("payload", tag, handle, "aad")
+      assert {:error, :destroyed} = Mac.mac("payload", handle, "aad")
+    end
+
     test "mac! then verify_mac!", %{tenant: tenant} do
       ctx = Helpers.context_for(tenant)
 

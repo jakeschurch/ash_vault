@@ -254,6 +254,25 @@ defmodule AshVault.VaultMacTest do
   end
 
   describe "outages are not verdicts" do
+    test "a transit MAC over raw keys is a configuration error on every MAC operation" do
+      opts = %{
+        key_provider: Memory,
+        cipher: AshVault.Ciphers.AES.GCM,
+        envelope: AshVault.Envelope.V1,
+        scope: AshVault.Scopes.AshTenant,
+        rotation_policy: AshVault.RotationPolicies.Manual,
+        mac: AshVault.Macs.OpenBaoTransit
+      }
+
+      for operation <- [
+            fn -> AshVault.Vault.Runtime.mac!("payload", ctx(), opts) end,
+            fn -> AshVault.Vault.Runtime.mac_at!("payload", 1, ctx(), opts) end,
+            fn -> AshVault.Vault.Runtime.verify_mac!("payload", 1, <<0::256>>, ctx(), opts) end
+          ] do
+        assert_raise ArgumentError, ~r/requires AshVault.KeyProviders.OpenBaoTransit/, operation
+      end
+    end
+
     test "a provider outage is ProviderUnavailable, never InvalidMac or KeyDestroyed" do
       {version, tag} = TenantVault.mac!("payload", ctx())
       stop_supervised!(Memory)

@@ -7,6 +7,12 @@ All notable changes to AshVault are recorded here. The format follows
 
 ### Fixed
 
+- Legacy dual reads preserve fresh-read field authorization with bounded native sibling
+  reads while denying that authority to caller-supplied record loads. Row correspondence,
+  action inputs, tenant, filters, locks and pagination remain enforced.
+- Transit MAC configuration faults raise `ArgumentError` instead of a retryable outage.
+  Failed MAC operations recheck authoritative state to distinguish erasure, missing or
+  retired versions, policy refusals and unavailable infrastructure.
 - Exporting OpenBao binary scopes cannot collide with the native provider's key
   namespace. Ambiguous binary scopes use a versioned prefix with an explicit,
   transactional migration that preserves historical keys, lookup tokens and erasure.
@@ -27,6 +33,8 @@ All notable changes to AshVault are recorded here. The format follows
   request; `reuse_connections: true` restores pooling for non-HA servers.
 
 ### Added
+
+- Consumer usage rules ship with the optional `ash_vault_rustler` package.
 
 - `ASHVAULT_BACKEND=memory|openbao` selects integration tests across Elixir and Go;
   `openbao` runs stock Transit and retirement-plugin checks with one selector.
