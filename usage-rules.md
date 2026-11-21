@@ -137,6 +137,8 @@ instead of hand-rolling token hashing or `Vault.mac!/2` schemes. It generates
 - With the default `accepted_key_versions 1`, any `:mac` rotation revokes every token in the
   scope.
 - `revoked_when` must evaluate to exactly `false` for a live token. `nil` revokes.
+- For tokens handed to other services, add a `rotation` (successor minting, delivery,
+  quiet-period revocation) instead of rotating by hand.
 
 See `usage-rules/macaroons.md`.
 

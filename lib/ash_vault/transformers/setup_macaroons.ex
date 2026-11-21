@@ -9,6 +9,8 @@ defmodule AshVault.Transformers.SetupMacaroons do
       argument, `get? true`, backed by `AshVault.Macaroon.Preparations.Verify`
     * a code interface for each: `mint_<name>(identity, opts)` and
       `<name>_by_token(token, opts)`
+    * with a `rotation`, a generic action `:rotate_<name>` (or `rotate_action`) backed by
+      `AshVault.Macaroon.Actions.Rotate`
 
   An action of either name that already exists is a DSL error rather than a silent skip:
   a hand-written action of that name would not verify anything.
@@ -122,8 +124,34 @@ defmodule AshVault.Transformers.SetupMacaroons do
              description:
                "Read the record a #{inspect(definition.name)} macaroon names, verifying it."
            ),
-         {:ok, dsl} <- Builder.add_interface(dsl, mint, args: [attribute.name]) do
-      Builder.add_interface(dsl, read, args: [:token], get?: true)
+         {:ok, dsl} <- Builder.add_interface(dsl, mint, args: [attribute.name]),
+         {:ok, dsl} <- Builder.add_interface(dsl, read, args: [:token], get?: true) do
+      add_rotation(dsl, definition)
+    end
+  end
+
+  defp add_rotation(dsl, %Definition{rotation: nil}), do: {:ok, dsl}
+
+  defp add_rotation(dsl, %Definition{rotation: rotation} = definition) do
+    name = AshVault.Macaroon.Rotation.Definition.rotate_action(rotation, definition.name)
+
+    if Ash.Resource.Info.action(dsl, name) do
+      {:error,
+       Spark.Error.DslError.exception(
+         module: Transformer.get_persisted(dsl, :module),
+         path: [:ash_vault, :macaroon, definition.name, :rotation],
+         message:
+           "macaroon #{inspect(definition.name)} generates the rotate action " <>
+             "#{inspect(name)}, but one already exists. Rename it, or set `rotate_action`."
+       )}
+    else
+      Builder.add_action(dsl, :action, name,
+        returns: :boolean,
+        allow_nil?: false,
+        transaction?: false,
+        run: {AshVault.Macaroon.Actions.Rotate, macaroon: definition.name},
+        description: "Reconcile every rotated #{inspect(definition.name)} credential once."
+      )
     end
   end
 end
