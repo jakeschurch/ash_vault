@@ -5,6 +5,24 @@ All notable changes to AshVault are recorded here. The format follows
 
 ## Unreleased
 
+## 0.3.0 - 2026-11-21
+
+### Added
+
+- Automatic macaroon credential rotation: a `rotation` entity inside `macaroon`
+  (`AshVault.Macaroon.Rotation`). A generated rotate action, to schedule with AshOban or
+  any scheduler, mints a successor at two thirds of each credential's lifetime. It stages
+  the successor, delivers it to every consumer, and revokes the predecessor once its
+  `last_used_at` has been quiet for the quiet period. Every failure keeps a valid token
+  with consumers. Credentials and their state come from an
+  `AshVault.Macaroon.Rotation.Source`, and tokens reach consumers through an
+  `AshVault.Macaroon.Rotation.Delivery`.
+- `AshVault.Macaroon.Rotation.OpenBaoKV`: a delivery to OpenBao KV v2 for consumers that
+  read through External Secrets Operator. It reuses a configured OpenBao key provider's
+  connection.
+- `[:ash_vault, :macaroon, :rotation, *]` telemetry events, and a guide covering metrics
+  and alerts ([Macaroon rotation](documentation/topics/macaroon-rotation.md)).
+
 ## 0.2.0 - 2026-10-30
 
 ### Fixed

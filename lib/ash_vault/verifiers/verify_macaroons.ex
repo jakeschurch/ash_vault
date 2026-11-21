@@ -18,6 +18,8 @@ defmodule AshVault.Verifiers.VerifyMacaroons do
     * every caveat has a type with a stable encoding (`AshVault.Macaroon.CaveatCodec`), a
       name other than the reserved `:expires_at`, and a check module that is compiled
       and exports `check/3`
+    * a `rotation` names a create `issue_action`, an update `revoke_action`, datetime
+      expiry and last-used attributes, and the macaroon has a finite `max_ttl`
   """
 
   use Spark.Dsl.Verifier
@@ -101,8 +103,54 @@ defmodule AshVault.Verifiers.VerifyMacaroons do
          :ok <- verify_scope(dsl, module, definition),
          :ok <- verify_primary_read(dsl, module, definition),
          :ok <- verify_ttl(module, definition),
-         :ok <- verify_key_window(module, definition) do
-      verify_caveats(module, definition)
+         :ok <- verify_key_window(module, definition),
+         :ok <- verify_caveats(module, definition) do
+      verify_rotation(dsl, module, definition)
+    end
+  end
+
+  defp verify_rotation(_dsl, _module, %{rotation: nil}), do: :ok
+
+  defp verify_rotation(dsl, module, %{rotation: rotation} = definition) do
+    path = [:ash_vault, :macaroon, definition.name, :rotation]
+
+    checks = [
+      {Ash.Resource.Info.action(dsl, rotation.issue_action), :create, :issue_action},
+      {Ash.Resource.Info.action(dsl, rotation.revoke_action), :update, :revoke_action}
+    ]
+
+    with :ok <- verify_rotation_actions(module, path, checks),
+         :ok <- verify_rotation_attribute(dsl, module, path, rotation.expires_at_attribute),
+         :ok <- verify_rotation_attribute(dsl, module, path, rotation.last_used_at_attribute) do
+      if definition.max_ttl in [nil, :infinity],
+        do:
+          error(
+            module,
+            path(definition, :max_ttl),
+            "a macaroon with `rotation` requires a finite `max_ttl`: it bounds every " <>
+              "rotated credential's lifetime"
+          ),
+        else: :ok
+    end
+  end
+
+  defp verify_rotation_actions(module, path, checks) do
+    Enum.reduce_while(checks, :ok, fn
+      {%{type: type}, type, _option}, :ok ->
+        {:cont, :ok}
+
+      {_action, type, option}, :ok ->
+        {:halt, error(module, path ++ [option], "`#{option}` must name a #{type} action")}
+    end)
+  end
+
+  defp verify_rotation_attribute(dsl, module, path, name) do
+    case Ash.Resource.Info.attribute(dsl, name) do
+      %{type: type} when type in [Ash.Type.UtcDatetimeUsec, Ash.Type.UtcDatetime] ->
+        :ok
+
+      _other ->
+        error(module, path, "rotation needs a `:utc_datetime_usec` attribute #{inspect(name)}")
     end
   end
 

@@ -203,4 +203,59 @@ defmodule AshVault.Macaroon.VerifierTest do
       assert_error(define(AshVault.Test.MacVerifyWindow, macaroon), "window/1")
     end
   end
+
+  describe "rotation" do
+    defp rotation_block(opts) do
+      """
+          macaroon :m do
+            prefix "avrot"
+            identity :id
+            default_ttl 60
+            #{Keyword.get(opts, :max_ttl, "max_ttl 600")}
+
+            rotation do
+              source AshVault.Test.Rotation.Source
+              delivery AshVault.Test.Rotation.Delivery
+              issue_action #{inspect(Keyword.get(opts, :issue, :create))}
+              revoke_action :revoke
+              #{Keyword.get(opts, :extra, "")}
+            end
+          end
+      """
+    end
+
+    @rotation_extra """
+      attributes do
+        attribute :expires_at, :utc_datetime_usec, public?: true
+        attribute :last_used_at, :utc_datetime_usec, public?: true
+      end
+
+      actions do
+        update :revoke
+      end
+    """
+
+    test "generates the rotate action" do
+      assert :ok = define(AshVault.Test.VerRotOk, rotation_block([]), extra: @rotation_extra)
+      action = Ash.Resource.Info.action(AshVault.Test.VerRotOk, :rotate_m)
+      assert action.type == :action and action.returns == Ash.Type.Boolean
+    end
+
+    test "issue_action must be a create" do
+      define(AshVault.Test.VerRotIssue, rotation_block(issue: :revoke), extra: @rotation_extra)
+      |> assert_error("`issue_action` must name a create action")
+    end
+
+    test "needs a finite max_ttl" do
+      define(AshVault.Test.VerRotTtl, rotation_block(max_ttl: ""), extra: @rotation_extra)
+      |> assert_error("requires a finite `max_ttl`")
+    end
+
+    test "needs the expiry and last-used attributes" do
+      define(AshVault.Test.VerRotAttr, rotation_block(extra: "last_used_at_attribute :seen_at"),
+        extra: @rotation_extra
+      )
+      |> assert_error(":seen_at")
+    end
+  end
 end

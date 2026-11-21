@@ -4,7 +4,7 @@ defmodule AshVault.MixProject do
   def project do
     [
       app: :ash_vault,
-      version: "0.2.0",
+      version: "0.3.0",
       elixir: "~> 1.17",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
@@ -52,6 +52,7 @@ defmodule AshVault.MixProject do
         "documentation/topics/searchable-fields.md",
         "documentation/topics/key-purposes-and-macs.md",
         "documentation/topics/macaroons.md",
+        "documentation/topics/macaroon-rotation.md",
         "documentation/topics/threat-model.md",
         "documentation/topics/operations.md",
         "documentation/how-to/openbao-in-kubernetes.md",
@@ -112,6 +113,21 @@ defmodule AshVault.MixProject do
           AshVault.Macaroon.Clock,
           AshVault.Macaroon.Definition,
           AshVault.Macaroon.CaveatDefinition
+        ],
+        "Macaroon rotation": [
+          AshVault.Macaroon.Rotation,
+          AshVault.Macaroon.Rotation.Source,
+          AshVault.Macaroon.Rotation.Delivery,
+          AshVault.Macaroon.Rotation.OpenBaoKV,
+          AshVault.Macaroon.Rotation.Spec,
+          AshVault.Macaroon.Rotation.Item,
+          AshVault.Macaroon.Rotation.Context,
+          AshVault.Macaroon.Rotation.State,
+          AshVault.Macaroon.Rotation.Entry,
+          AshVault.Macaroon.Rotation.Failure,
+          AshVault.Macaroon.Rotation.Secret,
+          AshVault.Macaroon.Rotation.Definition,
+          AshVault.Macaroon.Actions.Rotate
         ],
         "Crypto core": [
           AshVault.Vault,

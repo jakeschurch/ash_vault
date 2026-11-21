@@ -149,6 +149,71 @@ defmodule AshVault.Dsl do
     ]
   }
 
+  @rotation %Spark.Dsl.Entity{
+    name: :rotation,
+    describe: """
+    Rotate this macaroon's credentials automatically: mint a successor at two thirds of
+    each credential's lifetime, deliver it, and revoke the predecessor once it has gone
+    unused for the quiet period. Generates a rotate action to schedule. See
+    [Macaroon rotation](macaroon-rotation.md).
+    """,
+    examples: [
+      """
+      rotation do
+        source MyApp.Credentials.RotationSource
+        delivery AshVault.Macaroon.Rotation.OpenBaoKV
+        issue_action :issue
+        revoke_action :revoke
+      end
+      """
+    ],
+    target: AshVault.Macaroon.Rotation.Definition,
+    schema: [
+      source: [
+        type: {:behaviour, AshVault.Macaroon.Rotation.Source},
+        required: true,
+        doc: "Lists the credentials to rotate and stores their state."
+      ],
+      delivery: [
+        type: {:behaviour, AshVault.Macaroon.Rotation.Delivery},
+        required: true,
+        doc: "Stages each minted token and hands it to the credential's consumers."
+      ],
+      issue_action: [
+        type: :atom,
+        required: true,
+        doc:
+          "A create action taking the spec's `attributes` plus the expiry attribute. " <>
+            "It must not mint a token itself: rotation mints through the macaroon."
+      ],
+      revoke_action: [
+        type: :atom,
+        required: true,
+        doc: "An update action, taking no input, after which `revoked_when` holds."
+      ],
+      expires_at_attribute: [
+        type: :atom,
+        default: :expires_at,
+        doc: "The credential's expiry attribute (`:utc_datetime_usec`)."
+      ],
+      last_used_at_attribute: [
+        type: :atom,
+        default: :last_used_at,
+        doc:
+          "When the credential was last used, kept current by the application on " <>
+            "verification. It is how consumers confirm they moved on."
+      ],
+      quiet_period: [
+        type: :pos_integer,
+        default: 3600,
+        doc:
+          "Seconds a superseded credential must go unused before it is revoked, unless " <>
+            "a credential's spec sets its own."
+      ],
+      rotate_action: [type: :atom, doc: "Name of the generated rotate action. `:rotate_<name>`."]
+    ]
+  }
+
   @macaroon %Spark.Dsl.Entity{
     name: :macaroon,
     describe: """
@@ -171,7 +236,8 @@ defmodule AshVault.Dsl do
     imports: [Ash.Expr],
     args: [:name],
     identifier: :name,
-    entities: [caveats: [@caveat]],
+    entities: [caveats: [@caveat], rotation: [@rotation]],
+    singleton_entity_keys: [:rotation],
     schema: [
       name: [type: :atom, required: true, doc: "The macaroon's name."],
       prefix: [

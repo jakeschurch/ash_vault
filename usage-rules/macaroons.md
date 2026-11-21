@@ -110,3 +110,21 @@ into a 401.
 Never log tokens. Never return the precise rejection reason to the holder. For operators,
 attach a handler to `[:ash_vault, :macaroon, :rejected]` telemetry, which carries the
 precise `:reason`.
+
+## Automatic rotation
+
+For tokens placed in consumers' configuration, add a `rotation` inside the `macaroon`
+instead of rotating by hand or writing a scheduler. See
+[Macaroon rotation](../documentation/topics/macaroon-rotation.md).
+
+- The DSL holds wiring (`source`, `delivery`, `issue_action`, `revoke_action`). Lifetime,
+  grant, caveats and consumers are per credential, from the source's `Spec`.
+- `issue_action` must only write the row. Rotation mints the token through the macaroon.
+- The macaroon needs a finite `max_ttl`. A credential's `lifetime` is held to it.
+- Keep the `last_used_at` attribute current on verification. Rotation revokes a
+  superseded credential only after it has gone unused for the quiet period.
+- Schedule the generated rotate action (AshOban `scheduled_actions`, one node at a time).
+- With `AshVault.Macaroon.Rotation.OpenBaoKV` and External Secrets, keep
+  `refreshInterval` well under the quiet period. Restart start-only consumers with
+  Reloader on the synced Secret; rotation never restarts workloads.
+- Never log or inspect `Secret.reveal/1`'s result. Deliveries call it only to write.

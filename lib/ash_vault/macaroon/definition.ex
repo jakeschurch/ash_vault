@@ -17,6 +17,7 @@ defmodule AshVault.Macaroon.Definition do
     accepted_key_versions: 1,
     require_authorize_enforcement?: false,
     caveats: [],
+    rotation: nil,
     __spark_metadata__: nil
   ]
 
@@ -31,7 +32,8 @@ defmodule AshVault.Macaroon.Definition do
           require_authorize_enforcement?: boolean(),
           mint_action: atom() | nil,
           read_action: atom() | nil,
-          caveats: [AshVault.Macaroon.CaveatDefinition.t()]
+          caveats: [AshVault.Macaroon.CaveatDefinition.t()],
+          rotation: AshVault.Macaroon.Rotation.Definition.t() | nil
         }
 
   @doc "The generated mint action's name: `mint_action`, or `:mint_<name>`."
