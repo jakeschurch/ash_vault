@@ -8,8 +8,8 @@ Optional. The parent `ash_vault` has no Rust dependency and never will.
 ```elixir
 def deps do
   [
-    {:ash_vault, "~> 0.2.0"},
-    {:ash_vault_rustler, "~> 0.2.0"}
+    {:ash_vault, "~> 0.3.0"},
+    {:ash_vault_rustler, "~> 0.3.0"}
   ]
 end
 ```
@@ -279,7 +279,7 @@ Artifacts cover Linux GNU and musl, plus macOS, on x86_64 and aarch64. Each uses
 
 1. Update the versions in both Mix projects and the native crate, plus the changelog.
    Run the local suites and the release workflow with `dry_run=true` before merging.
-2. Push the matching `v<version>` tag, for example `v0.2.0`. The release workflow tests
+2. Push the matching `v<version>` tag, for example `v0.3.0`. The release workflow tests
    both packages, builds all six NIF artifacts and publishes `ash_vault` to Hex.
 3. The workflow generates checksums from the published artifacts, includes them in the
    `ash_vault_rustler` Hex package, and opens a PR to retain the checksum file in Git.
