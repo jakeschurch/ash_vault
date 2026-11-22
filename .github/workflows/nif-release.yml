@@ -56,8 +56,13 @@ jobs:
           - { target: aarch64-unknown-linux-gnu,   os: ubuntu-24.04-arm, nif: "2.16" }
           - { target: x86_64-unknown-linux-musl,   os: ubuntu-22.04,    nif: "2.16", musl: true }
           - { target: aarch64-unknown-linux-musl,  os: ubuntu-24.04-arm, nif: "2.16", musl: true }
-          - { target: x86_64-apple-darwin,         os: macos-14,        nif: "2.16" }
-          - { target: aarch64-apple-darwin,        os: macos-14,        nif: "2.16" }
+          # GitHub retired the macos-14 image ("The configuration
+          # 'macos-14-arm64-us-default' is not supported", 2026-11-21), which
+          # cancelled both macOS jobs of the v0.3.0 run before they started.
+          # macos-latest is Apple Silicon; the x86_64 target cross-compiles
+          # there (rust-toolchain installs it, cargo builds with --target).
+          - { target: x86_64-apple-darwin,         os: macos-latest,    nif: "2.16" }
+          - { target: aarch64-apple-darwin,        os: macos-latest,    nif: "2.16" }
 
     steps:
       - uses: actions/checkout@v4
