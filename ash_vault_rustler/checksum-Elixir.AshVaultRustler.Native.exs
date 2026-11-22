@@ -1,8 +1,8 @@
 %{
-  "libashvault_nif-v0.2.0-nif-2.16-aarch64-apple-darwin.so.tar.gz" => "sha256:eedc2e92c77292a9b9389d4359a47476dce40f9fec06ca018a6759c2e8a6af37",
-  "libashvault_nif-v0.2.0-nif-2.16-aarch64-unknown-linux-gnu.so.tar.gz" => "sha256:46582ab02914480c20135c380f005f130cd6e75c78a9d23d2cfed388ef95f2b4",
-  "libashvault_nif-v0.2.0-nif-2.16-aarch64-unknown-linux-musl.so.tar.gz" => "sha256:54d5b604bed44f4d112ac054d04760f98b3bc593eca1d6a27eef8c9e8adce5e7",
-  "libashvault_nif-v0.2.0-nif-2.16-x86_64-apple-darwin.so.tar.gz" => "sha256:8fbc463d4c59aabb5ca087b248b2630f50004693d29db02b1fb6a9baa068cd4d",
-  "libashvault_nif-v0.2.0-nif-2.16-x86_64-unknown-linux-gnu.so.tar.gz" => "sha256:152e14c40fb1f1fe3368cae1993797ec134450b2637a482690539c84de4bc3d6",
-  "libashvault_nif-v0.2.0-nif-2.16-x86_64-unknown-linux-musl.so.tar.gz" => "sha256:ce6150f639809865a461ab6bd8ec3fa8b5f3bb8d5879068864d30c3fd17e82d7",
+  "libashvault_nif-v0.3.0-nif-2.16-aarch64-apple-darwin.so.tar.gz" => "sha256:ac25a7e71f6be465ac4e4b473c7f010430994630452243fbfb8db213ab03d3ba",
+  "libashvault_nif-v0.3.0-nif-2.16-aarch64-unknown-linux-gnu.so.tar.gz" => "sha256:f43c75972bd4e7e6623076a0bf06fe779b8c6dd3d8b8eb984396e3b9cde1718b",
+  "libashvault_nif-v0.3.0-nif-2.16-aarch64-unknown-linux-musl.so.tar.gz" => "sha256:b5f7eeb0dc6be8743e1376b7d5d01f249395fe352ab29f62d1df107f7e25041c",
+  "libashvault_nif-v0.3.0-nif-2.16-x86_64-apple-darwin.so.tar.gz" => "sha256:ec2add13cfd87b3f85d1de9c8404277ea82fe843c1d66478ab63e8e8177add6d",
+  "libashvault_nif-v0.3.0-nif-2.16-x86_64-unknown-linux-gnu.so.tar.gz" => "sha256:304eb1875e4ccb4e1082d7e86aee20c9e6492c648c287d20c263c109051119b9",
+  "libashvault_nif-v0.3.0-nif-2.16-x86_64-unknown-linux-musl.so.tar.gz" => "sha256:3fc7b60a77841af666408313438c2e4bdae3fb343562443761b3af6868abb6bd",
 }
