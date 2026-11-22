@@ -53,4 +53,5 @@
 # - github.org
 # - github.repo
 
-sync.remote: "git+ssh://git@github.com/jakeschurch/ash_vault.git"
+sync:
+    remote: "git+ssh://git@192.168.100.143/jake/ash_vault.git"
